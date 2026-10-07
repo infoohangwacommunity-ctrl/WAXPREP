@@ -39,6 +39,10 @@ def pg_store() -> Iterator[PostgresStorage]:
             "attachments, messages, conversations, channel_identities, "
             "students, schema_migrations CASCADE"
         )
+        cur.execute("DROP FUNCTION IF EXISTS waxprep_lookup_channel(TEXT, TEXT)")
+        cur.execute("DROP FUNCTION IF EXISTS waxprep_current_wax_id()")
+        cur.execute("DROP FUNCTION IF EXISTS waxprep_lookup_channel(TEXT, TEXT)")
+        cur.execute("DROP FUNCTION IF EXISTS waxprep_current_wax_id()")
     conn.commit()
     apply_migrations(conn)
     yield PostgresStorage(conn)

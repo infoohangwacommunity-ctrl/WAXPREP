@@ -89,3 +89,13 @@ Ownership required in storage APIs; regression-tested.
 
 ## D013 — Offline tests
 In-memory by default; CI provides PostgreSQL via DATABASE_URL.
+
+
+## D014 — PostgreSQL Row-Level Security
+
+**Status:** Accepted
+
+Student-scoped tables use ENABLE + FORCE ROW LEVEL SECURITY.
+Policies restrict rows to `app.current_wax_id` (session GUC).
+Channel identity lookup by external id uses a SECURITY DEFINER function.
+Isolation is tested at the SQL layer, not only via Python storage APIs.

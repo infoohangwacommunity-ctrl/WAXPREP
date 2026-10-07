@@ -94,3 +94,11 @@ Foundation does not implement a database or memory system.
 - **Events**: minimal domain events without full message bodies.
 - **PostgreSQL** + SQL migrations; ownership-scoped storage APIs.
 - **Clock**: SystemClock / FakeClock (UTC aware).
+
+
+### Student isolation layers
+
+1. Ownership-scoped storage APIs (require WAX ID)
+2. Foreign keys to `students(wax_id)`
+3. PostgreSQL Row-Level Security (`FORCE`) with `app.current_wax_id`
+4. Regression tests at application and SQL levels

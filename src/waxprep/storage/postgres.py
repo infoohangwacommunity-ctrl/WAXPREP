@@ -24,6 +24,7 @@ from waxprep.domain.models import (
     StudentStatus,
     new_id,
 )
+from waxprep.storage.session import set_current_wax_id
 
 
 class PostgresStorage:
@@ -33,6 +34,7 @@ class PostgresStorage:
         self._conn = conn
 
     def create_student(self, student: Student) -> Student:
+        set_current_wax_id(self._conn, student.wax_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO students (wax_id, status, created_at, updated_at) "
@@ -48,6 +50,7 @@ class PostgresStorage:
         return student
 
     def get_student(self, wax_id: WaxId) -> Student | None:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT wax_id, status, created_at, updated_at "
@@ -65,6 +68,7 @@ class PostgresStorage:
         )
 
     def create_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity:
+        set_current_wax_id(self._conn, identity.wax_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO channel_identities "
@@ -87,8 +91,7 @@ class PostgresStorage:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, channel, external_id, created_at "
-                "FROM channel_identities "
-                "WHERE channel = %s AND external_id = %s",
+                "FROM waxprep_lookup_channel(%s, %s)",
                 (channel, external_id),
             )
             row = cur.fetchone()
@@ -103,6 +106,7 @@ class PostgresStorage:
         )
 
     def create_conversation(self, conversation: Conversation) -> Conversation:
+        set_current_wax_id(self._conn, conversation.wax_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO conversations (id, wax_id, created_at, updated_at) "
@@ -120,6 +124,7 @@ class PostgresStorage:
     def get_conversation(
         self, wax_id: WaxId, conversation_id: UUID
     ) -> Conversation | None:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, created_at, updated_at FROM conversations "
@@ -137,6 +142,7 @@ class PostgresStorage:
         )
 
     def create_message(self, message: Message) -> Message:
+        set_current_wax_id(self._conn, message.wax_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO messages "
@@ -158,6 +164,7 @@ class PostgresStorage:
     def get_message(
         self, wax_id: WaxId, conversation_id: UUID, message_id: UUID
     ) -> Message | None:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, conversation_id, role, content_type, "
@@ -181,6 +188,7 @@ class PostgresStorage:
     def list_messages(
         self, wax_id: WaxId, conversation_id: UUID
     ) -> tuple[Message, ...]:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, conversation_id, role, content_type, "
@@ -204,6 +212,7 @@ class PostgresStorage:
         )
 
     def create_attachment(self, attachment: Attachment) -> Attachment:
+        set_current_wax_id(self._conn, attachment.wax_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO attachments "
@@ -225,6 +234,7 @@ class PostgresStorage:
         return attachment
 
     def get_attachment(self, wax_id: WaxId, attachment_id: UUID) -> Attachment | None:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, message_id, media_category, mime_type, "
@@ -247,6 +257,7 @@ class PostgresStorage:
         )
 
     def get_or_create_notebook(self, wax_id: WaxId, now: object) -> Notebook:
+        set_current_wax_id(self._conn, wax_id)
         existing = self.get_notebook(wax_id)
         if existing is not None:
             return existing
@@ -276,6 +287,7 @@ class PostgresStorage:
         return notebook
 
     def get_notebook(self, wax_id: WaxId) -> Notebook | None:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, version, created_at, updated_at "
@@ -294,6 +306,7 @@ class PostgresStorage:
         )
 
     def add_notebook_entry(self, entry: NotebookEntry) -> NotebookEntry:
+        set_current_wax_id(self._conn, entry.wax_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO notebook_entries "
@@ -318,6 +331,7 @@ class PostgresStorage:
     def list_notebook_entries(
         self, wax_id: WaxId, notebook_id: UUID
     ) -> tuple[NotebookEntry, ...]:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, notebook_id, schema_version, payload, "
@@ -349,6 +363,8 @@ class PostgresStorage:
         return tuple(result)
 
     def append_event(self, event: Event) -> Event:
+        if event.wax_id is not None:
+            set_current_wax_id(self._conn, event.wax_id)
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO events "
@@ -368,6 +384,7 @@ class PostgresStorage:
         return event
 
     def list_events(self, wax_id: WaxId) -> tuple[Event, ...]:
+        set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT id, wax_id, kind, object_type, object_id, "
