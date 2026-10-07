@@ -22,7 +22,11 @@ from waxprep.domain.models import (
 )
 from waxprep.migrations import apply_migrations
 from waxprep.storage.postgres import PostgresStorage
-from waxprep.storage.session import clear_current_wax_id, set_current_wax_id
+from waxprep.storage.session import (
+    assume_app_role,
+    clear_current_wax_id,
+    set_current_wax_id,
+)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.postgres
@@ -79,6 +83,8 @@ def test_rls_blocks_cross_student_select(conn: psycopg.Connection[Any]) -> None:
     )
     store.create_message(msg)
 
+    # Enforce RLS as non-superuser (superusers bypass RLS).
+    assume_app_role(conn)
     set_current_wax_id(conn, b.wax_id)
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM conversations WHERE id = %s", (conv.id,))
@@ -117,6 +123,7 @@ def test_rls_rejects_insert_for_other_student(conn: psycopg.Connection[Any]) -> 
     )
     store.create_student(a)
     other = new_wax_id()
+    assume_app_role(conn)
     set_current_wax_id(conn, a.wax_id)
     with conn.cursor() as cur, pytest.raises(psycopg.Error):
         cur.execute(

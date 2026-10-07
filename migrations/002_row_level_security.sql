@@ -3,19 +3,33 @@
 -- FORCE ROW LEVEL SECURITY so even table owners cannot bypass policies.
 
 -- Application role used by the storage layer (non-superuser).
+-- Non-superuser application role (superusers always bypass RLS).
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waxprep_app') THEN
-        CREATE ROLE waxprep_app NOINHERIT;
+        CREATE ROLE waxprep_app NOINHERIT NOSUPERUSER NOBYPASSRLS
+            LOGIN PASSWORD 'waxprep_app';
     END IF;
 END
 $$;
 
 GRANT USAGE ON SCHEMA public TO waxprep_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO waxprep_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO waxprep_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO waxprep_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    students, channel_identities, conversations, messages,
+    attachments, notebooks, notebook_entries, events
+    TO waxprep_app;
+-- Allow migrator/superuser to SET ROLE waxprep_app in tests/CI.
+DO $$
+BEGIN
+    -- Grant membership so the bootstrap role can SET ROLE waxprep_app.
+    EXECUTE format(
+        'GRANT waxprep_app TO %I',
+        current_user
+    );
+EXCEPTION WHEN OTHERS THEN
+    NULL; -- membership may already exist
+END
+$$;
 
 -- Enable + force RLS on every student-scoped table.
 ALTER TABLE students ENABLE ROW LEVEL SECURITY;

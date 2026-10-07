@@ -24,7 +24,7 @@ from waxprep.domain.models import (
     StudentStatus,
     new_id,
 )
-from waxprep.storage.session import set_current_wax_id
+from waxprep.storage.session import assume_app_role, set_current_wax_id
 
 
 class PostgresStorage:
@@ -32,6 +32,7 @@ class PostgresStorage:
 
     def __init__(self, conn: psycopg.Connection[Any]) -> None:
         self._conn = conn
+        assume_app_role(conn)
 
     def create_student(self, student: Student) -> Student:
         set_current_wax_id(self._conn, student.wax_id)
