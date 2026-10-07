@@ -102,3 +102,10 @@ Foundation does not implement a database or memory system.
 2. Foreign keys to `students(wax_id)`
 3. PostgreSQL Row-Level Security (`FORCE`) with `app.current_wax_id`
 4. Regression tests at application and SQL levels
+
+
+## Build 3 — Model Gateway
+
+Provider-neutral model execution boundary with adapters for Mock, OpenAI Responses, Upstage, and Anthropic Messages.
+
+Application code calls `ModelGateway.complete` / `stream` with normalized requests. Provider SDKs are not imported into the domain.

@@ -99,3 +99,34 @@ Student-scoped tables use ENABLE + FORCE ROW LEVEL SECURITY.
 Policies restrict rows to `app.current_wax_id` (session GUC).
 Channel identity lookup by external id uses a SECURITY DEFINER function.
 Isolation is tested at the SQL layer, not only via Python storage APIs.
+
+
+## D015 — Provider adapters behind a normalized model gateway
+
+**Status:** Accepted
+
+Wax Prep uses a provider-neutral model gateway with explicit provider adapters.
+
+## D016 — Logical model roles
+
+**Status:** Accepted
+
+Roles such as `teacher` and `context` identify deployments; provider IDs stay in config.
+
+## D017 — Gateway does not contain tutoring intelligence
+
+**Status:** Accepted
+
+The gateway is transport/execution infrastructure only.
+
+## D018 — Provider capabilities are explicit
+
+**Status:** Accepted
+
+Capabilities are declared and checked before execution.
+
+## D019 — Usage without pricing
+
+**Status:** Accepted
+
+Build 3 records provider-reported usage where available; no billing.
