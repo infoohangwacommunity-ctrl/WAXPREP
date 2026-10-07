@@ -70,3 +70,22 @@ The architecture records the concept only.
 Wax Prep uses the MIT License.
 
 **Reason:** MIT is permissive and simple for an open-source foundation.
+
+
+## D008 — PostgreSQL
+Accepted as the first real database with SQL migrations.
+
+## D009 — UUID WAX IDs
+Random UUIDs; phone numbers are not primary keys.
+
+## D010 — Open-ended notebook
+Flexible JSON payloads; no educational category enums in Build 2.
+
+## D011 — Notebook ≠ Memory
+Memory is a separate future system.
+
+## D012 — Student isolation
+Ownership required in storage APIs; regression-tested.
+
+## D013 — Offline tests
+In-memory by default; CI provides PostgreSQL via DATABASE_URL.

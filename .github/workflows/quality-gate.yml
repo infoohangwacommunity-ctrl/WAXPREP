@@ -14,6 +14,24 @@ jobs:
     name: quality-gate
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: waxprep
+          POSTGRES_PASSWORD: waxprep
+          POSTGRES_DB: waxprep_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U waxprep -d waxprep_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://waxprep:waxprep@localhost:5432/waxprep_test
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

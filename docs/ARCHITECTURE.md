@@ -83,3 +83,14 @@ Foundation does not implement a database or memory system.
 - Do not implement future features early.
 - Never put secrets in source control.
 - Normal tests must not make paid API calls.
+
+
+## Build 2 — Core data and storage
+
+- **WAX ID**: random opaque UUID (not phone-derived).
+- **Channel identity**: maps channel external ids to WAX ID.
+- **Conversation → Message → Attachment** ownership chain.
+- **Notebook**: open-ended JSON entries; not a profile; not Memory.
+- **Events**: minimal domain events without full message bodies.
+- **PostgreSQL** + SQL migrations; ownership-scoped storage APIs.
+- **Clock**: SystemClock / FakeClock (UTC aware).

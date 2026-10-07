@@ -7,6 +7,7 @@ requires-python = ">=3.13,<3.15"
 license = { file = "LICENSE" }
 dependencies = [
     "fastapi>=0.116,<1.0",
+    "psycopg[binary]>=3.2,<4.0",
 ]
 
 [dependency-groups]
@@ -51,6 +52,7 @@ filterwarnings = [
 ]
 markers = [
     "live: tests that make paid external API calls; excluded from the normal quality gate",
+    "postgres: tests that require a real PostgreSQL database (DATABASE_URL)",
 ]
 
 [tool.uv]
