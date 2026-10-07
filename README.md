@@ -1,6 +1,6 @@
 # Wax Prep
 
-> A tutor that actually knows you.
+ The Tutor That Actually Knows You.
 
 Wax Prep is a personalised educational tutor for Nigerian students, initially delivered through WhatsApp.
 
