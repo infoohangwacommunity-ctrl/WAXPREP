@@ -39,3 +39,20 @@ Example: "Remember that project Mr A gave me?"
 5. Stop → compact package for Teacher
 
 Not: "last N messages" as the memory system.
+
+
+## No keyword classification
+
+Context Intelligence must decide contextual relevance from meaning and
+available evidence.
+
+Hardcoded keyword or phrase lists must **not** determine whether a student
+message requires contextual investigation.
+
+| Allowed | Not allowed |
+|---------|-------------|
+| Blank/empty mechanical checks | Greeting vocabulary lists |
+| Max tool/step/size limits | Quiz/assignment/teacher word lists |
+| CI model decide/stop | Application `if "hello": skip_ci()` |
+
+Cheap handling ≠ semantic message classification.

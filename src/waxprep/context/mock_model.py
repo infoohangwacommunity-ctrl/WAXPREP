@@ -1,8 +1,13 @@
-"""Deterministic Context Intelligence mock for offline tests."""
+"""Deterministic Context Intelligence mock for offline tests.
+
+Decisions are scripted by tests. This mock must not classify student
+messages by keyword lists — that would recreate the architecture defect
+this foundation is designed to prevent.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from waxprep.context.model import (
     ContextModelDecision,
@@ -13,30 +18,34 @@ from waxprep.context.model import (
 
 @dataclass
 class MockContextModel:
+    """Test double for Context Intelligence.
+
+    Provide ``decision_script`` when a test needs investigation steps.
+    With an empty script the model always stops (no vocabulary routing).
+    """
+
     calls: int = 0
+    decision_script: list[ContextModelDecision] = field(
+        default_factory=lambda: list[ContextModelDecision]()
+    )
+    final: ContextModelFinal | None = None
 
     async def decide(self, request: ContextModelRequest) -> ContextModelDecision:
+        del request  # scripted; request is available for richer mocks later
         self.calls += 1
-        query = request.user_query.lower()
-        if "remember" in query:
+        if not self.decision_script:
             return ContextModelDecision(
-                action="search_semantically",
-                arguments={"query": request.user_query, "limit": 6},
-                reason="The student refers to previous information.",
+                action="stop",
+                arguments={},
+                reason="Mock CI: no investigation scripted.",
             )
-        if "continue" in query:
-            return ContextModelDecision(
-                action="search_conversation",
-                arguments={"query": request.user_query, "limit": 6},
-                reason="The student refers to an earlier conversation thread.",
-            )
-        return ContextModelDecision(
-            action="stop",
-            arguments={},
-            reason="No additional investigation required.",
-        )
+        index = min(self.calls - 1, len(self.decision_script) - 1)
+        return self.decision_script[index]
 
     async def finalize(self, request: ContextModelRequest) -> ContextModelFinal:
+        del request
+        if self.final is not None:
+            return self.final
         return ContextModelFinal(
             summary=(
                 "The Context Intelligence investigation completed "

@@ -172,3 +172,16 @@ Knowledge is generic nodes/edges with evidence. Profiles may be generated as vie
 Generic graph tables live in PostgreSQL under existing RLS. A dedicated graph DB
 is not authoritative. Embeddings are a retrieval index (`double precision[]`),
 not the memory system.
+
+
+## D026 — No keyword classification for CI routing
+
+**Status:** Accepted
+
+Application code must not decide student contextual needs via hardcoded
+vocabulary (greetings, quiz, assignment, teacher, subject, etc.).
+
+Context Intelligence (the model) decides whether investigation is useful.
+Mechanical checks may only detect blank/empty input.
+
+Cheap handling is not semantic classification.
