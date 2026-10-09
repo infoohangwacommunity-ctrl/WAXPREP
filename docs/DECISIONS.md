@@ -130,3 +130,23 @@ Capabilities are declared and checked before execution.
 **Status:** Accepted
 
 Build 3 records provider-reported usage where available; no billing.
+
+
+## D020 — Append-only schema migrations
+
+**Status:** Accepted
+
+Applied SQL migrations are immutable. Changes use a new numbered file.
+The migration runner stores SHA-256 checksums and rejects modified applied files.
+
+## D021 — Workspace is an artifact substrate, not an intelligence layer
+
+**Status:** Accepted
+
+Workspace stores durable educational artifacts and metadata only.
+
+## D022 — Artifact versions are immutable
+
+**Status:** Accepted
+
+Revisions create new ArtifactVersion rows; the Artifact points at the current version.

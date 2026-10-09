@@ -1,4 +1,4 @@
-"""In-memory storage for unit tests (not a production backend)."""
+"""In-memory storage for unit tests (not production)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ from uuid import UUID
 
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
+    Artifact,
+    ArtifactReference,
+    ArtifactVersion,
     Attachment,
     ChannelIdentity,
     Conversation,
@@ -15,12 +18,13 @@ from waxprep.domain.models import (
     Notebook,
     NotebookEntry,
     Student,
+    Workspace,
     new_id,
 )
 
 
 class InMemoryStorage:
-    """Deterministic in-process store implementing the Storage contract."""
+    """Deterministic in-process implementation of the Storage contract."""
 
     def __init__(self) -> None:
         self._students: dict[WaxId, Student] = {}
@@ -30,6 +34,12 @@ class InMemoryStorage:
         self._attachments: dict[tuple[WaxId, UUID], Attachment] = {}
         self._notebooks: dict[WaxId, Notebook] = {}
         self._entries: dict[tuple[WaxId, UUID], list[NotebookEntry]] = {}
+        self._workspaces: dict[WaxId, Workspace] = {}
+        self._artifacts: dict[tuple[WaxId, UUID], Artifact] = {}
+        self._artifact_versions: dict[tuple[WaxId, UUID, UUID], ArtifactVersion] = {}
+        self._artifact_references: dict[
+            tuple[WaxId, UUID], list[ArtifactReference]
+        ] = {}
         self._events: dict[WaxId, list[Event]] = {}
 
     def create_student(self, student: Student) -> Student:
@@ -45,6 +55,8 @@ class InMemoryStorage:
         key = (identity.channel, identity.external_id)
         if key in self._channels:
             raise ValueError("channel identity already exists")
+        if identity.wax_id not in self._students:
+            raise ValueError("unknown student")
         self._channels[key] = identity
         return identity
 
@@ -56,7 +68,10 @@ class InMemoryStorage:
     def create_conversation(self, conversation: Conversation) -> Conversation:
         if conversation.wax_id not in self._students:
             raise ValueError("unknown student")
-        self._conversations[(conversation.wax_id, conversation.id)] = conversation
+        key = (conversation.wax_id, conversation.id)
+        if key in self._conversations:
+            raise ValueError("conversation already exists")
+        self._conversations[key] = conversation
         return conversation
 
     def get_conversation(
@@ -68,6 +83,8 @@ class InMemoryStorage:
         if (message.wax_id, message.conversation_id) not in self._conversations:
             raise ValueError("unknown conversation for student")
         key = (message.wax_id, message.conversation_id, message.id)
+        if key in self._messages:
+            raise ValueError("message already exists")
         self._messages[key] = message
         return message
 
@@ -93,7 +110,10 @@ class InMemoryStorage:
         )
         if not found:
             raise ValueError("unknown message for student")
-        self._attachments[(attachment.wax_id, attachment.id)] = attachment
+        key = (attachment.wax_id, attachment.id)
+        if key in self._attachments:
+            raise ValueError("attachment already exists")
+        self._attachments[key] = attachment
         return attachment
 
     def get_attachment(self, wax_id: WaxId, attachment_id: UUID) -> Attachment | None:
@@ -105,6 +125,8 @@ class InMemoryStorage:
             return existing
         if not isinstance(now, datetime):
             raise TypeError("now must be a datetime")
+        if wax_id not in self._students:
+            raise ValueError("unknown student")
         notebook = Notebook(
             id=new_id(),
             wax_id=wax_id,
@@ -130,6 +152,119 @@ class InMemoryStorage:
         self, wax_id: WaxId, notebook_id: UUID
     ) -> tuple[NotebookEntry, ...]:
         return tuple(self._entries.get((wax_id, notebook_id), []))
+
+    def get_or_create_workspace(self, wax_id: WaxId, now: datetime) -> Workspace:
+        existing = self._workspaces.get(wax_id)
+        if existing is not None:
+            return existing
+        if wax_id not in self._students:
+            raise ValueError("unknown student")
+        workspace = Workspace(
+            id=new_id(), wax_id=wax_id, created_at=now, updated_at=now
+        )
+        self._workspaces[wax_id] = workspace
+        return workspace
+
+    def get_workspace(self, wax_id: WaxId) -> Workspace | None:
+        return self._workspaces.get(wax_id)
+
+    def create_artifact(self, artifact: Artifact) -> Artifact:
+        workspace = self._workspaces.get(artifact.wax_id)
+        if workspace is None or workspace.id != artifact.workspace_id:
+            raise ValueError("unknown workspace for student")
+        key = (artifact.wax_id, artifact.id)
+        if key in self._artifacts:
+            raise ValueError("artifact already exists")
+        self._artifacts[key] = artifact
+        return artifact
+
+    def get_artifact(self, wax_id: WaxId, artifact_id: UUID) -> Artifact | None:
+        return self._artifacts.get((wax_id, artifact_id))
+
+    def list_artifacts(self, wax_id: WaxId, workspace_id: UUID) -> tuple[Artifact, ...]:
+        artifacts = [
+            a
+            for (owner, _), a in self._artifacts.items()
+            if owner == wax_id and a.workspace_id == workspace_id
+        ]
+        return tuple(sorted(artifacts, key=lambda a: a.created_at))
+
+    def create_artifact_version(self, version: ArtifactVersion) -> ArtifactVersion:
+        artifact = self._artifacts.get((version.wax_id, version.artifact_id))
+        if artifact is None:
+            raise ValueError("unknown artifact for student")
+        if version.version_number < 1:
+            raise ValueError("version_number must be >= 1")
+        existing = self.list_artifact_versions(version.wax_id, version.artifact_id)
+        if any(item.version_number == version.version_number for item in existing):
+            raise ValueError("artifact version number already exists")
+        key = (version.wax_id, version.artifact_id, version.id)
+        if key in self._artifact_versions:
+            raise ValueError("artifact version already exists")
+        self._artifact_versions[key] = version
+        return version
+
+    def get_artifact_version(
+        self, wax_id: WaxId, artifact_id: UUID, version_id: UUID
+    ) -> ArtifactVersion | None:
+        return self._artifact_versions.get((wax_id, artifact_id, version_id))
+
+    def list_artifact_versions(
+        self, wax_id: WaxId, artifact_id: UUID
+    ) -> tuple[ArtifactVersion, ...]:
+        versions = [
+            v
+            for (owner, art, _), v in self._artifact_versions.items()
+            if owner == wax_id and art == artifact_id
+        ]
+        return tuple(sorted(versions, key=lambda v: v.version_number))
+
+    def set_current_artifact_version(
+        self,
+        wax_id: WaxId,
+        artifact_id: UUID,
+        version_id: UUID,
+        updated_at: datetime,
+    ) -> Artifact:
+        artifact = self._artifacts.get((wax_id, artifact_id))
+        if artifact is None:
+            raise ValueError("unknown artifact")
+        version = self.get_artifact_version(wax_id, artifact_id, version_id)
+        if version is None:
+            raise ValueError("unknown artifact version")
+        updated = Artifact(
+            id=artifact.id,
+            wax_id=artifact.wax_id,
+            workspace_id=artifact.workspace_id,
+            status=artifact.status,
+            current_version_id=version.id,
+            created_at=artifact.created_at,
+            updated_at=updated_at,
+        )
+        self._artifacts[(wax_id, artifact_id)] = updated
+        return updated
+
+    def create_artifact_reference(
+        self, reference: ArtifactReference
+    ) -> ArtifactReference:
+        artifact = self._artifacts.get((reference.wax_id, reference.artifact_id))
+        if artifact is None:
+            raise ValueError("unknown artifact for student")
+        key = (reference.wax_id, reference.artifact_id)
+        references = self._artifact_references.setdefault(key, [])
+        if any(
+            item.reference_type == reference.reference_type
+            and item.reference_id == reference.reference_id
+            for item in references
+        ):
+            raise ValueError("artifact reference already exists")
+        references.append(reference)
+        return reference
+
+    def list_artifact_references(
+        self, wax_id: WaxId, artifact_id: UUID
+    ) -> tuple[ArtifactReference, ...]:
+        return tuple(self._artifact_references.get((wax_id, artifact_id), []))
 
     def append_event(self, event: Event) -> Event:
         if event.wax_id is None:

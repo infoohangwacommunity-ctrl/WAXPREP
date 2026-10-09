@@ -1,4 +1,8 @@
-"""Minimal domain models for Build 2 (storage contract, not tutoring logic)."""
+"""Wax Prep domain models.
+
+Build 2: identity, conversation, attachments, open-ended notebook.
+Build 2.5: Workspace/Artifact substrate (no tutoring intelligence).
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ from waxprep.domain.identifiers import WaxId
 
 
 class MessageContentType(StrEnum):
-    """Supported message content categories (representation only)."""
+    """Supported message content categories."""
 
     TEXT = "text"
     AUDIO = "audio"
@@ -25,6 +29,15 @@ class StudentStatus(StrEnum):
 
     ACTIVE = "active"
     DISABLED = "disabled"
+
+
+class ArtifactStatus(StrEnum):
+    """Lifecycle state of a durable workspace artifact."""
+
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    PENDING_DELETION = "pending_deletion"
+    DELETED = "deleted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +86,7 @@ class Message:
 
 @dataclass(frozen=True, slots=True)
 class Attachment:
-    """Media/document metadata linked to a message (blob stored elsewhere)."""
+    """Media/document metadata linked to a message (bytes outside PostgreSQL)."""
 
     id: UUID
     wax_id: WaxId
@@ -87,7 +100,7 @@ class Attachment:
 
 @dataclass(frozen=True, slots=True)
 class Notebook:
-    """Open-ended notebook container for one WAX ID (not a profile form)."""
+    """Open-ended notebook container for one WAX ID."""
 
     id: UUID
     wax_id: WaxId
@@ -98,11 +111,7 @@ class Notebook:
 
 @dataclass(frozen=True, slots=True)
 class NotebookEntry:
-    """One open-ended notebook entry with flexible structured payload.
-
-    Semantic shape of ``payload`` is not constrained by Build 2.
-    Technical fields enforce ownership, identity, and versioning only.
-    """
+    """One open-ended notebook entry with unconstrained payload."""
 
     id: UUID
     wax_id: WaxId
@@ -116,8 +125,59 @@ class NotebookEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class Workspace:
+    """Durable educational storage area belonging to one WAX ID."""
+
+    id: UUID
+    wax_id: WaxId
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Artifact:
+    """Logical identity of a durable educational artifact."""
+
+    id: UUID
+    wax_id: WaxId
+    workspace_id: UUID
+    status: ArtifactStatus
+    current_version_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactVersion:
+    """One immutable stored version of an artifact."""
+
+    id: UUID
+    wax_id: WaxId
+    artifact_id: UUID
+    version_number: int
+    storage_ref: str
+    original_filename: str | None
+    mime_type: str | None
+    size_bytes: int | None
+    checksum_sha256: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReference:
+    """Relationship between an artifact and another Wax Prep object."""
+
+    id: UUID
+    wax_id: WaxId
+    artifact_id: UUID
+    reference_type: str
+    reference_id: UUID
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Event:
-    """Minimal durable domain event (no full message body duplication)."""
+    """Minimal durable domain event."""
 
     id: UUID
     wax_id: WaxId | None
@@ -129,10 +189,15 @@ class Event:
 
 
 def new_id() -> UUID:
+    """Create a new opaque UUID."""
     return uuid4()
 
 
 __all__ = [
+    "Artifact",
+    "ArtifactReference",
+    "ArtifactStatus",
+    "ArtifactVersion",
     "Attachment",
     "ChannelIdentity",
     "Conversation",
@@ -143,5 +208,6 @@ __all__ = [
     "NotebookEntry",
     "Student",
     "StudentStatus",
+    "Workspace",
     "new_id",
 ]

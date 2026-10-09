@@ -109,3 +109,18 @@ Foundation does not implement a database or memory system.
 Provider-neutral model execution boundary with adapters for Mock, OpenAI Responses, Upstage, and Anthropic Messages.
 
 Application code calls `ModelGateway.complete` / `stream` with normalized requests. Provider SDKs are not imported into the domain.
+
+
+## Build 2.5 — Workspace and Artifact Substrate
+
+```text
+Student → Workspace → Artifact → ArtifactVersion (storage_ref)
+                              → ArtifactReference
+```
+
+Workspace answers what durable artifacts exist and who owns them.
+It does not interpret educational meaning, run OCR/transcription, or update the notebook.
+
+Artifact versions are immutable. Student isolation uses ownership APIs, FKs, RLS, and tests.
+
+The Model Gateway does not know about Workspaces; a future Context Operator may consume them.
