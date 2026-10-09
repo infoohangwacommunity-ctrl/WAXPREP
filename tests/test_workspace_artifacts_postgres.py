@@ -34,6 +34,8 @@ def pg_store() -> Iterator[PostgresStorage]:
         cur.execute(
             """
             DROP TABLE IF EXISTS
+                context_investigations, knowledge_embeddings,
+                knowledge_evidence, knowledge_edges, knowledge_nodes,
                 artifact_references, artifact_versions, artifacts, workspaces,
                 events, notebook_entries, notebooks, attachments, messages,
                 conversations, channel_identities, students, schema_migrations

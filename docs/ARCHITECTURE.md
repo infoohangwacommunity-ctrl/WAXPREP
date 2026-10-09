@@ -124,3 +124,19 @@ It does not interpret educational meaning, run OCR/transcription, or update the 
 Artifact versions are immutable. Student isolation uses ownership APIs, FKs, RLS, and tests.
 
 The Model Gateway does not know about Workspaces; a future Context Operator may consume them.
+
+
+## Build 4 foundation — Context Intelligence
+
+```text
+Student message → Context Intelligence (small model)
+                      │
+         tools: conversation / notebook / workspace /
+                semantic / relationships / history
+                      │
+              compact ContextPackage
+                      │
+                Teacher Model (later)
+```
+
+CI proposes; application validates. No fixed student profile.

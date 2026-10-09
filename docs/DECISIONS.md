@@ -150,3 +150,25 @@ Workspace stores durable educational artifacts and metadata only.
 **Status:** Accepted
 
 Revisions create new ArtifactVersion rows; the Artifact points at the current version.
+
+
+## D023 — Context Intelligence is a small model
+
+**Status:** Accepted
+
+CI investigates student context. It does not teach. The Teacher Model teaches.
+
+## D024 — Open-world knowledge, not fixed profile schema
+
+**Status:** Accepted
+
+No permanent school/class/strengths/weaknesses/goals/learning-style schema.
+Knowledge is generic nodes/edges with evidence. Profiles may be generated as views.
+
+## D025 — PostgreSQL is the knowledge source of truth
+
+**Status:** Accepted
+
+Generic graph tables live in PostgreSQL under existing RLS. A dedicated graph DB
+is not authoritative. Embeddings are a retrieval index (`double precision[]`),
+not the memory system.
