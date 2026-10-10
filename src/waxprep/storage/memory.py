@@ -93,6 +93,10 @@ class InMemoryStorage:
     ) -> Message | None:
         return self._messages.get((wax_id, conversation_id, message_id))
 
+    def list_all_messages(self, wax_id: WaxId) -> tuple[Message, ...]:
+        rows = [m for (w, _, _), m in self._messages.items() if w == wax_id]
+        return tuple(sorted(rows, key=lambda m: m.created_at))
+
     def list_messages(
         self, wax_id: WaxId, conversation_id: UUID
     ) -> tuple[Message, ...]:

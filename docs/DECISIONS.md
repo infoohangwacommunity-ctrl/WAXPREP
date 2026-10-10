@@ -185,3 +185,26 @@ Context Intelligence (the model) decides whether investigation is useful.
 Mechanical checks may only detect blank/empty input.
 
 Cheap handling is not semantic classification.
+
+
+## D027 — CI read tools are storage-backed and model-driven
+
+**Status:** Accepted
+
+Context Intelligence tools retrieve real conversation, notebook, workspace, and
+knowledge evidence under WAX-ID isolation. Investigation actions are chosen by
+the model (or a scripted mock), not by keyword routing.
+
+## D028 — Embeddings optional; standard PostgreSQL first
+
+**Status:** Accepted
+
+pgvector is not mandatory. Cosine ranking over bounded per-student candidates is
+acceptable. Live embedding failures must not be silently replaced by hash vectors.
+
+## D029 — Teacher remains separate; write/evolution deferred
+
+**Status:** Accepted
+
+This build ends at the context package. Teacher integration and durable knowledge
+writes are later builds.

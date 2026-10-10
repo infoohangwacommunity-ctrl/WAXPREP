@@ -15,6 +15,13 @@ class DeterministicEmbeddingProvider:
     model: str = "mock-deterministic"
 
     async def embed(self, text: str) -> tuple[float, ...]:
+        results = await self.embed_many([text])
+        return results[0]
+
+    async def embed_many(self, texts: list[str]) -> list[tuple[float, ...]]:
+        return [self._one(t) for t in texts]
+
+    def _one(self, text: str) -> tuple[float, ...]:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         values: list[float] = []
         while len(values) < self.dimensions:
@@ -23,6 +30,5 @@ class DeterministicEmbeddingProvider:
                 if len(values) >= self.dimensions:
                     break
             digest = hashlib.sha256(digest).digest()
-        # L2 normalize
         norm = math.sqrt(sum(v * v for v in values)) or 1.0
         return tuple(v / norm for v in values)

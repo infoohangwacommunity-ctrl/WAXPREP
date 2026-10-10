@@ -1,58 +1,47 @@
-# Context Intelligence
+# Context Intelligence (Read / Investigation)
 
-Context Intelligence (CI) is a **small AI model** that investigates the
-student's existing world before the Teacher Model responds.
+Context Intelligence (CI) is a **small AI model** that investigates the student's
+world and produces a compact evidence-backed context package for the Teacher Model.
 
-It is **not** the Teacher Model, memory storage, a graph database, an
-embedding model, or a deterministic context assembler.
+CI does **not** teach. The Teacher Model is separate and not integrated in this build.
 
-## Core principle
+## Loop
 
-There is **no fixed student profile schema**. The student's world is open-ended.
+```text
+message → CI decide → tool (read-only) → evidence → decide … → stop → ContextPackage
+```
 
-## Four evidence layers
+- Model chooses actions; application executes tools and enforces limits.
+- No keyword vocabulary routes semantic meaning.
+- Blank messages are mechanical; non-empty messages are eligible for CI.
 
-| Layer | Role |
-|-------|------|
-| Conversation | What actually happened |
-| Notebook | Durable AI-maintained understanding |
-| Workspace | Durable materials and artifacts |
-| Knowledge graph | Generic nodes/edges discovered from evidence |
+## Retrieval (hybrid)
 
-## Rules
+| Channel | Role |
+|---------|------|
+| Lexical | Conversation / notebook / workspace / knowledge text match |
+| Semantic | Optional embeddings + cosine ranking (standard Postgres, no mandatory pgvector) |
+| Graph | Follow generic knowledge edges (not autonomous meaning) |
 
-- CI decides relevance; embeddings and graphs only retrieve candidates.
-- CI proposes knowledge changes; the application validates and persists.
-- Historical evidence is preserved (supersession ≠ deletion).
-- Teacher receives a compact evidence-backed context package.
-- Every tool is WAX-ID scoped; PostgreSQL RLS remains the hard boundary.
-- Normal tests use mocks; live model calls are opt-in.
+All paths are **WAX-ID scoped**. Cross-student access must fail.
 
-## Progressive investigation
+## Adapters
 
-Example: "Remember that project Mr A gave me?"
+- `GatewayContextModel` — CI via existing Model Gateway
+- `HttpEmbeddingProvider` — OpenAI-compatible `/embeddings`
+- `DeterministicEmbeddingProvider` — offline tests only (not real semantics)
 
-1. Semantic search → candidates
-2. Follow relationships → project / person
-3. Inspect evidence → original conversation/artifact
-4. Check history → still current?
-5. Stop → compact package for Teacher
+## Configuration
 
-Not: "last N messages" as the memory system.
+```text
+WAXPREP_CONTEXT_MODEL=...          # logical registry name
+WAXPREP_EMBEDDING_API_KEY=...      # optional live embeddings
+WAXPREP_EMBEDDING_BASE_URL=...
+WAXPREP_EMBEDDING_MODEL=...
+```
 
+Ordinary `make check` uses mocks only. Live tests remain opt-in (`-m live`).
 
-## No keyword classification
+## Write / evolution
 
-Context Intelligence must decide contextual relevance from meaning and
-available evidence.
-
-Hardcoded keyword or phrase lists must **not** determine whether a student
-message requires contextual investigation.
-
-| Allowed | Not allowed |
-|---------|-------------|
-| Blank/empty mechanical checks | Greeting vocabulary lists |
-| Max tool/step/size limits | Quiz/assignment/teacher word lists |
-| CI model decide/stop | Application `if "hello": skip_ci()` |
-
-Cheap handling ≠ semantic message classification.
+Durable knowledge mutation is **out of scope** for this read build.
