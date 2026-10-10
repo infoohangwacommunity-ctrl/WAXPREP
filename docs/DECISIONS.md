@@ -208,3 +208,25 @@ acceptable. Live embedding failures must not be silently replaced by hash vector
 
 This build ends at the context package. Teacher integration and durable knowledge
 writes are later builds.
+
+
+## D030 — CI proposes; application validates and persists
+
+**Status:** Accepted
+
+Context Intelligence may propose open-world knowledge changes after investigation.
+The application validates structure, ownership, and limits, then persists.
+
+## D031 — Supersession preserves history
+
+**Status:** Accepted
+
+When a fact is updated, the prior node is marked SUPERSEDED (not deleted).
+A `superseded_by` edge may link old → new. Temporal queries can recover either version.
+
+## D032 — No automatic bulk memory extraction in this build
+
+**Status:** Accepted
+
+Write/evolution applies explicit proposals only. There is no silent pipeline that
+turns every conversation into profile fields or mass graph writes.

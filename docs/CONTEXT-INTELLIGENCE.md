@@ -45,3 +45,23 @@ Ordinary `make check` uses mocks only. Live tests remain opt-in (`-m live`).
 ## Write / evolution
 
 Durable knowledge mutation is **out of scope** for this read build.
+
+
+## Write / Evolution
+
+CI may **propose** durable knowledge changes. The application validates and persists.
+
+Supported operations:
+
+- `create_node`
+- `create_edge`
+- `supersede_node` (old node remains SUPERSEDED; history preserved)
+- `attach_evidence`
+- `add_notebook_entry`
+
+Rules:
+
+- No automatic extraction of fixed profile fields.
+- No keyword-driven writes.
+- Supersession does not delete prior evidence.
+- Edges require both endpoints to exist **for the same WAX ID**.
