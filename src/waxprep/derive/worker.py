@@ -1,8 +1,16 @@
-"""Background worker: retries derived work without ever touching history."""
+"""Background worker: retries derived work without ever touching history.
+
+Error messages stored in `derivation_jobs.last_error` are sanitized to
+prevent student content from leaking through exception text (Part 8
+Blocker J). The sanitizer strips quoted strings and long tokens that
+might contain student data, leaving only the exception class name and
+a short, opaque marker.
+"""
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -21,6 +29,27 @@ from waxprep.index.tokens import TokenIndex
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
+
+# Blocker J: error messages can carry student content. Sanitize them
+# before they reach the database. Quoted strings (e.g. ValueError with
+# the student's text in the message) and long tokens are stripped.
+_QUOTED_STRING = re.compile(r"'[^']*'|\"[^\"]*\"")
+_LONG_TOKEN = re.compile(r"\S{16,}")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def sanitize_error(exc: BaseException, max_length: int = 200) -> str:
+    """Reduce an exception to an opaque, non-sensitive marker.
+
+    The marker preserves the exception class name and a short tail, but
+    strips quoted strings and long tokens that might contain student
+    text. The result is bounded to ``max_length`` characters.
+    """
+    raw = f"{type(exc).__name__}: {exc}"
+    cleaned = _QUOTED_STRING.sub("''", raw)
+    cleaned = _LONG_TOKEN.sub("<redacted>", cleaned)
+    cleaned = _WHITESPACE.sub(" ", cleaned).strip()
+    return cleaned[:max_length]
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +114,9 @@ class DerivationWorker:
                 try:
                     await handler(job)
                 except Exception as exc:
+                    # Blocker J: never store raw exception text — it may
+                    # contain student data. Log full exception locally;
+                    # persist only the sanitized marker.
                     logger.exception("job %s failed", job.kind)
                     attempts = job.attempts + 1
                     retry_at = (
@@ -96,7 +128,7 @@ class DerivationWorker:
                         wax_id,
                         job.id,
                         now,
-                        f"{type(exc).__name__}: {exc}"[:500],
+                        sanitize_error(exc),
                         retry_at,
                     )
                     if retry_at is None:

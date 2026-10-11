@@ -40,6 +40,12 @@ LINKABLE = {
     ObjectType.KNOWLEDGE_NODE.value: ObjectType.KNOWLEDGE_NODE,
 }
 
+# Blocker G: bound recursive provenance resolution. A pathological graph
+# could otherwise loop forever (a summary citing a notebook citing the
+# summary). 10 levels is more than enough for any realistic derivation
+# chain (history → summary → summary-of-summary → notebook).
+_MAX_PROVENANCE_DEPTH = 10
+
 
 def _str_dict(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -113,16 +119,67 @@ class EvolutionService:
         return entry.author_kind if entry else None
 
     def _needs_confirmation(self, proposal: Proposal) -> bool:
-        """True when the only support is things the tutor itself said."""
-        kinds = [
-            self._author_of(proposal.wax_id, r.object_type, r.object_id)
-            for r in proposal.evidence
-            if r.object_type is ObjectType.HISTORY
-        ]
-        others = [
-            r for r in proposal.evidence if r.object_type is not ObjectType.HISTORY
-        ]
-        return bool(kinds) and not others and AuthorKind.STUDENT not in kinds
+        """True when the only support is things the tutor itself said.
+
+        Blocker G (spec 8.2-G): the original logic only checked immediate
+        history evidence. A notebook entry supported by a summary whose
+        entire lineage came from tutor-only messages would lose the
+        "needs student confirmation" flag. Resolve provenance recursively
+        through summaries and notebook entries back to original source
+        messages, with cycle/depth protection.
+        """
+        if not proposal.evidence:
+            return True
+        # Collect every reachable history entry through the evidence graph.
+        reachable_authors: list[AuthorKind] = []
+        for ref in proposal.evidence:
+            reachable_authors.extend(
+                self._resolve_to_history_authors(
+                    proposal.wax_id, ref.object_type, ref.object_id
+                )
+            )
+        if not reachable_authors:
+            # No history reach: needs confirmation (or the evidence is invalid,
+            # which `_first_missing_evidence` already rejected).
+            return True
+        return AuthorKind.STUDENT not in reachable_authors
+
+    def _resolve_to_history_authors(
+        self,
+        wax_id: WaxId,
+        derived_type: ObjectType,
+        derived_id: UUID,
+        *,
+        _seen: set[tuple[ObjectType, UUID]] | None = None,
+        _depth: int = 0,
+    ) -> list[AuthorKind]:
+        """Recursively trace provenance back to history entries.
+
+        Returns the author_kind of every reachable history entry. Cycle-
+        protected via `_seen` and bounded by `_MAX_PROVENANCE_DEPTH`.
+        """
+        if _depth > _MAX_PROVENANCE_DEPTH:
+            return []
+        seen = _seen or set()
+        key = (derived_type, derived_id)
+        if key in seen:
+            return []
+        seen.add(key)
+        # Base case: the object itself is a history entry.
+        if derived_type is ObjectType.HISTORY:
+            entry = self.storage.get_history_entry(wax_id, derived_id)
+            return [entry.author_kind] if entry else []
+        # Recursive case: trace provenance links back to sources.
+        links = self.storage.list_provenance(wax_id, derived_type, derived_id)
+        authors: list[AuthorKind] = []
+        for link in links:
+            authors.extend(
+                self._resolve_to_history_authors(
+                    wax_id, link.source_type, link.source_id,
+                    _seen=seen, _depth=_depth + 1,
+                )
+            )
+        return authors
 
     def _link(
         self,
