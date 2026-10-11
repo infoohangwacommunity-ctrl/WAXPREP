@@ -1,9 +1,8 @@
 """Deterministic mock Teacher for tests.
 
-This is NOT teaching intelligence. It exists so that the orchestration
-contract can be tested without a real Teacher implementation. The real
-Teacher intelligence build will replace this with a Provider-backed
-adapter that follows the same ``Teacher`` Protocol.
+This is NOT teaching intelligence. The production Teacher is the
+model-backed ``ModelTeacher``; this mock keeps orchestration tests
+offline and reproducible while following the same ``Teacher`` Protocol.
 
 The mock supports a small instruction script so tests can verify the
 bounded consultation loop:
@@ -34,7 +33,10 @@ class MockTeacherScript:
 
 @dataclass
 class MockTeacher:
-    """Test double for the future Teacher.
+    """Test double for the Teacher Protocol.
+
+    Production uses the model-backed ``ModelTeacher``; this deterministic
+    double keeps orchestration tests offline and reproducible.
 
     Records every input it receives so tests can assert that the exact
     original message reached the Teacher untouched.

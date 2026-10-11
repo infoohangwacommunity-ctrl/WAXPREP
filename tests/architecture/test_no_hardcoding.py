@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "waxprep"
-LAYERS = ("context", "derive", "history", "index")
+LAYERS = ("context", "derive", "history", "index", "orchestration")
 PROMPT_FILES = {"system_prompt.py", "tool_definitions.py"}
 BANNED_WORDS = re.compile(
     r"\b(pdf|docx|worksheet|quiz|assignment|homework|greeting|syllabus|waec|jamb)\b",

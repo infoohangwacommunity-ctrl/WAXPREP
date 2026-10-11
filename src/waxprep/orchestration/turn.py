@@ -55,6 +55,7 @@ from waxprep.orchestration.contracts import (
     TeacherInput,
     TeacherOutcome,
 )
+from waxprep.orchestration.errors import InvalidTeacherOutcomeError
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,10 @@ class TurnService:
 
         Returns ``(reply_text, consultations_made, context_summary)``.
         ``reply_text`` is ``None`` if the Teacher declined to respond.
+
+        Raises ``InvalidTeacherOutcomeError`` when the Teacher returns a
+        blank final reply, or an unfinished outcome in the forced final
+        round. Nothing invalid is ever persisted as a tutor reply.
         """
         prior_results: list = []
         last_summary = ""
@@ -289,8 +294,9 @@ class TurnService:
             if outcome.finished:
                 if outcome.reply_text is None:
                     return None, consultation.calls_made, last_summary
+                reply_text = self._validated_reply_text(outcome.reply_text)
                 last_summary = self._summarize_context(prior_results)
-                return outcome.reply_text, consultation.calls_made, last_summary
+                return reply_text, consultation.calls_made, last_summary
             last_summary = self._summarize_context(prior_results)
             # If the budget is exhausted, force one final Teacher round
             # to produce a reply.
@@ -308,12 +314,37 @@ class TurnService:
             max_rounds=max_rounds,
         )
         outcome = await self._teacher.teach(inp)
-        reply_text = outcome.reply_text or ""
+        prior_results = list(outcome.context_used)
+        # Validate the whole outcome, not just the text: an unfinished
+        # outcome or a missing reply in the forced round is a controlled
+        # failure. It must never be coerced into an empty string and
+        # persisted as a successful tutor reply.
+        if not outcome.finished or outcome.reply_text is None:
+            logger.warning(
+                "forced final teacher round produced no valid reply (finished=%s)",
+                outcome.finished,
+            )
+            raise InvalidTeacherOutcomeError(
+                "the teacher did not produce a valid final reply in the "
+                "forced final round"
+            )
+        reply_text = self._validated_reply_text(outcome.reply_text)
         return (
             reply_text,
             consultation.calls_made,
             self._summarize_context(prior_results),
         )
+
+    @staticmethod
+    def _validated_reply_text(reply_text: str) -> str:
+        """A successful final response must be a string with non-whitespace
+        content. An empty or whitespace-only reply is never persisted."""
+        if not reply_text.strip():
+            logger.warning("teacher returned a blank final reply; refusing it")
+            raise InvalidTeacherOutcomeError(
+                "the teacher's final reply contains no usable text"
+            )
+        return reply_text
 
     @staticmethod
     def _summarize_context(results: list) -> str:

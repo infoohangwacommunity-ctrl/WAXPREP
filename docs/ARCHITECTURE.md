@@ -36,10 +36,10 @@ Tutor response is durably saved + outbound delivery recorded
 Model Gateway (provider-neutral) -> Upstage / OpenAI / Anthropic / mock
 ```
 
-**Important:** the Teacher's teaching intelligence is **intentionally
-unimplemented** in this build. The Teacher is a Protocol; tests use
-a deterministic mock. The future Teacher-intelligence build will plug
-in a real Teacher that follows the same contract.
+**Important:** the Teacher is real in this build: `ModelTeacher`
+(`src/waxprep/orchestration/model_teacher.py`) implements the `Teacher`
+Protocol on the Model Gateway. The `Teacher` Protocol and the
+deterministic mock remain, so tests stay offline and reproducible.
 
 ## Roles
 
@@ -47,8 +47,10 @@ in a real Teacher that follows the same contract.
   The exact student message reaches the Teacher untouched — never rewritten,
   summarized, or replaced by CI's interpretation.
 - **Teacher** drives the turn. It decides whether to consult CI, what to ask,
-  and whether the result is sufficient. The Teacher's intelligence is a
-  future build; this build provides only the orchestration contract.
+  and whether the result is sufficient. The real Teacher (`ModelTeacher`)
+  gets its teaching intelligence from a logical model executed through the
+  Model Gateway; it composes the final educational answer itself and never
+  writes to history or storage.
 - **Context Intelligence (CI)** is a research/investigation system. It
   investigates the student's world and returns evidence and uncertainty.
   It never directly answers the student's educational question. It is a
@@ -79,6 +81,47 @@ in a real Teacher that follows the same contract.
    Keys can be rotated safely (spec section 14).
 7. Normal tests make no paid AI calls.
 
+## The Teacher model
+
+`ModelTeacher` runs one gateway call per orchestration round. The model
+returns a strictly validated JSON decision:
+
+```json
+{"action": "reply", "reply_text": "<final student-facing answer>"}
+{"action": "consult", "question": "<free-form investigation request>"}
+```
+
+Any other shape — unknown action, missing fields, blank text, non-JSON
+output, or a consultation request after the budget is exhausted — fails
+the turn with a typed error (`TeacherModelError`). Nothing invalid is ever
+persisted as a tutor reply. There is no keyword routing, phrase matching,
+or student-specific branching anywhere in the adapter: the model decides
+from the actual message and evidence; the application enforces contracts,
+bounds, validation and persistence.
+
+### Configuration
+
+The Teacher model is a **logical model** in the `ModelRegistry`, exactly
+like the CI model:
+
+- Register the provider adapter (`OpenAIResponsesProvider`,
+  `UpstageResponsesProvider`, `AnthropicMessagesProvider`, or
+  `MockProvider`) with the registry.
+- Register a `ModelConfig` with `name="teacher"` (the default logical
+  name; `DEFAULT_TEACHER_MODEL_NAME`), the provider's name, the real
+  provider model id, `role=ModelRole.TEACHER`, and the model's declared
+  capabilities. The basic Teacher path needs text only.
+- Build a `ModelGateway` over the registry and pass it to
+  `build_services(..., gateway=gateway)` — the composition root composes
+  `ModelTeacher(gateway, model_name="teacher")` automatically. A ready
+  `teacher=` instance can be passed instead (tests inject
+  `RecordingTeacher`/`MockTeacher` this way).
+- Providing neither `teacher=` nor `gateway=` fails at startup
+  (`ValueError`); a missing registry entry fails clearly when the model is
+  first resolved. The mock is never silently substituted in production.
+- API keys stay with the provider adapters' established configuration;
+  no keys are committed.
+
 ## Teacher ↔ CI consultation contract
 
 The Teacher receives:
@@ -97,7 +140,10 @@ The Teacher can:
 
 The orchestration enforces a configurable hard upper bound on
 consultations per student turn (default 3) so a buggy Teacher cannot
-enter an infinite CI loop.
+enter an infinite CI loop. When the budget is exhausted the Teacher is
+told clearly that no consultations remain and must finish with the
+evidence it already has; if it cannot produce a valid final reply, the
+turn fails in a controlled way with the student message preserved.
 
 ## Retrieval architecture
 

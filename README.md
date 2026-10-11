@@ -10,7 +10,9 @@ The goal is not simply to answer questions. Wax Prep should adapt its teaching t
 
 The student-world architecture is in place: one unified encrypted history, Context
 Intelligence, derived notebook/summaries/knowledge with provenance, and artifact understanding.
-See docs/IMPLEMENTATION-PLAN.md. The Teacher model and WhatsApp channel are separate builds.
+The real model-backed Teacher (`ModelTeacher`) is implemented and integrated with
+Context Intelligence, unified history and the turn orchestrator — see
+docs/ARCHITECTURE.md ("The Teacher model"). The WhatsApp channel is a separate build.
 
 ## What Wax Prep is NOT
 

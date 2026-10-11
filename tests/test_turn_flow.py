@@ -35,6 +35,7 @@ from waxprep.context.model import ContextModelDecision, ContextModelFinal
 from waxprep.domain.models import AuthorKind
 from waxprep.orchestration import (
     ConsultationRequest,
+    InvalidTeacherOutcomeError,
     TeacherInput,
     TeacherOutcome,
 )
@@ -151,7 +152,9 @@ async def test_teacher_can_consult_ci_once() -> None:
 
 @pytest.mark.asyncio
 async def test_consultation_limit_is_enforced() -> None:
-    """The hard upper bound on consultations stops an infinite loop."""
+    """The hard upper bound on consultations stops an infinite loop: at
+    most max_consultations CI calls happen, and the forced final round
+    ends in a controlled failure instead of a persisted empty reply."""
     # A Teacher that always asks another question.
     teacher = RecordingTeacher(reply_text="ok", consult_question="more?")
     # Override teach to never finish on its own — only the bound stops it.
@@ -178,11 +181,16 @@ async def test_consultation_limit_is_enforced() -> None:
     teacher.teach = always_consult  # type: ignore[assignment]
     world = make_world(teacher=teacher, max_consultations=3)
     wax = add_student(world)
-    result = await world.services.turns.handle_student_message(wax, "loop me")
-    # The bound was hit; the orchestrator forced a finish.
-    assert result.tutor_entry is not None
-    # At most max_consultations rounds were run.
-    assert len(teacher.seen_inputs) <= 4  # 3 rounds + 1 final forced
+    with pytest.raises(InvalidTeacherOutcomeError):
+        await world.services.turns.handle_student_message(wax, "loop me")
+    # The bound was hit: at most 3 rounds + 1 forced final round ran.
+    assert len(teacher.seen_inputs) <= 4
+    # Actual CI calls never exceeded the bound.
+    records = world.storage._investigations  # type: ignore[attr-defined]
+    assert len(records) <= 3
+    # No empty tutor entry was persisted.
+    saved = world.storage.list_history(wax)
+    assert [e.author_kind for e in saved] == [AuthorKind.STUDENT]
 
 
 @pytest.mark.asyncio
@@ -288,3 +296,144 @@ async def test_crash_after_tutor_reply_saved_resumes_with_same_reply() -> None:
         "the same stored reply must be returned, not a new one"
     )
     assert len(teacher.seen_inputs) == 1, "Teacher must not be called again"
+
+
+# --- response validation regressions -------------------------------------------
+#
+# These tests guard the forced-final-round path and the final-reply
+# validation. Under the previous behaviour
+# (``reply_text = outcome.reply_text or ""``) a missing or blank final
+# response was coerced into an empty string and persisted as a successful
+# tutor reply; these tests fail under that behaviour.
+
+
+class _OutcomeTeacher(RecordingTeacher):
+    """Teacher double that returns a canned outcome on a chosen round."""
+
+    def __init__(
+        self,
+        outcome: TeacherOutcome,
+        *,
+        outcome_round: int | None = None,
+        always: bool = False,
+    ) -> None:
+        super().__init__()
+        self.outcome = outcome
+        self.outcome_round = outcome_round
+        self.always = always
+
+    async def teach(self, inp: TeacherInput) -> TeacherOutcome:
+        self.seen_inputs.append(inp)
+        if self.always or inp.round_number == self.outcome_round:
+            return self.outcome
+        return await super().teach(inp)
+
+
+async def _run_turn(world: object, wax: object, text: str) -> object:
+    return await world.services.turns.handle_student_message(wax, text)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_blank_final_reply_is_never_persisted() -> None:
+    """A whitespace-only final reply is a controlled failure, not a reply."""
+    world = make_world(
+        teacher=_OutcomeTeacher(
+            TeacherOutcome(
+                reply_text="   ", next_question=None, context_used=(), finished=True
+            ),
+            outcome_round=0,
+        )
+    )
+    wax = add_student(world)
+    with pytest.raises(InvalidTeacherOutcomeError):
+        await _run_turn(world, wax, "help me")
+    saved = world.storage.list_history(wax)
+    assert [e.author_kind for e in saved] == [AuthorKind.STUDENT]
+    records = world.storage._investigations  # type: ignore[attr-defined]
+    assert records == []
+
+
+@pytest.mark.asyncio
+async def test_empty_string_reply_is_never_persisted() -> None:
+    world = make_world(
+        teacher=_OutcomeTeacher(
+            TeacherOutcome(
+                reply_text="", next_question=None, context_used=(), finished=True
+            ),
+            outcome_round=0,
+        )
+    )
+    wax = add_student(world)
+    with pytest.raises(InvalidTeacherOutcomeError):
+        await _run_turn(world, wax, "help me")
+    saved = world.storage.list_history(wax)
+    assert [e.author_kind for e in saved] == [AuthorKind.STUDENT]
+
+
+@pytest.mark.asyncio
+async def test_forced_final_round_missing_reply_is_never_persisted() -> None:
+    """Regression: in the forced final round, a missing reply must not be
+    coerced through ``reply_text or ""`` into an empty persisted entry."""
+    teacher = RecordingTeacher(consult_question="look for context")
+    world = make_world(teacher=teacher, max_consultations=1)
+    wax = add_student(world)
+    # Round 0 consults; the forced final round returns finished=True with
+    # no reply text.
+    teacher_teach = teacher.teach
+
+    async def consult_then_decline(inp: TeacherInput) -> TeacherOutcome:
+        if inp.round_number == 0:
+            return await teacher_teach(inp)
+        return TeacherOutcome(
+            reply_text=None,
+            next_question=None,
+            context_used=inp.prior_results,
+            finished=True,
+        )
+
+    teacher.teach = consult_then_decline  # type: ignore[assignment]
+    with pytest.raises(InvalidTeacherOutcomeError):
+        await world.services.turns.handle_student_message(wax, "hello")
+    saved = world.storage.list_history(wax)
+    assert [e.author_kind for e in saved] == [AuthorKind.STUDENT]
+    # No tutor entry with empty text may exist.
+    assert all((e.text or "").strip() for e in saved)
+
+
+@pytest.mark.asyncio
+async def test_forced_final_round_unfinished_outcome_is_never_persisted() -> None:
+    """Regression: the forced final round must validate the whole outcome —
+    an unfinished outcome is a controlled failure, not a success."""
+    teacher = RecordingTeacher(consult_question="look for context")
+    world = make_world(teacher=teacher, max_consultations=1)
+    wax = add_student(world)
+    teacher_teach = teacher.teach
+
+    async def consult_then_unfinished(inp: TeacherInput) -> TeacherOutcome:
+        if inp.round_number == 0:
+            return await teacher_teach(inp)
+        return TeacherOutcome(
+            reply_text=None,
+            next_question="one more?",
+            context_used=inp.prior_results,
+            finished=False,
+        )
+
+    teacher.teach = consult_then_unfinished  # type: ignore[assignment]
+    with pytest.raises(InvalidTeacherOutcomeError):
+        await world.services.turns.handle_student_message(wax, "hello")
+    saved = world.storage.list_history(wax)
+    assert [e.author_kind for e in saved] == [AuthorKind.STUDENT]
+
+
+@pytest.mark.asyncio
+async def test_valid_final_reply_after_consultation_still_persists() -> None:
+    """The validation must not break the normal path: a real reply after a
+    consultation round is still persisted and linked."""
+    teacher = RecordingTeacher(consult_question="look for context")
+    world = make_world(teacher=teacher, max_consultations=2)
+    wax = add_student(world)
+    result = await world.services.turns.handle_student_message(wax, "hello")
+    assert result.tutor_entry is not None
+    assert result.tutor_entry.text == teacher.reply_text
+    assert result.consultations_made == 1

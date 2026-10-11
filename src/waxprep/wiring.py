@@ -13,8 +13,12 @@ The architecture is Teacher-first:
         v
     Tutor response is durably saved + outbound delivery recorded
 
-The Teacher intelligence itself is **intentionally unimplemented** in
-this build. The Teacher is a Protocol; tests use ``MockTeacher``.
+The production Teacher is ``orchestration.model_teacher.ModelTeacher``:
+a model-backed adapter that runs on the existing ``ModelGateway`` and the
+logical model registry. Pass either a ready ``Teacher`` or a
+``gateway`` with a registered Teacher model (logical name ``"teacher"``,
+``ModelRole.TEACHER``) to ``build_services``. Tests keep injecting the
+deterministic ``MockTeacher`` / ``RecordingTeacher`` doubles.
 """
 
 from __future__ import annotations
@@ -34,7 +38,13 @@ from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.history.service import HistoryService
 from waxprep.index.indexer import Indexer
 from waxprep.index.tokens import TokenIndex
-from waxprep.orchestration import Teacher, TurnService
+from waxprep.model_gateway.gateway import ModelGateway
+from waxprep.orchestration import (
+    DEFAULT_TEACHER_MODEL_NAME,
+    ModelTeacher,
+    Teacher,
+    TurnService,
+)
 from waxprep.security.cipher import FieldCipher
 from waxprep.storage.protocol import Storage
 
@@ -59,7 +69,9 @@ def build_services(
     cipher: FieldCipher,
     clock: Clock,
     context_model: ContextModel,
-    teacher: Teacher,
+    teacher: Teacher | None = None,
+    gateway: ModelGateway | None = None,
+    teacher_model_name: str = DEFAULT_TEACHER_MODEL_NAME,
     embedder: EmbeddingProvider | None = None,
     consolidation_model: ConsolidationModel | None = None,
     artifact_processor: ArtifactProcessor | None = None,
@@ -68,10 +80,32 @@ def build_services(
     """Build the unified service graph.
 
     Args:
+        teacher: A ready Teacher (production passes ``ModelTeacher``;
+            tests pass a deterministic double). Required when ``gateway``
+            is not given.
+        gateway: Provider-neutral model gateway. When given and ``teacher``
+            is omitted, the real ``ModelTeacher`` is composed against it
+            using ``teacher_model_name``. The logical Teacher model must be
+            registered in the gateway's registry with role
+            ``ModelRole.TEACHER`` — a missing registration fails clearly
+            when the model is first resolved.
+        teacher_model_name: Logical Teacher model name in the registry.
         max_consultations: Hard upper bound on Teacher↔CI consultations
             per student turn. The default (3) is conservative; the value
             is configuration, not buried business logic.
+
+    Raises:
+        ValueError: If neither ``teacher`` nor ``gateway`` is provided, so
+            a misconfigured composition fails at startup instead of
+            silently teaching without a Teacher.
     """
+    if teacher is None:
+        if gateway is None:
+            raise ValueError(
+                "build_services requires a Teacher instance or a ModelGateway "
+                "with a registered Teacher model (role ModelRole.TEACHER)"
+            )
+        teacher = ModelTeacher(gateway, model_name=teacher_model_name)
     token_index = TokenIndex(cipher)
     has_embedder = embedder is not None
     has_artifacts = artifact_processor is not None

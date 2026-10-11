@@ -12,10 +12,15 @@ from waxprep.derive.consolidation import ConsolidationModel
 from waxprep.domain.identifiers import WaxId, new_wax_id
 from waxprep.domain.models import Student, StudentStatus
 from waxprep.embeddings.protocol import EmbeddingProvider
+from waxprep.model_gateway.gateway import ModelGateway
+from waxprep.model_gateway.models import ModelRole
+from waxprep.model_gateway.providers.mock import MockProvider
+from waxprep.model_gateway.registry import ModelConfig, ModelRegistry
 from waxprep.orchestration import (
     TeacherInput,
     TeacherOutcome,
 )
+from waxprep.orchestration.model_teacher import ModelTeacher
 from waxprep.security.cipher import AesGcmFieldCipher, KeyRing
 from waxprep.storage.memory import InMemoryStorage
 from waxprep.storage.protocol import Storage
@@ -77,6 +82,35 @@ class World:
     teacher: RecordingTeacher
 
 
+@dataclass
+class ModelTeacherWorld:
+    """Test world wired with the real ``ModelTeacher`` over a ``MockProvider``."""
+
+    storage: Storage
+    clock: FakeClock
+    services: WaxPrepServices
+    context_model: MockContextModel
+    provider: MockProvider
+    gateway: ModelGateway
+    teacher: ModelTeacher
+
+
+def make_teacher_gateway(provider: MockProvider) -> ModelGateway:
+    """Registry + gateway with a logical ``teacher`` model on the provider."""
+    registry = ModelRegistry()
+    registry.register_provider(provider)
+    registry.register_model(
+        ModelConfig(
+            name="teacher",
+            provider=provider.name,
+            model="mock-teacher-endpoint",
+            role=ModelRole.TEACHER,
+            capabilities=provider.capabilities("mock-teacher-endpoint"),
+        )
+    )
+    return ModelGateway(registry)
+
+
 def make_world(
     *,
     storage: Storage | None = None,
@@ -106,7 +140,44 @@ def make_world(
     return World(store, clock, services, model, tutor)
 
 
-def add_student(world: World) -> WaxId:
+def make_model_teacher_world(
+    *,
+    provider: MockProvider | None = None,
+    context_model: MockContextModel | None = None,
+    embedder: EmbeddingProvider | None = None,
+    start: datetime = START,
+    max_consultations: int = 3,
+) -> ModelTeacherWorld:
+    """World wired with the real ModelTeacher and a deterministic provider."""
+    clock = FakeClock(start)
+    store: Storage = InMemoryStorage()
+    mock_provider = provider or MockProvider(
+        response_text='{"action": "reply", "reply_text": "mock response"}'
+    )
+    gateway = make_teacher_gateway(mock_provider)
+    tutor = ModelTeacher(gateway, model_name="teacher")
+    model = context_model or MockContextModel()
+    services = build_services(
+        storage=store,
+        cipher=TEST_CIPHER,
+        clock=clock,
+        context_model=model,
+        teacher=tutor,
+        embedder=embedder,
+        max_consultations=max_consultations,
+    )
+    return ModelTeacherWorld(
+        storage=store,
+        clock=clock,
+        services=services,
+        context_model=model,
+        provider=mock_provider,
+        gateway=gateway,
+        teacher=tutor,
+    )
+
+
+def add_student(world: World | ModelTeacherWorld) -> WaxId:
     now = world.clock.now()
     student = Student(
         wax_id=new_wax_id(), created_at=now, updated_at=now, status=StudentStatus.ACTIVE

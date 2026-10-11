@@ -17,7 +17,13 @@ from waxprep.model_gateway.models import (
 
 
 class MockProvider:
-    """Predictable provider that never makes external calls."""
+    """Predictable provider that never makes external calls.
+
+    ``response_script`` optionally provides a different response text per
+    call (the last entry repeats once the script is exhausted), which lets
+    multi-round consumers — such as the model-backed Teacher — be tested
+    deterministically.
+    """
 
     name = "mock"
 
@@ -25,10 +31,12 @@ class MockProvider:
         self,
         *,
         response_text: str = "mock response",
+        response_script: list[str] | None = None,
         fail_times: int = 0,
         fail_error: ModelGatewayError | None = None,
     ) -> None:
         self.response_text = response_text
+        self.response_script = list(response_script) if response_script else None
         self.fail_times = fail_times
         self.fail_error = fail_error or ModelGatewayError("mock failure")
         self.calls = 0
@@ -51,7 +59,7 @@ class MockProvider:
         if self.calls <= self.fail_times:
             raise self.fail_error
         return ModelResponse(
-            text=self.response_text,
+            text=self._text_for_call(),
             tool_calls=(),
             usage=ModelUsage(input_tokens=10, output_tokens=5, total_tokens=15),
             provider=self.name,
@@ -59,6 +67,12 @@ class MockProvider:
             provider_request_id="mock-request",
             finish_reason="stop",
         )
+
+    def _text_for_call(self) -> str:
+        if self.response_script is None:
+            return self.response_text
+        index = min(self.calls - 1, len(self.response_script) - 1)
+        return self.response_script[index]
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         self.calls += 1

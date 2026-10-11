@@ -26,10 +26,11 @@ receive the original text as part of an investigation request, but CI's
 synthesis never replaces the original text. CI is a research/investigation
 system; it never directly answers the student's educational question.
 
-The Teacher's teaching intelligence is **intentionally unimplemented**
-in this build. The Teacher exists as a Protocol; a deterministic mock is
-provided for tests. The future Teacher-intelligence build will plug in
-a real Teacher that follows the same contract.
+The real Teacher implementation lives in ``orchestration.model_teacher``
+(``ModelTeacher``): it follows this Protocol, executes through the
+provider-neutral ``ModelGateway``, and is injected into ``TurnService``
+at the composition root. A deterministic mock remains available for
+tests.
 """
 
 from __future__ import annotations
@@ -141,13 +142,12 @@ class TeacherOutcome:
 
 
 class Teacher(Protocol):
-    """The future Teacher.
+    """The Teacher contract.
 
-    Teaching intelligence is **intentionally unimplemented** in this
-    build. The Teacher is a Protocol; a deterministic mock is provided
-    in ``orchestation.mock_teacher`` for tests. The future
-    Teacher-intelligence build will implement this Protocol with real
-    teaching logic.
+    The Teacher is a Protocol; the production implementation is the
+    model-backed ``ModelTeacher`` in ``orchestration.model_teacher``, and
+    a deterministic mock is provided in ``orchestation.mock_teacher`` for
+    tests.
 
     The Teacher:
     - Receives the exact student message (``original_message``).
