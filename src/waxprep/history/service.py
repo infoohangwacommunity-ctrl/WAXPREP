@@ -1,4 +1,12 @@
-"""Saving everything that happens, first and unconditionally."""
+"""Saving everything that happens, first and unconditionally.
+
+The history row, its blind word index, and its initial derivation jobs
+are persisted in a single storage transaction (Part 8 Blocker C). If
+that transaction fails, the channel adapter must allow a provider retry;
+the student message is **not** acknowledged as saved. If it succeeds,
+derived work can fail and retry independently without losing the
+original message.
+"""
 
 from __future__ import annotations
 
@@ -20,13 +28,14 @@ class HistoryService:
     """Records both sides of every exchange.
 
     Order of operations is the whole design:
-    1. Save the entry. If this fails, the caller must know.
-    2. Everything else (words index, embeddings, summaries) is best-effort
-       and can never remove or block the saved entry.
+    1. Save the entry atomically with its initial index work. If this
+       fails, the caller must know — the message is not acknowledged.
+    2. Everything else (re-indexing, summaries) is best-effort and can
+       never remove or block the saved entry.
 
-    The service never asks whether a message is "important". A message that
-    looks pointless today may be exactly what the student refers to in six
-    months, so nothing is judged at save time.
+    The service never asks whether a message is "important". A message
+    that looks pointless today may be exactly what the student refers
+    to in six months, so nothing is judged at save time.
     """
 
     def __init__(self, storage: Storage, indexer: Indexer, clock: Clock) -> None:
@@ -53,8 +62,12 @@ class HistoryService:
         thread_ref: str | None = None,
         reply_to_id: UUID | None = None,
     ) -> tuple[HistoryEntry, bool]:
-        """Save an entry. Returns (entry, created); created is False for a
-        duplicate delivery of something already saved."""
+        """Save an entry. Returns ``(entry, created)``.
+
+        ``created`` is ``False`` for a duplicate delivery of something
+        already saved — the saved entry is returned and no new jobs are
+        enqueued.
+        """
         now = self._clock.now()
         entry = HistoryEntry(
             id=new_id(),
@@ -69,18 +82,10 @@ class HistoryService:
             thread_ref=thread_ref,
             reply_to_id=reply_to_id,
         )
-        saved = self._storage.append_history_entry(entry)
-        if saved.id != entry.id:
-            return saved, False  # duplicate delivery from the channel
-        if saved.text:
-            try:
-                self._indexer.index(
-                    wax_id,
-                    ObjectType.HISTORY,
-                    saved.id,
-                    saved.text,
-                    saved.occurred_at,
-                )
-            except Exception:
-                logger.exception("indexing failed after save; entry is safe")
-        return saved, True
+        # Plan index work purely, then persist atomically (Blocker C).
+        plan = self._indexer.plan(
+            wax_id, ObjectType.HISTORY, entry.id, text, entry.occurred_at
+        )
+        return self._storage.append_history_entry_with_jobs(
+            entry, plan.token_hashes, plan.jobs
+        )

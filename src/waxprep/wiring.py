@@ -48,7 +48,15 @@ def build_services(
     artifact_processor: ArtifactProcessor | None = None,
 ) -> WaxPrepServices:
     token_index = TokenIndex(cipher)
-    indexer = Indexer(storage, token_index, clock)
+    has_embedder = embedder is not None
+    has_artifacts = artifact_processor is not None
+    indexer = Indexer(
+        storage,
+        token_index,
+        clock,
+        has_embedder=has_embedder,
+        has_artifact_processor=has_artifacts,
+    )
     history = HistoryService(storage, indexer, clock)
     retriever = Retriever(storage, token_index)
     evolution = EvolutionService(storage=storage, indexer=indexer)

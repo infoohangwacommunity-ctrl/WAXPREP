@@ -73,6 +73,23 @@ class Storage(Protocol):
         """Save an entry. Same (channel, channel_ref) returns the saved one."""
         ...
 
+    def append_history_entry_with_jobs(
+        self,
+        entry: HistoryEntry,
+        token_hashes: tuple[bytes, ...],
+        jobs: tuple[DerivationJob, ...],
+    ) -> tuple[HistoryEntry, bool]:
+        """Atomically persist a history entry, its blind word index, and its
+        initial derivation jobs in one transaction.
+
+        Returns ``(saved_entry, created)``. ``created`` is ``False`` if a
+        duplicate ``(channel, channel_ref)`` was already saved — the saved
+        entry is returned and no jobs are enqueued in that case. If the
+        transaction fails, the channel adapter must allow a provider retry
+        (Part 8 Blocker C).
+        """
+        ...
+
     def get_history_entry(
         self, wax_id: WaxId, entry_id: UUID
     ) -> HistoryEntry | None: ...

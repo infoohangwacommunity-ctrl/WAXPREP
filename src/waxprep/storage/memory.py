@@ -106,6 +106,46 @@ class InMemoryStorage:
         self._history_seq[(entry.wax_id, entry.id)] = len(self._history_seq)
         return entry
 
+    def append_history_entry_with_jobs(
+        self,
+        entry: HistoryEntry,
+        token_hashes: tuple[bytes, ...],
+        jobs: tuple[DerivationJob, ...],
+    ) -> tuple[HistoryEntry, bool]:
+        """In-memory atomic write (Part 8 Blocker C).
+
+        The contract mirrors PostgresStorage: if anything fails, no state is
+        mutated. The in-memory store has no real transactions, but the rule
+        is what unit tests test.
+        """
+        if entry.wax_id not in self._students:
+            raise ValueError("unknown student")
+        # Detect duplicate delivery first; do not mutate if duplicate.
+        if entry.channel is not None and entry.channel_ref is not None:
+            for existing in self._history.values():
+                if (
+                    existing.wax_id == entry.wax_id
+                    and existing.channel == entry.channel
+                    and existing.channel_ref == entry.channel_ref
+                ):
+                    return existing, False
+        if (entry.wax_id, entry.id) in self._history:
+            raise ValueError("history entry already exists")
+        # All pre-checks passed; mutate.
+        self._history[(entry.wax_id, entry.id)] = entry
+        self._history_seq[(entry.wax_id, entry.id)] = len(self._history_seq)
+        if token_hashes:
+            self._put_search_tokens_locked(
+                entry.wax_id,
+                ObjectType.HISTORY,
+                entry.id,
+                entry.occurred_at,
+                token_hashes,
+            )
+        for job in jobs:
+            self._jobs[(job.wax_id, job.id)] = job
+        return entry, True
+
     def get_history_entry(self, wax_id: WaxId, entry_id: UUID) -> HistoryEntry | None:
         return self._history.get((wax_id, entry_id))
 
@@ -184,7 +224,7 @@ class InMemoryStorage:
         )
 
     # --- search index -------------------------------------------------------
-    def put_search_tokens(
+    def _put_search_tokens_locked(
         self,
         wax_id: WaxId,
         object_type: ObjectType,
@@ -192,6 +232,7 @@ class InMemoryStorage:
         object_time: datetime,
         token_hashes: tuple[bytes, ...],
     ) -> None:
+        """Write tokens without re-validating ownership (caller holds the lock)."""
         rows = self._tokens.setdefault(wax_id, [])
         rows[:] = [
             r
@@ -200,6 +241,18 @@ class InMemoryStorage:
         ]
         for token_hash in dict.fromkeys(token_hashes):
             rows.append(TokenMatch(object_type, object_id, object_time, token_hash))
+
+    def put_search_tokens(
+        self,
+        wax_id: WaxId,
+        object_type: ObjectType,
+        object_id: UUID,
+        object_time: datetime,
+        token_hashes: tuple[bytes, ...],
+    ) -> None:
+        self._put_search_tokens_locked(
+            wax_id, object_type, object_id, object_time, token_hashes
+        )
 
     def token_stats(
         self,

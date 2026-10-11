@@ -269,6 +269,94 @@ class PostgresStorage:
                 return self._history(row)
         raise ValueError("history entry already exists")
 
+    def append_history_entry_with_jobs(
+        self,
+        entry: HistoryEntry,
+        token_hashes: tuple[bytes, ...],
+        jobs: tuple[DerivationJob, ...],
+    ) -> tuple[HistoryEntry, bool]:
+        """Atomic history + tokens + jobs write (Part 8 Blocker C).
+
+        If anything in this transaction fails, nothing is committed and the
+        channel adapter must allow a provider retry.
+        """
+        wax_id = entry.wax_id
+        set_current_wax_id(self._conn, wax_id)
+        blob = (
+            self._enc(wax_id, "history.text", entry.text)
+            if entry.text is not None
+            else None
+        )
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO history_entries ({HISTORY_COLUMNS}) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (
+                    entry.id,
+                    wax_id,
+                    entry.author_kind.value,
+                    entry.content_kind,
+                    blob,
+                    entry.occurred_at,
+                    entry.recorded_at,
+                    entry.channel,
+                    entry.channel_ref,
+                    entry.thread_ref,
+                    entry.reply_to_id,
+                ),
+            )
+            inserted = cur.rowcount > 0
+            if not inserted:
+                # Duplicate (channel, channel_ref) delivery: load the
+                # existing entry and return without enqueueing jobs.
+                if entry.channel is not None and entry.channel_ref is not None:
+                    cur.execute(
+                        f"SELECT {HISTORY_COLUMNS} FROM history_entries "
+                        "WHERE wax_id = %s AND channel = %s AND channel_ref = %s",
+                        (wax_id, entry.channel, entry.channel_ref),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        self._conn.commit()
+                        return self._history(row), False
+                self._conn.commit()
+                raise ValueError("history entry already exists")
+            # Insert succeeded: write tokens and jobs in the same transaction.
+            if token_hashes:
+                cur.execute(
+                    "DELETE FROM search_tokens WHERE wax_id = %s "
+                    "AND object_type = %s AND object_id = %s",
+                    (wax_id, ObjectType.HISTORY.value, entry.id),
+                )
+                cur.executemany(
+                    "INSERT INTO search_tokens "
+                    "(wax_id, object_type, object_id, object_time, token_hash) "
+                    "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    [
+                        (wax_id, ObjectType.HISTORY.value, entry.id,
+                         entry.occurred_at, h)
+                        for h in dict.fromkeys(token_hashes)
+                    ],
+                )
+            if jobs:
+                cur.executemany(
+                    f"INSERT INTO derivation_jobs ({JOB_COLUMNS}) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT DO NOTHING",
+                    [
+                        (
+                            j.id, j.wax_id, j.kind, j.object_type.value,
+                            j.object_id, j.status.value, j.attempts,
+                            j.last_error, j.run_after, j.created_at,
+                            j.updated_at, j.lease_until,
+                        )
+                        for j in jobs
+                    ],
+                )
+        self._conn.commit()
+        return entry, True
+
     def get_history_entry(self, wax_id: WaxId, entry_id: UUID) -> HistoryEntry | None:
         row = self._one(
             wax_id,
@@ -1205,7 +1293,8 @@ class PostgresStorage:
         self._write(
             job.wax_id,
             f"INSERT INTO derivation_jobs ({JOB_COLUMNS}) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT DO NOTHING",
             (
                 job.id,
                 job.wax_id,
@@ -1218,6 +1307,7 @@ class PostgresStorage:
                 job.run_after,
                 job.created_at,
                 job.updated_at,
+                job.lease_until,
             ),
         )
         return job
