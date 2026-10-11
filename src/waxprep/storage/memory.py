@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
@@ -42,6 +44,24 @@ Key = tuple[WaxId, UUID]
 
 class InMemoryStorage:
     """Deterministic in-process implementation of the Storage contract."""
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[InMemoryStorage]:
+        """In-memory atomic transaction via snapshot/restore.
+
+        On entry, take a deep copy of all internal state. On exception,
+        restore from the snapshot — no partial state. On success,
+        discard the snapshot.
+        """
+        import copy
+
+        snapshot = copy.deepcopy(self.__dict__)
+        try:
+            yield self
+        except Exception:
+            self.__dict__.clear()
+            self.__dict__.update(snapshot)
+            raise
 
     def __init__(self) -> None:
         self._students: dict[WaxId, Student] = {}

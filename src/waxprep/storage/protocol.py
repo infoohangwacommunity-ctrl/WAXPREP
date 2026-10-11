@@ -7,6 +7,7 @@ never whether it exists.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -57,6 +58,16 @@ class TokenStats:
 
 class Storage(Protocol):
     """Student-scoped persistence. Cross-student access must fail."""
+
+    def transaction(self) -> AbstractContextManager[Storage]:
+        """Context manager that wraps multiple storage operations in one
+        database transaction. If any operation within the context raises,
+        the whole transaction rolls back — no partial state.
+
+        For derived-object writes (node + provenance + index + jobs),
+        use this to make the logical mutation atomic (spec section 9).
+        """
+        ...
 
     # --- identity -------------------------------------------------------
     def create_student(self, student: Student) -> Student: ...

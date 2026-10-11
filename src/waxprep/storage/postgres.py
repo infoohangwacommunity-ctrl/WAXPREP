@@ -7,8 +7,10 @@ the database and decrypted on the way out.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -104,6 +106,7 @@ class PostgresStorage:
     def __init__(self, conn: psycopg.Connection[Any], cipher: FieldCipher) -> None:
         self._conn = conn
         self._cipher = cipher
+        self._txn_depth = 0
         assume_app_role(conn)
 
     # --- helpers -----------------------------------------------------------
@@ -113,7 +116,8 @@ class PostgresStorage:
         with self._conn.cursor() as cur:
             cur.execute(sql, params)  # pyright: ignore[reportArgumentType]
             count = cur.rowcount
-        self._conn.commit()
+        if self._txn_depth == 0:
+            self._conn.commit()
         return count
 
     def _write_many(self, wax_id: WaxId, sql: str, rows: list[tuple[Any, ...]]) -> None:
@@ -122,15 +126,37 @@ class PostgresStorage:
         set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor() as cur:
             cur.executemany(sql, rows)  # pyright: ignore[reportArgumentType]
-        self._conn.commit()
+        if self._txn_depth == 0:
+            self._conn.commit()
 
     def _read(self, wax_id: WaxId, sql: str, params: tuple[Any, ...]) -> list[Row]:
         set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql, params)  # pyright: ignore[reportArgumentType]
             rows: list[Row] = cur.fetchall()
-        self._conn.commit()
+        if self._txn_depth == 0:
+            self._conn.commit()
         return rows
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[PostgresStorage]:
+        """Wrap multiple storage operations in one DB transaction.
+
+        If any operation within the context raises, the whole transaction
+        rolls back — no partial state. Used by EvolutionService to make
+        derived-object + provenance + index writes atomic (spec section 9).
+        """
+        self._txn_depth += 1
+        try:
+            yield self
+            if self._txn_depth == 1:
+                self._conn.commit()
+        except Exception:
+            if self._txn_depth == 1:
+                self._conn.rollback()
+            raise
+        finally:
+            self._txn_depth -= 1
 
     def _one(self, wax_id: WaxId, sql: str, params: tuple[Any, ...]) -> Row | None:
         rows = self._read(wax_id, sql, params)
