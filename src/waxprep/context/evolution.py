@@ -98,7 +98,11 @@ class EvolutionService:
             Operation.SUPERSEDE_SUMMARY.value: self._supersede_summary,
             Operation.LINK_ARTIFACT.value: self._link_artifact,
         }
-        return handlers[proposal.operation](proposal, now)
+        # Spec section 9: derived-object + provenance + index writes
+        # must be atomic. A process crash between the derived-object save
+        # and the provenance write must not leave an orphan.
+        with self.storage.transaction():
+            return handlers[proposal.operation](proposal, now)
 
     # --- evidence and provenance ---------------------------------------------
     def _first_missing_evidence(self, proposal: Proposal) -> str | None:

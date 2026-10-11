@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
@@ -25,6 +27,8 @@ from waxprep.domain.models import (
     NotebookEntry,
     NotebookEntryStatus,
     ObjectType,
+    OutboundDelivery,
+    OutboundStatus,
     ProvenanceLink,
     Student,
     Summary,
@@ -40,6 +44,24 @@ Key = tuple[WaxId, UUID]
 
 class InMemoryStorage:
     """Deterministic in-process implementation of the Storage contract."""
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[InMemoryStorage]:
+        """In-memory atomic transaction via snapshot/restore.
+
+        On entry, take a deep copy of all internal state. On exception,
+        restore from the snapshot — no partial state. On success,
+        discard the snapshot.
+        """
+        import copy
+
+        snapshot = copy.deepcopy(self.__dict__)
+        try:
+            yield self
+        except Exception:
+            self.__dict__.clear()
+            self.__dict__.update(snapshot)
+            raise
 
     def __init__(self) -> None:
         self._students: dict[WaxId, Student] = {}
@@ -65,6 +87,7 @@ class InMemoryStorage:
         self._jobs: dict[Key, DerivationJob] = {}
         self._investigations: list[InvestigationRecord] = []
         self._events: dict[WaxId, list[Event]] = {}
+        self._outbound: dict[Key, OutboundDelivery] = {}
 
     # --- identity -----------------------------------------------------
     def create_student(self, student: Student) -> Student:
@@ -281,7 +304,7 @@ class InMemoryStorage:
         object_types: tuple[ObjectType, ...],
         since: datetime | None,
         until: datetime | None,
-        limit: int,
+        limit: int | None,
     ) -> tuple[TokenMatch, ...]:
         wanted = set(token_hashes)
         rows = [
@@ -292,7 +315,46 @@ class InMemoryStorage:
             and (since is None or r.object_time >= since)
             and (until is None or r.object_time < until)
         ]
-        return tuple(rows[:limit])
+        # Deterministic order: object_time DESC, object_id, token_hash.
+        rows.sort(
+            key=lambda r: (r.object_time, r.object_id, r.token_hash),
+            reverse=True,
+        )
+        return tuple(rows[:limit] if limit is not None else rows)
+
+    def find_by_tokens_page(
+        self,
+        wax_id: WaxId,
+        token_hashes: tuple[bytes, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID, bytes] | None = None,
+    ) -> tuple[TokenMatch, ...]:
+        wanted = set(token_hashes)
+        rows = [
+            r
+            for r in self._tokens.get(wax_id, [])
+            if r.token_hash in wanted
+            and r.object_type in object_types
+            and (since is None or r.object_time >= since)
+            and (until is None or r.object_time < until)
+        ]
+        rows.sort(
+            key=lambda r: (r.object_time, r.object_id, r.token_hash),
+            reverse=True,
+        )
+        if cursor is not None:
+            cur_time, cur_id, cur_hash = cursor
+            rows = [
+                r
+                for r in rows
+                if (r.object_time, r.object_id, r.token_hash)
+                < (cur_time, cur_id, cur_hash)
+            ]
+        return tuple(rows[:page_size])
 
     def put_embedding(self, record: EmbeddingRecord) -> None:
         key = (record.wax_id, record.object_type, record.object_id, record.model)
@@ -305,7 +367,7 @@ class InMemoryStorage:
         *,
         since: datetime | None,
         until: datetime | None,
-        limit: int,
+        limit: int | None,
     ) -> tuple[EmbeddingRecord, ...]:
         rows = [
             r
@@ -315,8 +377,34 @@ class InMemoryStorage:
             and (since is None or r.object_time >= since)
             and (until is None or r.object_time < until)
         ]
-        rows.sort(key=lambda r: r.object_time, reverse=True)
-        return tuple(rows[:limit])
+        rows.sort(key=lambda r: (r.object_time, r.object_id), reverse=True)
+        return tuple(rows[:limit] if limit is not None else rows)
+
+    def list_embeddings_page(
+        self,
+        wax_id: WaxId,
+        object_types: tuple[ObjectType, ...],
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID] | None = None,
+    ) -> tuple[EmbeddingRecord, ...]:
+        rows = [
+            r
+            for (w, _, _, _), r in self._embeddings.items()
+            if w == wax_id
+            and r.object_type in object_types
+            and (since is None or r.object_time >= since)
+            and (until is None or r.object_time < until)
+        ]
+        rows.sort(key=lambda r: (r.object_time, r.object_id), reverse=True)
+        if cursor is not None:
+            cur_time, cur_id = cursor
+            rows = [
+                r for r in rows if (r.object_time, r.object_id) < (cur_time, cur_id)
+            ]
+        return tuple(rows[:page_size])
 
     # --- notebook -------------------------------------------------------------
     def get_or_create_notebook(self, wax_id: WaxId, now: datetime) -> Notebook:
@@ -735,8 +823,11 @@ class InMemoryStorage:
 
     def mark_job_done(self, wax_id: WaxId, job_id: UUID, now: datetime) -> None:
         job = self._jobs[(wax_id, job_id)]
+        # Success does not increment attempts; the attempt was counted
+        # at claim time. Clear the lease so the row is no longer
+        # considered for re-claim by another worker.
         self._jobs[(wax_id, job_id)] = replace(
-            job, status=JobStatus.DONE, updated_at=now
+            job, status=JobStatus.DONE, lease_until=None, updated_at=now
         )
 
     def mark_job_failed(
@@ -748,12 +839,15 @@ class InMemoryStorage:
         retry_at: datetime | None,
     ) -> None:
         job = self._jobs[(wax_id, job_id)]
+        # Blocker (spec 8.2-#10): the attempt was already counted at
+        # claim time. Failure records the result of the same attempt;
+        # it must NOT increment attempts again.
         self._jobs[(wax_id, job_id)] = replace(
             job,
             status=JobStatus.PENDING if retry_at is not None else JobStatus.FAILED,
-            attempts=job.attempts + 1,
             last_error=error,
             run_after=retry_at or job.run_after,
+            lease_until=None,
             updated_at=now,
         )
 
@@ -762,14 +856,94 @@ class InMemoryStorage:
         rows = [j for (w, _), j in self._jobs.items() if w == wax_id]
         return tuple(sorted(rows, key=lambda j: j.created_at))
 
+    # --- outbound delivery (outbox) ----------------------------------------------
+    def create_outbound_delivery(self, delivery: OutboundDelivery) -> OutboundDelivery:
+        key = (delivery.wax_id, delivery.id)
+        if key in self._outbound:
+            # Idempotent: return the existing one.
+            return self._outbound[key]
+        # Check for an existing delivery for the same (tutor, channel).
+        for existing in self._outbound.values():
+            if (
+                existing.wax_id == delivery.wax_id
+                and existing.tutor_entry_id == delivery.tutor_entry_id
+                and existing.channel == delivery.channel
+            ):
+                return existing
+        self._outbound[key] = delivery
+        return delivery
+
+    def get_outbound_delivery_for_tutor(
+        self, wax_id: WaxId, tutor_entry_id: UUID, channel: str | None
+    ) -> OutboundDelivery | None:
+        for d in self._outbound.values():
+            if (
+                d.wax_id == wax_id
+                and d.tutor_entry_id == tutor_entry_id
+                and d.channel == channel
+            ):
+                return d
+        return None
+
+    def list_due_outbound_deliveries(
+        self, wax_id: WaxId, now: datetime, limit: int
+    ) -> tuple[OutboundDelivery, ...]:
+        due = [
+            d
+            for d in self._outbound.values()
+            if d.wax_id == wax_id
+            and d.status in (OutboundStatus.PENDING, OutboundStatus.IN_PROGRESS)
+            and d.run_after <= now
+        ]
+        due.sort(key=lambda d: d.run_after)
+        return tuple(due[:limit])
+
+    def mark_outbound_delivered(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
+        now: datetime,
+    ) -> None:
+        key = (wax_id, delivery_id)
+        old = self._outbound[key]
+        self._outbound[key] = replace(
+            old,
+            status=OutboundStatus.DELIVERED,
+            delivered_at=now,
+            updated_at=now,
+        )
+
+    def mark_outbound_failed(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
+        now: datetime,
+        error: str,
+        retry_at: datetime | None,
+    ) -> None:
+        key = (wax_id, delivery_id)
+        old = self._outbound[key]
+        self._outbound[key] = replace(
+            old,
+            status=OutboundStatus.PENDING
+            if retry_at is not None
+            else OutboundStatus.FAILED,
+            last_error=error,
+            run_after=retry_at or old.run_after,
+            updated_at=now,
+        )
+
     # --- audit --------------------------------------------------------------------------------------
     def record_investigation(self, record: InvestigationRecord) -> InvestigationRecord:
         self._investigations.append(record)
         return record
 
     def append_event(self, event: Event) -> Event:
+        from waxprep.security.event_metadata import validate_event_metadata
+
         if event.wax_id is None:
             return event
+        validate_event_metadata(event.metadata)
         self._events.setdefault(event.wax_id, []).append(event)
         return event
 

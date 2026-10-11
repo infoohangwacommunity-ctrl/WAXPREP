@@ -118,11 +118,15 @@ class DerivationWorker:
                     # contain student data. Log full exception locally;
                     # persist only the sanitized marker.
                     logger.exception("job %s failed", job.kind)
-                    attempts = job.attempts + 1
+                    # The attempt was already counted at claim time
+                    # (claim_due_jobs incremented attempts). Use that
+                    # count to decide whether to retry — one real
+                    # execution attempt counts exactly once.
+                    attempts = job.attempts  # already incremented by claim
                     retry_at = (
                         None
                         if attempts >= self._max_attempts
-                        else now + timedelta(seconds=self._retry_base * 2**job.attempts)
+                        else now + timedelta(seconds=self._retry_base * 2**attempts)
                     )
                     self._storage.mark_job_failed(
                         wax_id,

@@ -7,6 +7,7 @@ never whether it exists.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -28,6 +29,7 @@ from waxprep.domain.models import (
     Notebook,
     NotebookEntry,
     ObjectType,
+    OutboundDelivery,
     ProvenanceLink,
     Student,
     Summary,
@@ -56,6 +58,16 @@ class TokenStats:
 
 class Storage(Protocol):
     """Student-scoped persistence. Cross-student access must fail."""
+
+    def transaction(self) -> AbstractContextManager[Storage]:
+        """Context manager that wraps multiple storage operations in one
+        database transaction. If any operation within the context raises,
+        the whole transaction rolls back — no partial state.
+
+        For derived-object writes (node + provenance + index + jobs),
+        use this to make the logical mutation atomic (spec section 9).
+        """
+        ...
 
     # --- identity -------------------------------------------------------
     def create_student(self, student: Student) -> Student: ...
@@ -148,8 +160,35 @@ class Storage(Protocol):
         object_types: tuple[ObjectType, ...],
         since: datetime | None,
         until: datetime | None,
-        limit: int,
-    ) -> tuple[TokenMatch, ...]: ...
+        limit: int | None,
+    ) -> tuple[TokenMatch, ...]:
+        """Find token matches. ``limit=None`` means the whole corpus.
+
+        For paginated retrieval use ``find_by_tokens_page`` instead —
+        it returns one deterministic page and a cursor for the next.
+        """
+        ...
+
+    def find_by_tokens_page(
+        self,
+        wax_id: WaxId,
+        token_hashes: tuple[bytes, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID, bytes] | None = None,
+    ) -> tuple[TokenMatch, ...]:
+        """One page of token matches in deterministic order.
+
+        The cursor is ``(object_time, object_id, token_hash)`` of the
+        last row from the previous page. Rows are ordered
+        ``object_time DESC, object_id, token_hash`` so the next page
+        returns rows strictly after the cursor. An empty tuple means
+        no more pages.
+        """
+        ...
 
     def put_embedding(self, record: EmbeddingRecord) -> None: ...
 
@@ -160,8 +199,29 @@ class Storage(Protocol):
         *,
         since: datetime | None,
         until: datetime | None,
-        limit: int,
-    ) -> tuple[EmbeddingRecord, ...]: ...
+        limit: int | None,
+    ) -> tuple[EmbeddingRecord, ...]:
+        """List embeddings. ``limit=None`` means the whole corpus."""
+        ...
+
+    def list_embeddings_page(
+        self,
+        wax_id: WaxId,
+        object_types: tuple[ObjectType, ...],
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID] | None = None,
+    ) -> tuple[EmbeddingRecord, ...]:
+        """One page of embeddings in deterministic order.
+
+        The cursor is ``(object_time, object_id)`` of the last row from
+        the previous page. Rows are ordered ``object_time DESC, object_id``
+        so the next page returns rows strictly after the cursor. An
+        empty tuple means no more pages.
+        """
+        ...
 
     # --- notebook (derived durable understanding) --------------------------
     def get_or_create_notebook(self, wax_id: WaxId, now: datetime) -> Notebook: ...
@@ -297,6 +357,35 @@ class Storage(Protocol):
         self,
         wax_id: WaxId,
         job_id: UUID,
+        now: datetime,
+        error: str,
+        retry_at: datetime | None,
+    ) -> None: ...
+
+    # --- outbound delivery (outbox) ------------------------------------------------
+    def create_outbound_delivery(
+        self, delivery: OutboundDelivery
+    ) -> OutboundDelivery: ...
+
+    def get_outbound_delivery_for_tutor(
+        self, wax_id: WaxId, tutor_entry_id: UUID, channel: str | None
+    ) -> OutboundDelivery | None: ...
+
+    def list_due_outbound_deliveries(
+        self, wax_id: WaxId, now: datetime, limit: int
+    ) -> tuple[OutboundDelivery, ...]: ...
+
+    def mark_outbound_delivered(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
+        now: datetime,
+    ) -> None: ...
+
+    def mark_outbound_failed(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
         now: datetime,
         error: str,
         retry_at: datetime | None,

@@ -6,13 +6,22 @@ A student's world is **one unified, timestamped history**. Everything Wax Prep
 knows is either that history, or something *derived from it that points back to it*.
 
 ```text
-Student
+Student message
   |
   v
-Channel adapter (WhatsApp now; Telegram/web later)
+Teacher (drives the turn)
+  |
+  |   may consult Context Intelligence (bounded)
+  |   may request another investigation (bounded)
+  v
+Context Intelligence investigates the student's world
   |
   v
-Turn: save what the student said -> Context Intelligence -> Teacher -> save what the tutor said
+Teacher receives evidence/context
+  |
+  |   eventually produces the response
+  v
+Tutor response is durably saved + outbound delivery recorded
   |
   +-- Unified history   what happened (every student AND tutor message, with time, who, never deleted)
   +-- Derived, always linked back to history:
@@ -27,15 +36,35 @@ Turn: save what the student said -> Context Intelligence -> Teacher -> save what
 Model Gateway (provider-neutral) -> Upstage / OpenAI / Anthropic / mock
 ```
 
+**Important:** the Teacher's teaching intelligence is **intentionally
+unimplemented** in this build. The Teacher is a Protocol; tests use
+a deterministic mock. The future Teacher-intelligence build will plug
+in a real Teacher that follows the same contract.
+
 ## Roles
 
 - **History service** saves first and unconditionally. It never asks "is this important?".
-- **Context Intelligence (CI)** is a small model. It owns *meaning*: what the student
-  is referring to, what to look up, what is out of date, what is worth keeping.
+  The exact student message reaches the Teacher untouched — never rewritten,
+  summarized, or replaced by CI's interpretation.
+- **Teacher** drives the turn. It decides whether to consult CI, what to ask,
+  and whether the result is sufficient. The Teacher's intelligence is a
+  future build; this build provides only the orchestration contract.
+- **Context Intelligence (CI)** is a research/investigation system. It
+  investigates the student's world and returns evidence and uncertainty.
+  It never directly answers the student's educational question. It is a
+  capability the Teacher uses, not a gatekeeper that sits in front of
+  the Teacher.
 - **Services** own *execution*: validated, student-scoped reads and writes.
+  Derived-object + provenance + index writes are atomic (spec section 9).
 - **Storage** owns *persistence*. PostgreSQL Row-Level Security owns *isolation*.
+  The storage layer provides a `transaction()` context manager for atomic
+  derived operations.
 - **Background worker** owns *derived work* (embeddings, artifact reading) and retries it.
-  A failure there can never lose or block a saved message.
+  A failure there can never lose or block a saved message. Job attempt
+  accounting is correct: one real execution attempt counts exactly once.
+- **Scheduler** provides a provider-neutral CLI entry point
+  (`python -m waxprep.scheduler run-once` or `run-interval`) that is safe
+  to run concurrently across multiple processes.
 
 ## Rules
 
@@ -47,19 +76,53 @@ Model Gateway (provider-neutral) -> Upstage / OpenAI / Anthropic / mock
 5. No keyword routing, no fixed profile fields, no media-type handling in intelligence code.
 6. Sensitive text is encrypted by the application (AES-256-GCM, per-student keys).
    Exact-word search uses blind (HMAC) hashes so encryption and search coexist.
+   Keys can be rotated safely (spec section 14).
 7. Normal tests make no paid AI calls.
 
-## Time
+## Teacher ↔ CI consultation contract
 
-Every history entry has `occurred_at` (when it happened) and `recorded_at` (when we saved it).
-CI and the Teacher are told the current time on every turn.
+The Teacher receives:
+- the exact student `HistoryEntry` (untouched)
+- the current time
+- the WAX ID
+- a `TeacherConsultation` capability
+- any already-returned CI context from earlier rounds
 
-## Glossary
+The Teacher can:
+- respond without consulting CI
+- ask CI a targeted question
+- receive CI context (evidence + synthesis + uncertainty + provenance)
+- ask CI for another bounded investigation
+- eventually return reply text
 
-- **History entry:** one message in or out, with author kind, time, and optional media.
-- **Author kind:** student, tutor, or system.
-- **Notebook entry:** derived durable understanding; replaceable, never deleted.
-- **Summary:** compressed view of a time span, linked to every entry it covers.
-- **Provenance link:** "this derived object is supported by that source".
-- **Artifact:** a durable object in the student's workspace (a file, a quiz, an image...).
-- **Blind index:** keyed hashes of words so the database can match without reading them.
+The orchestration enforces a configurable hard upper bound on
+consultations per student turn (default 3) so a buggy Teacher cannot
+enter an infinite CI loop.
+
+## Retrieval architecture
+
+Candidate generation and ranking are **separate concepts**:
+- `find_exact` paginates through **all** matching token rows (no arbitrary
+  wall), scoring each page and keeping a running top-N.
+- `find_by_meaning` paginates through embeddings with a configurable page
+  size, scoring each page. Early termination when the top-N is provably stable.
+- Pagination is deterministic (cursor = last row's `(object_time, object_id, [token_hash])`).
+- Ranking happens before the final evidence limit.
+- The design is replaceable: a real vector index (pgvector, dedicated
+  service) can later be introduced without changing the memory architecture.
+
+## Outbound delivery (outbox)
+
+The tutor reply is saved first; then an outbound delivery record is
+created; then delivery is attempted. A crash between saving the reply
+and marking delivered is recoverable: the retry sends the same stored
+reply without invoking the Teacher again.
+
+## Cross-tenant security
+
+- RLS is database-enforced on every student-scoped table.
+- Composite foreign keys enforce same-student ownership for every
+  reference that can be structurally protected.
+- A `waxprep_object_owner` SECURITY DEFINER function lets the application
+  check ownership of polymorphic provenance references that cannot be
+  protected by an ordinary FK.

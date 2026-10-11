@@ -73,6 +73,21 @@ class JobStatus(StrEnum):
     FAILED = "failed"
 
 
+class OutboundStatus(StrEnum):
+    """Lifecycle of an outbound channel delivery attempt.
+
+    The outbox pattern: the tutor reply is saved first, then a delivery
+    record is created, then delivery is attempted. A crash between
+    saving the reply and marking delivered is recoverable: the retry
+    sends the same stored reply without invoking the Teacher again.
+    """
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
 class ArtifactStatus(StrEnum):
     """Lifecycle state of a durable workspace artifact."""
 
@@ -224,6 +239,30 @@ class DerivationJob:
     updated_at: datetime
     last_error: str | None = None
     lease_until: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundDelivery:
+    """One outbound delivery attempt for a tutor reply (outbox).
+
+    The tutor reply is saved to ``history_entries`` first; this record
+    tracks the channel delivery of that reply. A crash between saving
+    the reply and marking this delivered is recoverable: the retry
+    sends the same stored reply without invoking the Teacher again.
+    """
+
+    id: UUID
+    wax_id: WaxId
+    tutor_entry_id: UUID
+    channel: str | None
+    channel_ref: str | None
+    status: OutboundStatus
+    attempts: int
+    last_error: str | None
+    delivered_at: datetime | None
+    run_after: datetime
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
