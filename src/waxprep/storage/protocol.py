@@ -28,6 +28,7 @@ from waxprep.domain.models import (
     Notebook,
     NotebookEntry,
     ObjectType,
+    OutboundDelivery,
     ProvenanceLink,
     Student,
     Summary,
@@ -297,6 +298,35 @@ class Storage(Protocol):
         self,
         wax_id: WaxId,
         job_id: UUID,
+        now: datetime,
+        error: str,
+        retry_at: datetime | None,
+    ) -> None: ...
+
+    # --- outbound delivery (outbox) ------------------------------------------------
+    def create_outbound_delivery(
+        self, delivery: OutboundDelivery
+    ) -> OutboundDelivery: ...
+
+    def get_outbound_delivery_for_tutor(
+        self, wax_id: WaxId, tutor_entry_id: UUID, channel: str | None
+    ) -> OutboundDelivery | None: ...
+
+    def list_due_outbound_deliveries(
+        self, wax_id: WaxId, now: datetime, limit: int
+    ) -> tuple[OutboundDelivery, ...]: ...
+
+    def mark_outbound_delivered(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
+        now: datetime,
+    ) -> None: ...
+
+    def mark_outbound_failed(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
         now: datetime,
         error: str,
         retry_at: datetime | None,

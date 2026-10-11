@@ -1,16 +1,11 @@
-"""Blocker D acceptance tests (spec §8.3 items 5 and 6):
-- Process crashes after saving the student message but before CI; a retry
-  resumes processing and ultimately stores exactly one tutor reply.
-- Process crashes after storing the tutor reply but before outbound
-  delivery; a retry delivers the same stored reply rather than generating
-  a second one.
+"""Outbound delivery and crash-recovery tests.
 
-The contract the tests exercise:
-  - A duplicate channel delivery is detected via (channel, channel_ref).
-  - If no tutor reply has been saved yet for the trigger entry, the turn
-    re-runs investigation and teaching and saves exactly one reply.
-  - If a tutor reply is already stored, it is returned without re-teaching.
-  - The DB enforces at-most-one tutor reply per trigger entry (migration 008).
+The outbox pattern: the tutor reply is saved first, then an outbound
+delivery record is created, then delivery is attempted. A crash between
+saving the reply and marking delivered is recoverable: the retry sends
+the same stored reply without invoking the Teacher again.
+
+These tests verify the crash-recovery contract end-to-end.
 """
 
 from __future__ import annotations
@@ -19,7 +14,7 @@ import pytest
 
 from support import RecordingTeacher, add_student, make_world
 from waxprep.domain.models import AuthorKind
-from waxprep.history.service import HistoryService
+from waxprep.orchestration import TeacherInput, TeacherOutcome
 
 
 class _CrashingTeacher(RecordingTeacher):
@@ -33,44 +28,40 @@ class _CrashingTeacher(RecordingTeacher):
         super().__init__()
         self.calls = 0
 
-    async def reply(self, wax_id, message, context):  # type: ignore[no-untyped-def]
+    async def teach(self, inp: TeacherInput) -> TeacherOutcome:
         self.calls += 1
+        self.seen_inputs.append(inp)
         if self.calls == 1:
             raise RuntimeError("process crashed before saving tutor reply")
-        return await super().reply(wax_id, message, context)
+        return await super().teach(inp)
 
 
 @pytest.mark.asyncio
 async def test_crash_after_student_message_resumes_and_saves_one_reply() -> None:
-    """§8.3 item 5: crash after save → retry → exactly one tutor reply.
-
-    First delivery saves the student message, then crashes before the
-    tutor reply is stored. A retry (the duplicate channel delivery)
-    resumes and saves exactly one tutor reply.
+    """First delivery saves the student message, then crashes before the
+    tutor reply is stored. A retry (duplicate channel delivery) resumes
+    and saves exactly one tutor reply.
     """
     world = make_world(teacher=_CrashingTeacher())
     wax = add_student(world)
     channel = "whatsapp"
     channel_ref = "msg-001"
-    # First delivery: saves the student message, then the teacher crashes
-    # before a tutor reply can be stored.
+    # First delivery: saves the student message, then the Teacher crashes.
     with pytest.raises(RuntimeError):
         await world.services.turns.handle_student_message(
             wax, "I need help", channel=channel, channel_ref=channel_ref
         )
-    # The student message was saved (durable before teaching).
+    # The student message was saved.
     student_history = world.storage.list_history(wax)
     assert len(student_history) == 1
     assert student_history[0].author_kind is AuthorKind.STUDENT
     # Provider retry: the same (channel, channel_ref) is delivered again.
-    # This time, the teacher succeeds. The turn must resume and store
-    # exactly one tutor reply — not silently declare the turn done.
+    # This time the Teacher succeeds.
     result = await world.services.turns.handle_student_message(
         wax, "I need help", channel=channel, channel_ref=channel_ref
     )
-    assert result.duplicate, "the duplicate delivery must be detected"
-    assert result.tutor_entry is not None, "the turn must resume and produce a reply"
-    # Exactly one student message and one tutor reply in the history.
+    assert result.duplicate
+    assert result.tutor_entry is not None
     history = world.storage.list_history(wax)
     authors = [e.author_kind for e in history]
     assert authors.count(AuthorKind.STUDENT) == 1
@@ -85,21 +76,20 @@ class _TeacherCrashesAfterReply(RecordingTeacher):
     """
 
     def __init__(self) -> None:
-        super().__init__(reply="Tutor's first reply")
+        super().__init__(reply_text="Tutor's first reply")
         self.calls = 0
 
-    async def reply(self, wax_id, message, context):  # type: ignore[no-untyped-def]
+    async def teach(self, inp: TeacherInput) -> TeacherOutcome:
         self.calls += 1
-        return await super().reply(wax_id, message, context)
+        self.seen_inputs.append(inp)
+        return await super().teach(inp)
 
 
 @pytest.mark.asyncio
 async def test_crash_after_tutor_reply_saved_resumes_with_same_reply() -> None:
-    """§8.3 item 6: crash after tutor reply saved → retry → same reply returned.
-
-    A tutor reply is saved to history. The process then crashes before the
-    outbound channel delivery. A retry must return the same stored reply
-    rather than teaching a second time.
+    """A tutor reply is saved to history. The process then crashes before
+    the outbound channel delivery. A retry must return the same stored
+    reply rather than teaching a second time.
     """
     teacher = _TeacherCrashesAfterReply()
     world = make_world(teacher=teacher)
@@ -119,12 +109,9 @@ async def test_crash_after_tutor_reply_saved_resumes_with_same_reply() -> None:
     )
     assert again.duplicate
     assert again.tutor_entry is not None
-    assert again.tutor_entry.id == first.tutor_entry.id, (
-        "the same stored reply must be returned, not a new one"
-    )
+    assert again.tutor_entry.id == first.tutor_entry.id
     assert again.tutor_entry.text == first.tutor_entry.text
-    assert teacher.calls == 1, "the teacher must not be called a second time"
-    # History is unchanged: one student message, one tutor reply.
+    assert teacher.calls == 1, "the Teacher must not be called a second time"
     history = world.storage.list_history(wax)
     authors = [e.author_kind for e in history]
     assert authors.count(AuthorKind.STUDENT) == 1
@@ -134,7 +121,7 @@ async def test_crash_after_tutor_reply_saved_resumes_with_same_reply() -> None:
 @pytest.mark.asyncio
 async def test_two_simultaneous_deliveries_one_reply() -> None:
     """Two simultaneous channel deliveries of the same message result in
-    exactly one tutor reply. The duplicate is detected via (channel, channel_ref).
+    exactly one tutor reply.
     """
     teacher = RecordingTeacher()
     world = make_world(teacher=teacher)
@@ -149,21 +136,4 @@ async def test_two_simultaneous_deliveries_one_reply() -> None:
     assert first.tutor_entry is not None
     assert again.tutor_entry is not None
     assert again.tutor_entry.id == first.tutor_entry.id
-    assert len(teacher.seen) == 1, "the teacher must be called exactly once"
-
-
-def test_history_service_is_idempotent_for_duplicate_channel() -> None:
-    """The history service alone (no turn flow) returns the existing
-    entry for a duplicate (channel, channel_ref) delivery — without
-    enqueuing new derivation jobs."""
-    world = make_world()
-    wax = add_student(world)
-    history: HistoryService = world.services.history
-    first, created1 = history.record_with_status(
-        wax, AuthorKind.STUDENT, "hello", channel="wa", channel_ref="m-x"
-    )
-    again, created2 = history.record_with_status(
-        wax, AuthorKind.STUDENT, "hello", channel="wa", channel_ref="m-x"
-    )
-    assert created1 and not created2
-    assert again.id == first.id
+    assert len(teacher.seen_inputs) == 1

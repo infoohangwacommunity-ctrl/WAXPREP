@@ -1,4 +1,21 @@
-"""One place where every part of the unified architecture is connected."""
+"""One place where every part of the unified architecture is connected.
+
+The architecture is Teacher-first:
+
+    Student message
+        |
+        v
+    Teacher (drives the turn)
+        |   may consult Context Intelligence (bounded)
+        v
+    Teacher eventually produces the response
+        |
+        v
+    Tutor response is durably saved + outbound delivery recorded
+
+The Teacher intelligence itself is **intentionally unimplemented** in
+this build. The Teacher is a Protocol; tests use ``MockTeacher``.
+"""
 
 from __future__ import annotations
 
@@ -17,9 +34,9 @@ from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.history.service import HistoryService
 from waxprep.index.indexer import Indexer
 from waxprep.index.tokens import TokenIndex
+from waxprep.orchestration import Teacher, TurnService
 from waxprep.security.cipher import FieldCipher
 from waxprep.storage.protocol import Storage
-from waxprep.turns import Teacher, TurnService
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +63,15 @@ def build_services(
     embedder: EmbeddingProvider | None = None,
     consolidation_model: ConsolidationModel | None = None,
     artifact_processor: ArtifactProcessor | None = None,
+    max_consultations: int = 3,
 ) -> WaxPrepServices:
+    """Build the unified service graph.
+
+    Args:
+        max_consultations: Hard upper bound on Teacher↔CI consultations
+            per student turn. The default (3) is conservative; the value
+            is configuration, not buried business logic.
+    """
     token_index = TokenIndex(cipher)
     has_embedder = embedder is not None
     has_artifacts = artifact_processor is not None
@@ -77,7 +102,14 @@ def build_services(
     worker = DerivationWorker(
         storage, token_index, clock, embedder=embedder, artifacts=artifacts
     )
-    turns = TurnService(storage, history, investigator, teacher, clock)
+    turns = TurnService(
+        storage,
+        history,
+        investigator,
+        teacher,
+        clock,
+        max_consultations=max_consultations,
+    )
     return WaxPrepServices(
         storage=storage,
         history=history,

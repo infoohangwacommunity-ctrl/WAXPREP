@@ -36,6 +36,8 @@ from waxprep.domain.models import (
     NotebookEntry,
     NotebookEntryStatus,
     ObjectType,
+    OutboundDelivery,
+    OutboundStatus,
     ProvenanceLink,
     Student,
     StudentStatus,
@@ -1504,10 +1506,12 @@ class PostgresStorage:
         self._conn.commit()
 
     def mark_job_done(self, wax_id: WaxId, job_id: UUID, now: datetime) -> None:
+        # Success does not increment attempts; the attempt was counted at
+        # claim time.
         self._write(
             wax_id,
-            "UPDATE derivation_jobs SET status = 'done', updated_at = %s "
-            "WHERE wax_id = %s AND id = %s",
+            "UPDATE derivation_jobs SET status = 'done', lease_until = NULL, "
+            "updated_at = %s WHERE wax_id = %s AND id = %s",
             (now, wax_id, job_id),
         )
 
@@ -1519,10 +1523,15 @@ class PostgresStorage:
         error: str,
         retry_at: datetime | None,
     ) -> None:
+        # Blocker G (spec 8.2-#10): the attempt was already counted at
+        # claim time. Failure records the result of the same attempt;
+        # it must NOT increment attempts again. One real execution
+        # attempt counts exactly once.
         self._write(
             wax_id,
-            "UPDATE derivation_jobs SET attempts = attempts + 1, last_error = %s, "
-            "status = %s, run_after = COALESCE(%s, run_after), updated_at = %s "
+            "UPDATE derivation_jobs SET last_error = %s, "
+            "status = %s, run_after = COALESCE(%s, run_after), "
+            "lease_until = NULL, updated_at = %s "
             "WHERE wax_id = %s AND id = %s",
             (
                 error,
@@ -1570,6 +1579,126 @@ class PostgresStorage:
             ),
         )
         return event
+
+    # --- outbound delivery (outbox) ------------------------------------------------
+    def create_outbound_delivery(self, delivery: OutboundDelivery) -> OutboundDelivery:
+        set_current_wax_id(self._conn, delivery.wax_id)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO outbound_deliveries "
+                "(id, wax_id, tutor_entry_id, channel, channel_ref, status, "
+                "attempts, last_error, delivered_at, run_after, created_at, "
+                "updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (
+                    delivery.id,
+                    delivery.wax_id,
+                    delivery.tutor_entry_id,
+                    delivery.channel,
+                    delivery.channel_ref,
+                    delivery.status.value,
+                    delivery.attempts,
+                    delivery.last_error,
+                    delivery.delivered_at,
+                    delivery.run_after,
+                    delivery.created_at,
+                    delivery.updated_at,
+                ),
+            )
+            if cur.rowcount == 0:
+                # Duplicate (wax_id, tutor_entry_id, channel) — return
+                # the existing one.
+                cur.execute(
+                    "SELECT * FROM outbound_deliveries "
+                    "WHERE wax_id = %s AND tutor_entry_id = %s AND channel IS NOT DISTINCT FROM %s",
+                    (delivery.wax_id, delivery.tutor_entry_id, delivery.channel),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    self._conn.commit()
+                    return self._outbound(row)
+        self._conn.commit()
+        return delivery
+
+    def get_outbound_delivery_for_tutor(
+        self, wax_id: WaxId, tutor_entry_id: UUID, channel: str | None
+    ) -> OutboundDelivery | None:
+        row = self._one(
+            wax_id,
+            "SELECT * FROM outbound_deliveries "
+            "WHERE wax_id = %s AND tutor_entry_id = %s "
+            "AND channel IS NOT DISTINCT FROM %s",
+            (wax_id, tutor_entry_id, channel),
+        )
+        return self._outbound(row) if row else None
+
+    def list_due_outbound_deliveries(
+        self, wax_id: WaxId, now: datetime, limit: int
+    ) -> tuple[OutboundDelivery, ...]:
+        rows = self._read(
+            wax_id,
+            "SELECT * FROM outbound_deliveries WHERE wax_id = %s "
+            "AND status IN ('pending', 'in_progress') AND run_after <= %s "
+            "ORDER BY run_after LIMIT %s",
+            (wax_id, now, limit),
+        )
+        return tuple(self._outbound(r) for r in rows)
+
+    def mark_outbound_delivered(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
+        now: datetime,
+    ) -> None:
+        # Delivery attempts are counted in the channel adapter; this
+        # method records the final delivered state without incrementing
+        # attempts (the channel adapter updates attempts separately).
+        self._write(
+            wax_id,
+            "UPDATE outbound_deliveries SET status = 'delivered', "
+            "delivered_at = %s, updated_at = %s WHERE wax_id = %s AND id = %s",
+            (now, now, wax_id, delivery_id),
+        )
+
+    def mark_outbound_failed(
+        self,
+        wax_id: WaxId,
+        delivery_id: UUID,
+        now: datetime,
+        error: str,
+        retry_at: datetime | None,
+    ) -> None:
+        self._write(
+            wax_id,
+            "UPDATE outbound_deliveries SET last_error = %s, "
+            "status = %s, run_after = COALESCE(%s, run_after), updated_at = %s "
+            "WHERE wax_id = %s AND id = %s",
+            (
+                error,
+                "pending" if retry_at is not None else "failed",
+                retry_at,
+                now,
+                wax_id,
+                delivery_id,
+            ),
+        )
+
+    def _outbound(self, row: Row) -> OutboundDelivery:
+        return OutboundDelivery(
+            id=row["id"],
+            wax_id=WaxId(row["wax_id"]),
+            tutor_entry_id=row["tutor_entry_id"],
+            channel=row["channel"],
+            channel_ref=row["channel_ref"],
+            status=OutboundStatus(row["status"]),
+            attempts=row["attempts"],
+            last_error=row["last_error"],
+            delivered_at=row["delivered_at"],
+            run_after=row["run_after"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     def list_events(self, wax_id: WaxId) -> tuple[Event, ...]:
         rows = self._read(
