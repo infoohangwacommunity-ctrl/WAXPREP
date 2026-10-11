@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 
 from waxprep.model_gateway.errors import (
     ModelGatewayError,
+    RoleMismatchError,
     UnsupportedCapabilityError,
 )
 from waxprep.model_gateway.models import (
@@ -40,6 +41,7 @@ class ModelGateway:
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         config, provider = self._registry.resolve(request.model)
+        self._validate_role(request, config.role)
         self._validate_request_capabilities(request, config.capabilities)
         attempts = self._max_retries + 1
         for attempt in range(attempts):
@@ -62,6 +64,7 @@ class ModelGateway:
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         config, provider = self._registry.resolve(request.model)
+        self._validate_role(request, config.role)
         self._validate_request_capabilities(request, config.capabilities)
         if ModelCapability.STREAMING not in config.capabilities:
             raise UnsupportedCapabilityError(
@@ -69,6 +72,15 @@ class ModelGateway:
             )
         async for event in provider.stream(request):
             yield event
+
+    @staticmethod
+    def _validate_role(request: ModelRequest, registered_role: object) -> None:
+        if request.role != registered_role:
+            raise RoleMismatchError(
+                f"model {request.model!r} is registered as role "
+                f"{getattr(registered_role, 'value', registered_role)!r} but "
+                f"request requires role {request.role.value!r}"
+            )
 
     @staticmethod
     def _validate_request_capabilities(

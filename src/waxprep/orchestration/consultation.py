@@ -101,12 +101,48 @@ class CIBackedConsultation(TeacherConsultation):
             evidence=package.evidence,
             synthesis=package.summary,
             uncertainty=package.uncertainty,
-            provenance_refs=(),
-            currentness={},
-            insufficient=bool(package.uncertainty),
+            provenance_refs=_provenance_refs_from_package(package),
+            currentness=_currentness_from_package(package, request.now),
+            insufficient=bool(package.uncertainty)
+            or package.stopped_reason
+            in {"no_evidence", "empty_query", "investigation_failed"},
             stopped_reason=package.stopped_reason,
-            metadata={"investigated": list(package.investigated)},
+            metadata={
+                "investigated": list(package.investigated),
+                "as_of": package.as_of.isoformat() if package.as_of else None,
+                **{k: v for k, v in package.metadata.items() if isinstance(k, str)},
+            },
         )
+
+
+def _provenance_refs_from_package(package: ContextPackage) -> tuple:
+    """Carry typed provenance links from package metadata when present."""
+    from waxprep.domain.models import ProvenanceLink
+
+    raw = package.metadata.get("provenance_links") if package.metadata else None
+    if isinstance(raw, (list, tuple)):
+        links = tuple(x for x in raw if isinstance(x, ProvenanceLink))
+        if links:
+            return links
+    return ()
+
+
+def _currentness_from_package(package: ContextPackage, now: object) -> dict:
+    """Map each evidence id to a human-readable age relative to ``now``."""
+    from datetime import datetime
+    from uuid import UUID
+
+    from waxprep.context.temporal import describe_age
+
+    if not isinstance(now, datetime):
+        return {}
+    out: dict[UUID, str] = {}
+    for item in package.evidence:
+        try:
+            out[item.id] = describe_age(now, item.created_at)
+        except Exception:
+            out[item.id] = "unknown"
+    return out
 
 
 __all__ = ["CIBackedConsultation"]

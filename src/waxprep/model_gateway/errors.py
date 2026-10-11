@@ -43,6 +43,10 @@ class UnsupportedCapabilityError(ModelGatewayError):
     """The requested capability is not available."""
 
 
+class RoleMismatchError(ModelGatewayError):
+    """Request role does not match the registered model role."""
+
+
 class ProviderError(ModelGatewayError):
     """Unclassified provider-side failure."""
 

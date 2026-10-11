@@ -61,3 +61,13 @@ class ModelRegistry:
 
     def providers(self) -> Mapping[str, ModelProvider]:
         return dict(self._providers)
+
+    def require_model_role(self, name: str, role: ModelRole) -> ModelConfig:
+        """Resolve a logical model and require it to be registered for ``role``."""
+        config = self.get_model(name)
+        if config.role is not role:
+            raise ValueError(
+                f"model {name!r} is registered as role {config.role.value!r}, "
+                f"expected {role.value!r}"
+            )
+        return config

@@ -7,6 +7,7 @@ from waxprep.model_gateway.errors import (
     ModelGatewayError,
     ProviderUnavailableError,
     RateLimitError,
+    RoleMismatchError,
     TimeoutError,
     UnsupportedCapabilityError,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "ModelUsage",
     "ProviderUnavailableError",
     "RateLimitError",
+    "RoleMismatchError",
     "StreamEvent",
     "TimeoutError",
     "ToolCall",

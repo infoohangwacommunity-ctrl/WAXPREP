@@ -105,6 +105,14 @@ def build_services(
                 "build_services requires a Teacher instance or a ModelGateway "
                 "with a registered Teacher model (role ModelRole.TEACHER)"
             )
+        # Composition-time validation: logical Teacher model must exist and
+        # be registered with ModelRole.TEACHER (not CONTEXT or other roles).
+        from waxprep.model_gateway.models import ModelRole
+        from waxprep.model_gateway.registry import ModelRegistry
+
+        registry = getattr(gateway, "_registry", None)
+        if isinstance(registry, ModelRegistry):
+            registry.require_model_role(teacher_model_name, ModelRole.TEACHER)
         teacher = ModelTeacher(gateway, model_name=teacher_model_name)
     token_index = TokenIndex(cipher)
     has_embedder = embedder is not None

@@ -136,3 +136,33 @@ async def test_gateway_streams_normalized_events() -> None:
     ]
     assert events[0].type is StreamEventType.TEXT_DELTA
     assert events[-1].type is StreamEventType.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_role_mismatch() -> None:
+    """Registered CONTEXT model must not satisfy a TEACHER request."""
+    from waxprep.model_gateway.errors import RoleMismatchError
+
+    provider = MockProvider(response_text="nope")
+    registry = ModelRegistry()
+    registry.register_provider(provider)
+    registry.register_model(
+        ModelConfig(
+            name="teacher",
+            provider="mock",
+            model="mock-model",
+            role=ModelRole.CONTEXT,  # wrong role on purpose
+            capabilities=provider.capabilities("mock-model"),
+        )
+    )
+    gateway = ModelGateway(registry)
+    with pytest.raises(RoleMismatchError):
+        await gateway.complete(
+            ModelRequest(
+                wax_id=uuid4(),
+                role=ModelRole.TEACHER,
+                model="teacher",
+                instructions=None,
+                input=(ContentItem(type=ContentType.TEXT, text="Hello"),),
+            )
+        )
