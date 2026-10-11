@@ -3,6 +3,19 @@
 Each method is one *capability* (exact words, meaning, time, neighbours,
 sources, relationships). The model decides which to use; this module only
 executes, always scoped to one WAX ID, and never decides relevance itself.
+
+Retrieval architecture (spec section 7):
+- Candidate generation and ranking are **separate concepts**.
+- ``find_exact`` paginates through **all** matching token rows (no
+  arbitrary wall), scoring each page and keeping a running top-N.
+- ``find_by_meaning`` paginates through embeddings with a configurable
+  page size, scoring each page. Early termination when the top-N is
+  provably stable (no future page can improve the result).
+- Pagination is deterministic (cursor = last row's
+  ``(object_time, object_id, [token_hash])``).
+- The design is replaceable: a real vector index (pgvector, dedicated
+  service) can later be introduced without changing the memory
+  architecture — only the storage implementation changes.
 """
 
 from __future__ import annotations
@@ -24,12 +37,12 @@ from waxprep.storage.protocol import Storage
 
 ALL_INDEXED: tuple[ObjectType, ...] = tuple(sorted(INDEXED_OBJECT_TYPES, key=str))
 COMMON_TOKEN_SHARE = 0.2
-# Blocker H (spec 8.2-H): a hard cap on token matches can hide old
-# records. The default is generous; production deployments that exceed
-# this bound should benchmark a real vector + GIN index. The cap is
-# configurable so tests can verify rank-then-limit behaviour without
-# creating thousands of rows.
-MAX_TOKEN_ROWS = 50000
+
+# Default page sizes for paginated retrieval. These are NOT memory walls —
+# they bound the size of one database round-trip. The retriever continues
+# paginating until either the corpus is exhausted or the top-N is stable.
+DEFAULT_TOKEN_PAGE_SIZE = 5000
+DEFAULT_EMBEDDING_PAGE_SIZE = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,12 +62,14 @@ class Retriever:
         token_index: TokenIndex,
         *,
         recency_half_life_days: float = 180.0,
-        max_semantic_candidates: int = 5000,
+        token_page_size: int = DEFAULT_TOKEN_PAGE_SIZE,
+        embedding_page_size: int = DEFAULT_EMBEDDING_PAGE_SIZE,
     ) -> None:
         self._storage = storage
         self._token_index = token_index
         self._half_life = recency_half_life_days
-        self._max_candidates = max_semantic_candidates
+        self._token_page_size = token_page_size
+        self._embedding_page_size = embedding_page_size
 
     # --- exact words -----------------------------------------------------
     def find_exact(
@@ -69,6 +84,12 @@ class Retriever:
         limit: int = 8,
         ignore_recency: bool = False,
     ) -> tuple[Evidence, ...]:
+        """Rank-then-limit lexical search.
+
+        Paginates through **all** matching token rows, scoring each
+        page and keeping a running top-N. There is no arbitrary wall:
+        an old relevant record beyond the first page can still surface.
+        """
         hashes = self._token_index.hashes(wax_id, query)
         if not hashes:
             return ()
@@ -83,21 +104,37 @@ class Retriever:
             for h in hashes
             if stats.document_frequency.get(h, 0) / total <= COMMON_TOKEN_SHARE
         )
-        usable = rare or hashes  # only-common words still count when nothing else
-        matches = self._storage.find_by_tokens(
-            wax_id,
-            usable,
-            object_types=object_types,
-            since=since,
-            until=until,
-            limit=MAX_TOKEN_ROWS,
-        )
+        usable = rare or hashes
+
         scores: dict[tuple[ObjectType, UUID], float] = defaultdict(float)
         times: dict[tuple[ObjectType, UUID], datetime] = {}
-        for match in matches:
-            key = (match.object_type, match.object_id)
-            scores[key] += weights.get(match.token_hash, 0.1)
-            times[key] = match.object_time
+
+        # Paginated retrieval: continue until the corpus is exhausted.
+        cursor: tuple[datetime, UUID, bytes] | None = None
+        pages = 0
+        max_pages = 1000  # safety bound; one student's corpus is bounded
+        while pages < max_pages:
+            page = self._storage.find_by_tokens_page(
+                wax_id,
+                usable,
+                object_types=object_types,
+                since=since,
+                until=until,
+                page_size=self._token_page_size,
+                cursor=cursor,
+            )
+            if not page:
+                break
+            for match in page:
+                key = (match.object_type, match.object_id)
+                scores[key] += weights.get(match.token_hash, 0.1)
+                times[key] = match.object_time
+            last = page[-1]
+            cursor = (last.object_time, last.object_id, last.token_hash)
+            pages += 1
+            if len(page) < self._token_page_size:
+                break  # last page
+
         scored = [
             Scored(
                 object_type=key[0],
@@ -112,6 +149,9 @@ class Retriever:
             )
             for key, value in scores.items()
         ]
+        # Rank BEFORE applying the final evidence limit — this is the
+        # "rank-then-limit" property the spec requires.
+        scored.sort(key=lambda s: s.score, reverse=True)
         return self._hydrate(wax_id, scored, "exact words", limit)
 
     # --- meaning -------------------------------------------------------------
@@ -127,34 +167,67 @@ class Retriever:
         limit: int = 8,
         ignore_recency: bool = False,
     ) -> tuple[Evidence, ...]:
-        records = self._storage.list_embeddings(
-            wax_id,
-            object_types,
-            since=since,
-            until=until,
-            limit=self._max_candidates,
-        )
+        """Rank-then-limit semantic search with paginated candidate
+        generation.
+
+        Paginates through embeddings in deterministic order. Each page is
+        decrypted, scored against the query vector, and the running top-N
+        is kept. Early termination when the top-N's minimum score exceeds
+        the max possible score from any future page (which is bounded by
+        1.0 × recency_weight at the oldest possible time).
+        """
         scored: list[Scored] = []
-        for record in records:
-            try:
-                similarity = cosine_similarity(query_vector, record.vector)
-            except ValueError:
-                continue  # vector from a different embedding model
-            if similarity <= 0:
-                continue
-            weight = (
-                1.0
-                if ignore_recency
-                else recency_weight(now, record.object_time, self._half_life)
+        cursor: tuple[datetime, UUID] | None = None
+        pages = 0
+        max_pages = 10000  # safety bound
+        while pages < max_pages:
+            page = self._storage.list_embeddings_page(
+                wax_id,
+                object_types,
+                since=since,
+                until=until,
+                page_size=self._embedding_page_size,
+                cursor=cursor,
             )
-            scored.append(
-                Scored(
-                    record.object_type,
-                    record.object_id,
-                    record.object_time,
-                    similarity * weight,
+            if not page:
+                break
+            for record in page:
+                try:
+                    similarity = cosine_similarity(query_vector, record.vector)
+                except ValueError:
+                    continue  # vector from a different embedding model
+                if similarity <= 0:
+                    continue
+                weight = (
+                    1.0
+                    if ignore_recency
+                    else recency_weight(now, record.object_time, self._half_life)
                 )
-            )
+                scored.append(
+                    Scored(
+                        record.object_type,
+                        record.object_id,
+                        record.object_time,
+                        similarity * weight,
+                    )
+                )
+            last = page[-1]
+            cursor = (last.object_time, last.object_id)
+            pages += 1
+            if len(page) < self._embedding_page_size:
+                break  # last page
+            # Early termination: if the top-N's min score already exceeds
+            # the max possible score from any future page, stop. The max
+            # possible score for any future embedding is
+            # 1.0 (max cosine similarity) × max recency_weight of any
+            # future time, which is <= 1.0. So if our current top-N min
+            # is >= 1.0, we can stop. This is conservative but correct.
+            if len(scored) >= limit:
+                scored.sort(key=lambda s: s.score, reverse=True)
+                if scored[limit - 1].score >= 1.0:
+                    break
+
+        scored.sort(key=lambda s: s.score, reverse=True)
         return self._hydrate(wax_id, scored, "similar meaning", limit)
 
     # --- time ------------------------------------------------------------------
@@ -293,7 +366,7 @@ class Retriever:
     def _hydrate(
         self, wax_id: WaxId, scored: list[Scored], reason: str, limit: int
     ) -> tuple[Evidence, ...]:
-        scored.sort(key=lambda s: s.score, reverse=True)
+        # ``scored`` is already sorted by score DESC (rank-then-limit).
         out: list[Evidence] = []
         for item in scored:
             found = hydrate(
@@ -310,4 +383,9 @@ class Retriever:
         return tuple(out)
 
 
-__all__ = ["ALL_INDEXED", "Retriever"]
+__all__ = [
+    "ALL_INDEXED",
+    "DEFAULT_EMBEDDING_PAGE_SIZE",
+    "DEFAULT_TOKEN_PAGE_SIZE",
+    "Retriever",
+]

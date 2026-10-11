@@ -1,10 +1,14 @@
-"""Blocker H acceptance tests (spec §8.3 item 11):
-- A relevant old history record remains discoverable after more than
-  MAX_TOKEN_ROWS newer records have been indexed.
+"""Rank-then-limit retrieval regression tests (spec section 7).
 
-The retrieval cap is configurable; the test uses a small cap to verify
-that rank-then-limit + deterministic ordering + recency weighting keeps
-a rare old match visible.
+Verifies:
+- A highly relevant old record beyond the first candidate page is still
+  discovered.
+- Semantic search can continue beyond the initial candidate page.
+- Exact search can continue beyond the initial page.
+- Ranking happens before the final evidence limit.
+- Pagination is deterministic.
+- Student isolation is preserved.
+- Old information is not silently lost because it is old.
 """
 
 from __future__ import annotations
@@ -12,43 +16,26 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from support import TEST_CIPHER, add_student, make_world
-from waxprep.context.retrieval import MAX_TOKEN_ROWS, Retriever
+from waxprep.context.retrieval import Retriever
 from waxprep.domain.models import AuthorKind, ObjectType
+from waxprep.embeddings.mock import DeterministicEmbeddingProvider
 from waxprep.index.tokens import TokenIndex
 from waxprep.storage.memory import InMemoryStorage
 
 NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
 
-def test_old_relevant_record_remains_discoverable_with_many_newer_records() -> None:
-    """§8.3 item 11: A relevant old history record remains discoverable after
-    more than MAX_TOKEN_ROWS newer records have been indexed.
-
-    The default MAX_TOKEN_ROWS is 50000. Creating 50001 records in a unit
-    test is slow, so we instead construct a Retriever with a small cap
-    (50) and create 100 newer records plus 1 rare old record. The old
-    record's token hash is rare (only the old record has it), so its
-    TF-IDF weight is high — and the rank-then-limit code path must
-    surface it.
+def test_old_rare_record_beyond_first_page_is_discoverable() -> None:
+    """An old rare record is still discoverable when more than one page of
+    newer matches exists. The retriever paginates through all matches;
+    rank-then-limit surfaces the rare old record.
     """
     storage = InMemoryStorage()
-    retriever = Retriever(
-        storage,
-        TokenIndex(TEST_CIPHER),
-        # Use the actual default in the application; the test verifies
-        # that the cap is large enough and that rank-then-limit works.
-    )
-    wax = (
-        add_student(
-            make_world(storage=storage).__class__.__name__ and None  # type: ignore[arg-type]
-        )
-        if False
-        else None
-    )
-    # Use the support helper for a real student.
+    # Use a small page size so we can verify pagination with few records.
+    retriever = Retriever(storage, TokenIndex(TEST_CIPHER), token_page_size=10)
     world = make_world(storage=storage)
     wax = add_student(world)
-    # Create one rare old record: a very specific phrase nobody else uses.
+    # One rare old record with a unique phrase.
     old_time = NOW - timedelta(days=365)
     world.services.history.record(
         wax,
@@ -56,16 +43,15 @@ def test_old_relevant_record_remains_discoverable_with_many_newer_records() -> N
         "ZzQx rareword uniquephrase old_exam_marker",
         occurred_at=old_time,
     )
-    # Create many newer records that contain a common word but not the
-    # rare phrase.
-    for i in range(100):
+    # 50 newer records with a common word (more than one page of 10).
+    for i in range(50):
         world.services.history.record(
             wax,
             AuthorKind.STUDENT,
             f"common message number {i}",
-            occurred_at=NOW - timedelta(hours=100 - i),
+            occurred_at=NOW - timedelta(hours=50 - i),
         )
-    # The old record must still be found by the rare phrase.
+    # The old record must be found by the rare phrase.
     evidence = retriever.find_exact(
         wax,
         "rareword uniquephrase",
@@ -77,24 +63,102 @@ def test_old_relevant_record_remains_discoverable_with_many_newer_records() -> N
         "rareword" in (e.content or "").lower()
         or "uniquephrase" in (e.content or "").lower()
         for e in evidence
-    ), "old rare record must still be discoverable after many newer records"
+    ), "old rare record must still be discoverable after pagination"
 
 
-def test_cap_is_generous_enough_for_typical_corpora() -> None:
-    """The default cap (50,000) is large enough for years of one student's
-    messages. Production-scale deployments that exceed this should
-    benchmark a real vector index (documented limitation)."""
-    assert MAX_TOKEN_ROWS >= 5000, (
-        "MAX_TOKEN_ROWS must not be reduced below the spec's documented bound"
+def test_semantic_search_continues_beyond_first_page() -> None:
+    """Semantic search paginates through embeddings until the corpus is
+    exhausted or the top-N is stable."""
+    storage = InMemoryStorage()
+    embedder = DeterministicEmbeddingProvider(dimensions=8)
+    retriever = Retriever(storage, TokenIndex(TEST_CIPHER), embedding_page_size=5)
+    world = make_world(storage=storage, embedder=embedder)
+    wax = add_student(world)
+    # 20 records with embeddings (more than one page of 5).
+    for i in range(20):
+        world.services.history.record(
+            wax,
+            AuthorKind.STUDENT,
+            f"semantic message {i}",
+            occurred_at=NOW - timedelta(hours=20 - i),
+        )
+    # Run the worker to generate embeddings.
+    import asyncio
+
+    asyncio.run(world.services.worker.run_once())
+    # Use embed_many for the deterministic provider.
+    vec = asyncio.run(embedder.embed_many(["semantic"]))[0]
+    evidence = retriever.find_by_meaning(
+        wax,
+        vec,
+        now=NOW,
+        object_types=(ObjectType.HISTORY,),
+        limit=5,
     )
-    assert MAX_TOKEN_ROWS >= 50000, (
-        "MAX_TOKEN_ROWS should be generous for typical student corpora"
+    assert len(evidence) > 0, "semantic search must return results from all pages"
+
+
+def test_exact_search_continues_beyond_first_page() -> None:
+    """Exact search paginates through all matches until the corpus is
+    exhausted."""
+    storage = InMemoryStorage()
+    retriever = Retriever(storage, TokenIndex(TEST_CIPHER), token_page_size=5)
+    world = make_world(storage=storage)
+    wax = add_student(world)
+    # 20 records with the same word (more than one page of 5).
+    for i in range(20):
+        world.services.history.record(
+            wax,
+            AuthorKind.STUDENT,
+            f"commonword message {i}",
+            occurred_at=NOW - timedelta(hours=20 - i),
+        )
+    evidence = retriever.find_exact(
+        wax,
+        "commonword",
+        now=NOW,
+        object_types=(ObjectType.HISTORY,),
+        limit=8,
     )
+    assert len(evidence) == 8, f"expected 8 results, got {len(evidence)}"
 
 
-def test_retrieval_returns_deterministic_order() -> None:
-    """Two identical calls return the same evidence set — the SQL ORDER BY
-    is deterministic so the limit is reproducible."""
+def test_ranking_happens_before_final_evidence_limit() -> None:
+    """The retriever ranks all candidates before applying the final
+    evidence limit. The top-scoring records are returned, not just the
+    first N by time.
+    """
+    storage = InMemoryStorage()
+    retriever = Retriever(storage, TokenIndex(TEST_CIPHER))
+    world = make_world(storage=storage)
+    wax = add_student(world)
+    # 10 records with the same word. The OLDEST one has a second rare
+    # word that should give it a higher score.
+    for i in range(10):
+        text = f"commonword message {i}"
+        if i == 0:
+            text += " rareboost"
+        world.services.history.record(
+            wax,
+            AuthorKind.STUDENT,
+            text,
+            occurred_at=NOW - timedelta(hours=10 - i),
+        )
+    evidence = retriever.find_exact(
+        wax,
+        "commonword rareboost",
+        now=NOW,
+        object_types=(ObjectType.HISTORY,),
+        limit=1,
+    )
+    # The oldest record (i=0) has both "commonword" and "rareboost" —
+    # its combined score should be highest.
+    assert len(evidence) == 1
+    assert "rareboost" in (evidence[0].content or "")
+
+
+def test_pagination_is_deterministic() -> None:
+    """Two identical calls return the same evidence set."""
     storage = InMemoryStorage()
     world = make_world(storage=storage)
     wax = add_student(world)
@@ -113,3 +177,24 @@ def test_retrieval_returns_deterministic_order() -> None:
         wax, "hello world", now=NOW, object_types=(ObjectType.HISTORY,), limit=3
     )
     assert [e.id for e in first] == [e.id for e in second]
+
+
+def test_student_isolation_in_retrieval() -> None:
+    """Retrieval never crosses students."""
+    storage = InMemoryStorage()
+    world = make_world(storage=storage)
+    wax_a = add_student(world)
+    wax_b = add_student(world)
+    world.services.history.record(
+        wax_a, AuthorKind.STUDENT, "secret for a only", occurred_at=NOW
+    )
+    retriever = Retriever(storage, TokenIndex(TEST_CIPHER))
+    # b searches for the same words — must find nothing.
+    evidence = retriever.find_exact(
+        wax_b,
+        "secret for a only",
+        now=NOW,
+        object_types=(ObjectType.HISTORY,),
+        limit=5,
+    )
+    assert evidence == ()

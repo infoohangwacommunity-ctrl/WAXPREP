@@ -284,7 +284,7 @@ class InMemoryStorage:
         object_types: tuple[ObjectType, ...],
         since: datetime | None,
         until: datetime | None,
-        limit: int,
+        limit: int | None,
     ) -> tuple[TokenMatch, ...]:
         wanted = set(token_hashes)
         rows = [
@@ -295,7 +295,46 @@ class InMemoryStorage:
             and (since is None or r.object_time >= since)
             and (until is None or r.object_time < until)
         ]
-        return tuple(rows[:limit])
+        # Deterministic order: object_time DESC, object_id, token_hash.
+        rows.sort(
+            key=lambda r: (r.object_time, r.object_id, r.token_hash),
+            reverse=True,
+        )
+        return tuple(rows[:limit] if limit is not None else rows)
+
+    def find_by_tokens_page(
+        self,
+        wax_id: WaxId,
+        token_hashes: tuple[bytes, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID, bytes] | None = None,
+    ) -> tuple[TokenMatch, ...]:
+        wanted = set(token_hashes)
+        rows = [
+            r
+            for r in self._tokens.get(wax_id, [])
+            if r.token_hash in wanted
+            and r.object_type in object_types
+            and (since is None or r.object_time >= since)
+            and (until is None or r.object_time < until)
+        ]
+        rows.sort(
+            key=lambda r: (r.object_time, r.object_id, r.token_hash),
+            reverse=True,
+        )
+        if cursor is not None:
+            cur_time, cur_id, cur_hash = cursor
+            rows = [
+                r
+                for r in rows
+                if (r.object_time, r.object_id, r.token_hash)
+                < (cur_time, cur_id, cur_hash)
+            ]
+        return tuple(rows[:page_size])
 
     def put_embedding(self, record: EmbeddingRecord) -> None:
         key = (record.wax_id, record.object_type, record.object_id, record.model)
@@ -308,7 +347,7 @@ class InMemoryStorage:
         *,
         since: datetime | None,
         until: datetime | None,
-        limit: int,
+        limit: int | None,
     ) -> tuple[EmbeddingRecord, ...]:
         rows = [
             r
@@ -318,8 +357,34 @@ class InMemoryStorage:
             and (since is None or r.object_time >= since)
             and (until is None or r.object_time < until)
         ]
-        rows.sort(key=lambda r: r.object_time, reverse=True)
-        return tuple(rows[:limit])
+        rows.sort(key=lambda r: (r.object_time, r.object_id), reverse=True)
+        return tuple(rows[:limit] if limit is not None else rows)
+
+    def list_embeddings_page(
+        self,
+        wax_id: WaxId,
+        object_types: tuple[ObjectType, ...],
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID] | None = None,
+    ) -> tuple[EmbeddingRecord, ...]:
+        rows = [
+            r
+            for (w, _, _, _), r in self._embeddings.items()
+            if w == wax_id
+            and r.object_type in object_types
+            and (since is None or r.object_time >= since)
+            and (until is None or r.object_time < until)
+        ]
+        rows.sort(key=lambda r: (r.object_time, r.object_id), reverse=True)
+        if cursor is not None:
+            cur_time, cur_id = cursor
+            rows = [
+                r for r in rows if (r.object_time, r.object_id) < (cur_time, cur_id)
+            ]
+        return tuple(rows[:page_size])
 
     # --- notebook -------------------------------------------------------------
     def get_or_create_notebook(self, wax_id: WaxId, now: datetime) -> Notebook:

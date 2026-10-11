@@ -565,14 +565,24 @@ class PostgresStorage:
         object_types: tuple[ObjectType, ...],
         since: datetime | None,
         until: datetime | None,
-        limit: int,
+        limit: int | None,
     ) -> tuple[TokenMatch, ...]:
         if not token_hashes:
             return ()
-        # Blocker H: deterministic ORDER BY so the limit is reproducible
-        # and a ranked old record can still surface. The limit is now
-        # generous (50k by default); production-scale search needs a real
-        # vector index.
+        # Blocker H: deterministic ORDER BY so the limit is reproducible.
+        # ``limit=None`` searches the whole corpus — no artificial wall.
+        sql_limit = "" if limit is None else " LIMIT %s"
+        params: list[Any] = [
+            wax_id,
+            list(token_hashes),
+            [t.value for t in object_types],
+            since,
+            since,
+            until,
+            until,
+        ]
+        if limit is not None:
+            params.append(limit)
         rows = self._read(
             wax_id,
             "SELECT object_type, object_id, object_time, token_hash FROM search_tokens "
@@ -580,8 +590,43 @@ class PostgresStorage:
             "AND object_type = ANY(%s::text[]) "
             "AND (%s::timestamptz IS NULL OR object_time >= %s) "
             "AND (%s::timestamptz IS NULL OR object_time < %s) "
-            "ORDER BY object_time DESC, object_id, token_hash LIMIT %s",
-            (
+            "ORDER BY object_time DESC, object_id, token_hash" + sql_limit,
+            tuple(params),
+        )
+        return tuple(
+            TokenMatch(
+                ObjectType(r["object_type"]),
+                r["object_id"],
+                r["object_time"],
+                bytes(r["token_hash"]),
+            )
+            for r in rows
+        )
+
+    def find_by_tokens_page(
+        self,
+        wax_id: WaxId,
+        token_hashes: tuple[bytes, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID, bytes] | None = None,
+    ) -> tuple[TokenMatch, ...]:
+        """One page of token matches in deterministic order."""
+        if not token_hashes:
+            return ()
+        if cursor is None:
+            sql = (
+                "SELECT object_type, object_id, object_time, token_hash FROM search_tokens "
+                "WHERE wax_id = %s AND token_hash = ANY(%s::bytea[]) "
+                "AND object_type = ANY(%s::text[]) "
+                "AND (%s::timestamptz IS NULL OR object_time >= %s) "
+                "AND (%s::timestamptz IS NULL OR object_time < %s) "
+                "ORDER BY object_time DESC, object_id, token_hash LIMIT %s"
+            )
+            params: tuple[Any, ...] = (
                 wax_id,
                 list(token_hashes),
                 [t.value for t in object_types],
@@ -589,9 +634,33 @@ class PostgresStorage:
                 since,
                 until,
                 until,
-                limit,
-            ),
-        )
+                page_size,
+            )
+        else:
+            cur_time, cur_id, cur_hash = cursor
+            sql = (
+                "SELECT object_type, object_id, object_time, token_hash FROM search_tokens "
+                "WHERE wax_id = %s AND token_hash = ANY(%s::bytea[]) "
+                "AND object_type = ANY(%s::text[]) "
+                "AND (%s::timestamptz IS NULL OR object_time >= %s) "
+                "AND (%s::timestamptz IS NULL OR object_time < %s) "
+                "AND (object_time, object_id, token_hash) < (%s, %s, %s) "
+                "ORDER BY object_time DESC, object_id, token_hash LIMIT %s"
+            )
+            params = (
+                wax_id,
+                list(token_hashes),
+                [t.value for t in object_types],
+                since,
+                since,
+                until,
+                until,
+                cur_time,
+                cur_id,
+                cur_hash,
+                page_size,
+            )
+        rows = self._read(wax_id, sql, params)
         return tuple(
             TokenMatch(
                 ObjectType(r["object_type"]),
@@ -633,8 +702,19 @@ class PostgresStorage:
         *,
         since: datetime | None,
         until: datetime | None,
-        limit: int,
+        limit: int | None,
     ) -> tuple[EmbeddingRecord, ...]:
+        sql_limit = "" if limit is None else " LIMIT %s"
+        params: list[Any] = [
+            wax_id,
+            [t.value for t in object_types],
+            since,
+            since,
+            until,
+            until,
+        ]
+        if limit is not None:
+            params.append(limit)
         rows = self._read(
             wax_id,
             "SELECT id, wax_id, object_type, object_id, object_time, model, "
@@ -642,35 +722,80 @@ class PostgresStorage:
             "WHERE wax_id = %s AND object_type = ANY(%s::text[]) "
             "AND (%s::timestamptz IS NULL OR object_time >= %s) "
             "AND (%s::timestamptz IS NULL OR object_time < %s) "
-            "ORDER BY object_time DESC LIMIT %s",
-            (
+            "ORDER BY object_time DESC, object_id" + sql_limit,
+            tuple(params),
+        )
+        return tuple(self._embedding_record(r) for r in rows)
+
+    def list_embeddings_page(
+        self,
+        wax_id: WaxId,
+        object_types: tuple[ObjectType, ...],
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID] | None = None,
+    ) -> tuple[EmbeddingRecord, ...]:
+        if cursor is None:
+            sql = (
+                "SELECT id, wax_id, object_type, object_id, object_time, model, "
+                "vector_encrypted, created_at FROM search_embeddings "
+                "WHERE wax_id = %s AND object_type = ANY(%s::text[]) "
+                "AND (%s::timestamptz IS NULL OR object_time >= %s) "
+                "AND (%s::timestamptz IS NULL OR object_time < %s) "
+                "ORDER BY object_time DESC, object_id LIMIT %s"
+            )
+            params: tuple[Any, ...] = (
                 wax_id,
                 [t.value for t in object_types],
                 since,
                 since,
                 until,
                 until,
-                limit,
-            ),
-        )
-        return tuple(
-            EmbeddingRecord(
-                id=r["id"],
-                wax_id=WaxId(r["wax_id"]),
-                object_type=ObjectType(r["object_type"]),
-                object_id=r["object_id"],
-                object_time=r["object_time"],
-                model=r["model"],
-                vector=_unpack_vector(
-                    self._cipher.decrypt_bytes(
-                        WaxId(r["wax_id"]),
-                        "embedding.vector",
-                        bytes(r["vector_encrypted"]),
-                    )
-                ),
-                created_at=r["created_at"],
+                page_size,
             )
-            for r in rows
+        else:
+            cur_time, cur_id = cursor
+            sql = (
+                "SELECT id, wax_id, object_type, object_id, object_time, model, "
+                "vector_encrypted, created_at FROM search_embeddings "
+                "WHERE wax_id = %s AND object_type = ANY(%s::text[]) "
+                "AND (%s::timestamptz IS NULL OR object_time >= %s) "
+                "AND (%s::timestamptz IS NULL OR object_time < %s) "
+                "AND (object_time, object_id) < (%s, %s) "
+                "ORDER BY object_time DESC, object_id LIMIT %s"
+            )
+            params = (
+                wax_id,
+                [t.value for t in object_types],
+                since,
+                since,
+                until,
+                until,
+                cur_time,
+                cur_id,
+                page_size,
+            )
+        rows = self._read(wax_id, sql, params)
+        return tuple(self._embedding_record(r) for r in rows)
+
+    def _embedding_record(self, r: Row) -> EmbeddingRecord:
+        return EmbeddingRecord(
+            id=r["id"],
+            wax_id=WaxId(r["wax_id"]),
+            object_type=ObjectType(r["object_type"]),
+            object_id=r["object_id"],
+            object_time=r["object_time"],
+            model=r["model"],
+            vector=_unpack_vector(
+                self._cipher.decrypt_bytes(
+                    WaxId(r["wax_id"]),
+                    "embedding.vector",
+                    bytes(r["vector_encrypted"]),
+                )
+            ),
+            created_at=r["created_at"],
         )
 
     # --- notebook ---------------------------------------------------------------------------

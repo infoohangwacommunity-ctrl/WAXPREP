@@ -149,8 +149,35 @@ class Storage(Protocol):
         object_types: tuple[ObjectType, ...],
         since: datetime | None,
         until: datetime | None,
-        limit: int,
-    ) -> tuple[TokenMatch, ...]: ...
+        limit: int | None,
+    ) -> tuple[TokenMatch, ...]:
+        """Find token matches. ``limit=None`` means the whole corpus.
+
+        For paginated retrieval use ``find_by_tokens_page`` instead —
+        it returns one deterministic page and a cursor for the next.
+        """
+        ...
+
+    def find_by_tokens_page(
+        self,
+        wax_id: WaxId,
+        token_hashes: tuple[bytes, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID, bytes] | None = None,
+    ) -> tuple[TokenMatch, ...]:
+        """One page of token matches in deterministic order.
+
+        The cursor is ``(object_time, object_id, token_hash)`` of the
+        last row from the previous page. Rows are ordered
+        ``object_time DESC, object_id, token_hash`` so the next page
+        returns rows strictly after the cursor. An empty tuple means
+        no more pages.
+        """
+        ...
 
     def put_embedding(self, record: EmbeddingRecord) -> None: ...
 
@@ -161,8 +188,29 @@ class Storage(Protocol):
         *,
         since: datetime | None,
         until: datetime | None,
-        limit: int,
-    ) -> tuple[EmbeddingRecord, ...]: ...
+        limit: int | None,
+    ) -> tuple[EmbeddingRecord, ...]:
+        """List embeddings. ``limit=None`` means the whole corpus."""
+        ...
+
+    def list_embeddings_page(
+        self,
+        wax_id: WaxId,
+        object_types: tuple[ObjectType, ...],
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        page_size: int,
+        cursor: tuple[datetime, UUID] | None = None,
+    ) -> tuple[EmbeddingRecord, ...]:
+        """One page of embeddings in deterministic order.
+
+        The cursor is ``(object_time, object_id)`` of the last row from
+        the previous page. Rows are ordered ``object_time DESC, object_id``
+        so the next page returns rows strictly after the cursor. An
+        empty tuple means no more pages.
+        """
+        ...
 
     # --- notebook (derived durable understanding) --------------------------
     def get_or_create_notebook(self, wax_id: WaxId, now: datetime) -> Notebook: ...
