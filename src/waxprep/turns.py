@@ -74,9 +74,11 @@ class TurnService:
             occurred_at=occurred_at,
         )
         if not created:
-            # Duplicate channel delivery: if a tutor reply already exists,
-            # return it. If the first attempt crashed before a reply was
-            # saved, resume investigation and teaching for this entry.
+            # Duplicate channel delivery. If a tutor reply was already
+            # saved, return it without re-teaching. If the previous
+            # attempt crashed before the reply was saved, resume
+            # investigation and teaching for this trigger entry. Either
+            # way, this delivery was a duplicate — `duplicate=True`.
             existing_reply = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
             if existing_reply is not None:
                 return TurnResult(
@@ -102,7 +104,9 @@ class TurnService:
             thread_ref=thread_ref,
             reply_to_id=student_entry.id,
         )
-        return TurnResult(student_entry, tutor_entry, package)
+        return TurnResult(
+            student_entry, tutor_entry, package, duplicate=not created
+        )
 
     async def _investigate(self, wax_id: WaxId, entry: HistoryEntry) -> ContextPackage:
         now = self._clock.now()
