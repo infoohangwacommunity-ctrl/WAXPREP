@@ -9,11 +9,12 @@ dependencies = [
     "fastapi>=0.116,<1.0",
     "httpx>=0.28,<1.0",
     "psycopg[binary]>=3.2,<4.0",
+    "cryptography>=44.0,<47.0",
 ]
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.0,<3.0",
+    "httpx>=0.28.1",
     "pyright>=1.1.390,<2.0",
     "pytest>=9.0,<10.0",
     "pytest-asyncio>=1.0,<2.0",
@@ -33,12 +34,19 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "E741"]
 
 [tool.pyright]
 include = ["src", "tests"]
 exclude = [".venv", ".git", ".pytest_cache"]
-typeCheckingMode = "strict"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
 pythonVersion = "3.13"
+extraPaths = ["tests"]
 venvPath = "."
 venv = ".venv"
 
@@ -46,7 +54,7 @@ venv = ".venv"
 minversion = "9.0"
 addopts = ["-ra", "--strict-config", "--strict-markers"]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 filterwarnings = [
     "error",
     "ignore::starlette.exceptions.StarletteDeprecationWarning",

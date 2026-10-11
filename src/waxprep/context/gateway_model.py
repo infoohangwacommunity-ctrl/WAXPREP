@@ -24,25 +24,15 @@ from waxprep.model_gateway.models import (
 class GatewayContextModel:
     """Production-capable CI model using the existing Model Gateway."""
 
-    def __init__(
-        self,
-        gateway: ModelGateway,
-        *,
-        model_name: str = "context",
-        wax_id_for_requests: object | None = None,
-    ) -> None:
+    def __init__(self, gateway: ModelGateway, *, model_name: str = "context") -> None:
         self._gateway = gateway
         self._model_name = model_name
-        # Trusted WAX ID for billing/isolation metadata on gateway requests
-        from waxprep.domain.identifiers import new_wax_id
-
-        self._wax_id = wax_id_for_requests or new_wax_id()
 
     async def decide(self, request: ContextModelRequest) -> ContextModelDecision:
         prompt = self._decision_prompt(request)
         response = await self._gateway.complete(
             ModelRequest(
-                wax_id=self._wax_id,  # type: ignore[arg-type]
+                wax_id=request.wax_id,
                 role=ModelRole.CONTEXT,
                 model=self._model_name,
                 instructions=request.system_prompt,
@@ -56,7 +46,7 @@ class GatewayContextModel:
         prompt = self._final_prompt(request)
         response = await self._gateway.complete(
             ModelRequest(
-                wax_id=self._wax_id,  # type: ignore[arg-type]
+                wax_id=request.wax_id,
                 role=ModelRole.CONTEXT,
                 model=self._model_name,
                 instructions=request.system_prompt,
@@ -71,6 +61,7 @@ class GatewayContextModel:
         return (
             "Return a single JSON object with keys action, arguments, reason.\n"
             "action must be one of the tool names or 'stop'.\n"
+            f"Current time (UTC): {request.now.isoformat()}\n"
             f"Student message: {request.user_query}\n"
             f"Evidence so far:\n{request.evidence}\n"
             f"Tools: {tools}\n"
@@ -80,6 +71,7 @@ class GatewayContextModel:
         return (
             "Return a single JSON object with keys summary, selected_evidence_ids, "
             "uncertainty, stopped_reason.\n"
+            f"Current time (UTC): {request.now.isoformat()}\n"
             f"Student message: {request.user_query}\n"
             f"Evidence:\n{request.evidence}\n"
         )

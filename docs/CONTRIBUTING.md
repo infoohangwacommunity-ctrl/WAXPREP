@@ -52,3 +52,16 @@ A feature is not complete because the code looks correct.
 The relevant tests must pass.
 
 GitHub Actions must provide the CI evidence.
+
+## Architecture rules that tests enforce
+
+- No "conversation" concept anywhere in application code.
+- No keyword/vocabulary/media-type handling in `context`, `derive`, `history`, `index`.
+- Every student table has Row-Level Security (PostgreSQL tests).
+- History has no delete/edit API.
+- Derived changes need evidence from the same student.
+
+## Encryption keys
+
+Set `WAXPREP_MASTER_KEYS` (see `.env.example`). Never commit keys. Losing a key makes the data it
+protected unreadable, so back keys up separately from the database.

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from waxprep.context.gateway_model import GatewayContextModel
 from waxprep.context.model import ContextModelRequest
+from waxprep.domain.identifiers import new_wax_id
 from waxprep.model_gateway.gateway import ModelGateway
 from waxprep.model_gateway.models import ModelRole
 from waxprep.model_gateway.providers.mock import MockProvider
@@ -37,6 +40,8 @@ async def test_gateway_context_model_parses_stop_decision() -> None:
             evidence="(none)",
             tools=[],
             max_output_tokens=200,
+            wax_id=new_wax_id(),
+            now=datetime(2026, 1, 1, tzinfo=UTC),
         )
     )
     assert decision.action == "stop"

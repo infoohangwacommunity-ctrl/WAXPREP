@@ -1,142 +1,128 @@
 # Wax Prep Architecture
 
-## Foundation boundary
+## The one idea
 
-Foundation establishes boundaries without prematurely implementing future tutoring features.
-
-```text
-Student
-   |
-   v
-Channel adapter
-   |
-   v
-Wax Prep application core
-   |
-   +-- future tutoring logic
-   +-- future conversation/context handling
-   +-- future memory boundary
-   +-- future media-understanding boundary
-   |
-   v
-External providers
-```
-
-This is a boundary map, not a claim that every component already exists.
-
-## Layers
-
-### Channel layer
-
-Translates a channel's representation into Wax Prep's channel-neutral application concepts.
-
-WhatsApp is the first channel.
-
-Future channels such as Telegram or Discord must connect through this boundary.
-
-Channel-specific rules must not leak into the core.
-
-### Application core
-
-Contains product behaviour that should remain independent of the communication channel.
-
-Future tutoring behaviour belongs here.
-
-### Provider boundary
-
-External AI services must be accessed through explicit boundaries.
-
-Wax Prep may start with one provider, but the core must not become permanently coupled to that provider.
-
-### Storage boundary
-
-Student data, educational materials, and future memory must have clear ownership and isolation boundaries.
-
-Foundation does not implement a database or memory system.
-
-## Glossary
-
-- **Student:** The person receiving tutoring.
-- **Channel:** A communication system used to interact with Wax Prep.
-- **Conversation:** A coherent interaction between a student and Wax Prep.
-- **Message:** One piece of information sent or received.
-- **Turn:** A student input and the corresponding tutor response as one exchange.
-- **Attachment:** A file or media item associated with a message.
-- **Workspace:** A student's educational storage area. It is not a coding environment.
-- **Memory:** Deliberately retained information about a student. Memory is a later build.
-- **Brief:** A compact piece of relevant context supplied to a tutoring component.
-
-## Foundation technology
-
-- Python 3.13
-- FastAPI
-- uv
-- Ruff
-- Pyright
-- pytest
-- GitHub Actions
-
-## Architecture rules
-
-- Keep core concepts channel-neutral.
-- Keep provider-specific details behind provider boundaries.
-- Do not implement future features early.
-- Never put secrets in source control.
-- Normal tests must not make paid API calls.
-
-
-## Build 2 — Core data and storage
-
-- **WAX ID**: random opaque UUID (not phone-derived).
-- **Channel identity**: maps channel external ids to WAX ID.
-- **Conversation → Message → Attachment** ownership chain.
-- **Notebook**: open-ended JSON entries; not a profile; not Memory.
-- **Events**: minimal domain events without full message bodies.
-- **PostgreSQL** + SQL migrations; ownership-scoped storage APIs.
-- **Clock**: SystemClock / FakeClock (UTC aware).
-
-
-### Student isolation layers
-
-1. Ownership-scoped storage APIs (require WAX ID)
-2. Foreign keys to `students(wax_id)`
-3. PostgreSQL Row-Level Security (`FORCE`) with `app.current_wax_id`
-4. Regression tests at application and SQL levels
-
-
-## Build 3 — Model Gateway
-
-Provider-neutral model execution boundary with adapters for Mock, OpenAI Responses, Upstage, and Anthropic Messages.
-
-Application code calls `ModelGateway.complete` / `stream` with normalized requests. Provider SDKs are not imported into the domain.
-
-
-## Build 2.5 — Workspace and Artifact Substrate
+A student's world is **one unified, timestamped history**. Everything Wax Prep
+knows is either that history, or something *derived from it that points back to it*.
 
 ```text
-Student → Workspace → Artifact → ArtifactVersion (storage_ref)
-                              → ArtifactReference
+Student message
+  |
+  v
+Teacher (drives the turn)
+  |
+  |   may consult Context Intelligence (bounded)
+  |   may request another investigation (bounded)
+  v
+Context Intelligence investigates the student's world
+  |
+  v
+Teacher receives evidence/context
+  |
+  |   eventually produces the response
+  v
+Tutor response is durably saved + outbound delivery recorded
+  |
+  +-- Unified history   what happened (every student AND tutor message, with time, who, never deleted)
+  +-- Derived, always linked back to history:
+  |     Notebook         durable understanding worth keeping handy
+  |     Summaries        compressed stretches of history (a faster path to the evidence)
+  |     Knowledge graph  relationships CI discovered
+  |     Search indexes   blind word hashes + embeddings (ways of finding things)
+  |     Artifact contents what could be read from a student's files
+  +-- Workspace          durable objects the student owns (artifacts, versions)
+  |
+  v
+Model Gateway (provider-neutral) -> Upstage / OpenAI / Anthropic / mock
 ```
 
-Workspace answers what durable artifacts exist and who owns them.
-It does not interpret educational meaning, run OCR/transcription, or update the notebook.
+**Important:** the Teacher's teaching intelligence is **intentionally
+unimplemented** in this build. The Teacher is a Protocol; tests use
+a deterministic mock. The future Teacher-intelligence build will plug
+in a real Teacher that follows the same contract.
 
-Artifact versions are immutable. Student isolation uses ownership APIs, FKs, RLS, and tests.
+## Roles
 
-The Model Gateway does not know about Workspaces; a future Context Operator may consume them.
+- **History service** saves first and unconditionally. It never asks "is this important?".
+  The exact student message reaches the Teacher untouched — never rewritten,
+  summarized, or replaced by CI's interpretation.
+- **Teacher** drives the turn. It decides whether to consult CI, what to ask,
+  and whether the result is sufficient. The Teacher's intelligence is a
+  future build; this build provides only the orchestration contract.
+- **Context Intelligence (CI)** is a research/investigation system. It
+  investigates the student's world and returns evidence and uncertainty.
+  It never directly answers the student's educational question. It is a
+  capability the Teacher uses, not a gatekeeper that sits in front of
+  the Teacher.
+- **Services** own *execution*: validated, student-scoped reads and writes.
+  Derived-object + provenance + index writes are atomic (spec section 9).
+- **Storage** owns *persistence*. PostgreSQL Row-Level Security owns *isolation*.
+  The storage layer provides a `transaction()` context manager for atomic
+  derived operations.
+- **Background worker** owns *derived work* (embeddings, artifact reading) and retries it.
+  A failure there can never lose or block a saved message. Job attempt
+  accounting is correct: one real execution attempt counts exactly once.
+- **Scheduler** provides a provider-neutral CLI entry point
+  (`python -m waxprep.scheduler run-once` or `run-interval`) that is safe
+  to run concurrently across multiple processes.
 
+## Rules
 
-## Build 4 foundation — Context Intelligence
+1. History is append-only. There is no delete/edit method for it.
+2. Age changes how easy something is to find, never whether it exists.
+3. Every derived object has provenance links to its sources, and the application
+   records who authored each source. What the tutor said is never a student fact.
+4. Everything the model sees carries the exact time and its age relative to *now*.
+5. No keyword routing, no fixed profile fields, no media-type handling in intelligence code.
+6. Sensitive text is encrypted by the application (AES-256-GCM, per-student keys).
+   Exact-word search uses blind (HMAC) hashes so encryption and search coexist.
+   Keys can be rotated safely (spec section 14).
+7. Normal tests make no paid AI calls.
 
-```text
-Student message → Context Intelligence (small model)
-                      │
-         tools: conversation / notebook / workspace /
-                semantic / relationships / history
-                      │
-              compact ContextPackage
-                      │
-                Teacher Model (later)
-```
+## Teacher ↔ CI consultation contract
 
-CI proposes; application validates. No fixed student profile.
+The Teacher receives:
+- the exact student `HistoryEntry` (untouched)
+- the current time
+- the WAX ID
+- a `TeacherConsultation` capability
+- any already-returned CI context from earlier rounds
+
+The Teacher can:
+- respond without consulting CI
+- ask CI a targeted question
+- receive CI context (evidence + synthesis + uncertainty + provenance)
+- ask CI for another bounded investigation
+- eventually return reply text
+
+The orchestration enforces a configurable hard upper bound on
+consultations per student turn (default 3) so a buggy Teacher cannot
+enter an infinite CI loop.
+
+## Retrieval architecture
+
+Candidate generation and ranking are **separate concepts**:
+- `find_exact` paginates through **all** matching token rows (no arbitrary
+  wall), scoring each page and keeping a running top-N.
+- `find_by_meaning` paginates through embeddings with a configurable page
+  size, scoring each page. Early termination when the top-N is provably stable.
+- Pagination is deterministic (cursor = last row's `(object_time, object_id, [token_hash])`).
+- Ranking happens before the final evidence limit.
+- The design is replaceable: a real vector index (pgvector, dedicated
+  service) can later be introduced without changing the memory architecture.
+
+## Outbound delivery (outbox)
+
+The tutor reply is saved first; then an outbound delivery record is
+created; then delivery is attempted. A crash between saving the reply
+and marking delivered is recoverable: the retry sends the same stored
+reply without invoking the Teacher again.
+
+## Cross-tenant security
+
+- RLS is database-enforced on every student-scoped table.
+- Composite foreign keys enforce same-student ownership for every
+  reference that can be structurally protected.
+- A `waxprep_object_owner` SECURITY DEFINER function lets the application
+  check ownership of polymorphic provenance references that cannot be
+  protected by an ordinary FK.

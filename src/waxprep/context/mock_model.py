@@ -22,6 +22,7 @@ class MockContextModel:
 
     Provide ``decision_script`` when a test needs investigation steps.
     With an empty script the model always stops (no vocabulary routing).
+    ``requests`` records every request so tests can inspect what CI was shown.
     """
 
     calls: int = 0
@@ -29,9 +30,12 @@ class MockContextModel:
         default_factory=lambda: list[ContextModelDecision]()
     )
     final: ContextModelFinal | None = None
+    requests: list[ContextModelRequest] = field(
+        default_factory=lambda: list[ContextModelRequest]()
+    )
 
     async def decide(self, request: ContextModelRequest) -> ContextModelDecision:
-        del request  # scripted; request is available for richer mocks later
+        self.requests.append(request)
         self.calls += 1
         if not self.decision_script:
             return ContextModelDecision(
@@ -43,7 +47,7 @@ class MockContextModel:
         return self.decision_script[index]
 
     async def finalize(self, request: ContextModelRequest) -> ContextModelFinal:
-        del request
+        self.requests.append(request)
         if self.final is not None:
             return self.final
         return ContextModelFinal(

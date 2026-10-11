@@ -22,6 +22,8 @@ class ModelRole(StrEnum):
 
     TEACHER = "teacher"
     CONTEXT = "context"
+    CONSOLIDATION = "consolidation"
+    ARTIFACT = "artifact"
 
 
 class ContentType(StrEnum):

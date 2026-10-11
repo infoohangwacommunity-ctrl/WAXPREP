@@ -2,7 +2,7 @@ name: quality-gate
 
 on:
   push:
-    branches: [main]
+    branches: [main, "professional-unified-history-rebuild", "foundation-teacher-first-completion"]
   pull_request:
     branches: [main]
 
@@ -16,21 +16,29 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # Use the same major PostgreSQL version intended for deployment.
+        image: postgres:17
         env:
-          POSTGRES_USER: waxprep
-          POSTGRES_PASSWORD: waxprep
+          # The migrations expect the running user to be a superuser
+          # (they GRANT waxprep_app TO current_user). The Docker
+          # entrypoint creates the POSTGRES_USER as a superuser.
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: waxprep_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U waxprep -d waxprep_test"
+          --health-cmd "pg_isready -U postgres -d waxprep_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
 
     env:
-      DATABASE_URL: postgresql://waxprep:waxprep@localhost:5432/waxprep_test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/waxprep_test
+      # Test encryption key (32 random bytes, base64-encoded with id prefix).
+      # In production, use a managed secrets service — never commit real keys.
+      WAXPREP_MASTER_KEYS: "1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      WAXPREP_ACTIVE_KEY_ID: "1"
 
     steps:
       - name: Check out repository
@@ -49,5 +57,41 @@ jobs:
       - name: Install locked environment
         run: uv sync --locked
 
-      - name: Run quality gate
-        run: make check
+      - name: Verify lockfile is up to date
+        run: uv lock --check
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Run tests (excluding paid live API calls)
+        run: uv run pytest -m "not live" --tb=short
+
+      - name: Verify migrations against a clean database
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/waxprep_test
+        run: |
+          uv run python -c "
+          import psycopg
+          from waxprep.migrations import apply_migrations
+          conn = psycopg.connect('postgresql://postgres:postgres@localhost:5432/waxprep_test')
+          with conn.cursor() as cur:
+              cur.execute('DROP SCHEMA public CASCADE')
+              cur.execute('CREATE SCHEMA public')
+          conn.commit()
+          applied = apply_migrations(conn)
+          print(f'Migrations applied: {applied}')
+          conn.close()
+          "
+
+      - name: Verify the worker scheduler CLI works
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/waxprep_test
+          WAXPREP_MASTER_KEYS: "1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          WAXPREP_ACTIVE_KEY_ID: "1"
+        run: uv run python -m waxprep.scheduler run-once

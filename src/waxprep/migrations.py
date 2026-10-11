@@ -78,6 +78,7 @@ def apply_migrations(conn: psycopg.Connection[Any]) -> list[str]:
                 "VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (version, checksum),
             )
+        conn.commit()  # one migration = one transaction, so a later failure keeps earlier ones
         applied.append(version)
 
     conn.commit()

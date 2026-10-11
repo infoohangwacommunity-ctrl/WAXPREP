@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
+
+from waxprep.domain.identifiers import WaxId
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +16,8 @@ class ContextModelRequest:
     evidence: str
     tools: list[dict[str, Any]]
     max_output_tokens: int
+    wax_id: WaxId
+    now: datetime
 
 
 @dataclass(frozen=True, slots=True)

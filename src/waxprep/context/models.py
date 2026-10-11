@@ -21,16 +21,19 @@ class ContextDecision(StrEnum):
 
 
 class EvidenceType(StrEnum):
-    CONVERSATION = "conversation"
+    HISTORY = "history"
+    SUMMARY = "summary"
     NOTEBOOK = "notebook"
-    WORKSPACE = "workspace"
     ARTIFACT = "artifact"
+    ARTIFACT_CONTENT = "artifact_content"
     KNOWLEDGE_NODE = "knowledge_node"
     KNOWLEDGE_EDGE = "knowledge_edge"
 
 
 @dataclass(frozen=True, slots=True)
 class Evidence:
+    """One piece of evidence, always carrying when it happened and who said it."""
+
     id: UUID
     wax_id: WaxId
     evidence_type: EvidenceType
@@ -40,10 +43,14 @@ class Evidence:
     relevance_reason: str
     decision: ContextDecision
     confidence_note: str | None = None
+    author_kind: str | None = None
+    provenance: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class ContextPackage:
+    """What the Teacher receives: compact, dated, and traceable."""
+
     wax_id: WaxId
     query: str
     evidence: tuple[Evidence, ...]
@@ -51,6 +58,7 @@ class ContextPackage:
     uncertainty: tuple[str, ...] = ()
     investigated: tuple[str, ...] = ()
     stopped_reason: str = ""
+    as_of: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=lambda: cast(dict[str, Any], {}))
 
 
@@ -65,7 +73,10 @@ class InvestigationLimits:
 
 @dataclass(frozen=True, slots=True)
 class InvestigationRequest:
+    """A new student message plus the current time. No session id."""
+
     wax_id: WaxId
-    conversation_id: UUID
     query: str
+    now: datetime
+    trigger_entry_id: UUID | None = None
     limits: InvestigationLimits = field(default_factory=InvestigationLimits)

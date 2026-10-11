@@ -1,4 +1,4 @@
-"""Context Intelligence — investigation shell around a small model."""
+"""Context Intelligence — the semantic controller of the student's world."""
 
 from waxprep.context.investigator import ContextInvestigator
 from waxprep.context.models import (

@@ -1,107 +1,162 @@
-"""PostgreSQL storage tests (require DATABASE_URL)."""
+"""PostgreSQL storage: encryption at rest, isolation, and the unified flow."""
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import psycopg
 import pytest
 
-from waxprep.clock import FakeClock
+from support import TEST_CIPHER
 from waxprep.domain.identifiers import new_wax_id
 from waxprep.domain.models import (
-    Conversation,
-    Message,
-    MessageContentType,
+    AuthorKind,
+    HistoryEntry,
     NotebookEntry,
+    ObjectType,
+    ProvenanceLink,
     Student,
-    StudentStatus,
+    Summary,
     new_id,
 )
-from waxprep.migrations import apply_migrations
+from waxprep.index.tokens import TokenIndex
 from waxprep.storage.postgres import PostgresStorage
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.postgres
+NOW = datetime(2026, 4, 1, tzinfo=UTC)
 
 
-@pytest.fixture
-def pg_store() -> Iterator[PostgresStorage]:
-    if not DATABASE_URL:
-        pytest.skip("DATABASE_URL not set")
-    import psycopg
+def _student(store: PostgresStorage) -> Any:
+    wax = new_wax_id()
+    store.create_student(Student(wax, NOW, NOW))
+    return wax
 
-    conn = psycopg.connect(DATABASE_URL, autocommit=False)
-    with conn.cursor() as cur:
+
+def _entry(wax: Any, text: str, when: datetime = NOW, **kw: Any) -> HistoryEntry:
+    return HistoryEntry(
+        new_id(), wax, AuthorKind.STUDENT, "text/plain", text, when, when, **kw
+    )
+
+
+def test_history_text_is_encrypted_in_the_database(
+    pg_store: PostgresStorage, pg_conn: psycopg.Connection[Any]
+) -> None:
+    wax = _student(pg_store)
+    entry = pg_store.append_history_entry(
+        _entry(wax, "I am always hungry after school")
+    )
+    with pg_conn.cursor() as cur:
+        cur.execute("RESET ROLE")
         cur.execute(
-            """
-            DROP TABLE IF EXISTS
-                context_investigations, knowledge_embeddings,
-                knowledge_evidence, knowledge_edges, knowledge_nodes,
-                artifact_references, artifact_versions, artifacts, workspaces,
-                events, notebook_entries, notebooks, attachments, messages,
-                conversations, channel_identities, students, schema_migrations
-            CASCADE
-            """
+            "SELECT text_encrypted FROM history_entries WHERE id = %s", (entry.id,)
         )
-        cur.execute("DROP FUNCTION IF EXISTS waxprep_lookup_channel(TEXT, TEXT)")
-        cur.execute("DROP FUNCTION IF EXISTS waxprep_current_wax_id()")
-    conn.commit()
-    apply_migrations(conn)
-    yield PostgresStorage(conn)
-    conn.close()
+        raw = bytes(cur.fetchone()[0])  # type: ignore[index]
+    assert b"hungry" not in raw
+    loaded = pg_store.get_history_entry(wax, entry.id)
+    assert loaded is not None and loaded.text == "I am always hungry after school"
 
 
-def test_postgres_migrations_and_isolation(pg_store: PostgresStorage) -> None:
-    clock = FakeClock(datetime(2026, 4, 1, tzinfo=UTC))
-    a = Student(
-        wax_id=new_wax_id(),
-        created_at=clock.now(),
-        updated_at=clock.now(),
-        status=StudentStatus.ACTIVE,
+def test_history_isolation_between_students(pg_store: PostgresStorage) -> None:
+    a, b = _student(pg_store), _student(pg_store)
+    entry = pg_store.append_history_entry(_entry(a, "only a"))
+    assert pg_store.get_history_entry(b, entry.id) is None
+    assert pg_store.list_history(b) == ()
+
+
+def test_duplicate_channel_delivery_is_idempotent(pg_store: PostgresStorage) -> None:
+    wax = _student(pg_store)
+    first = pg_store.append_history_entry(
+        _entry(wax, "hi", channel="wa", channel_ref="m1")
     )
-    b = Student(
-        wax_id=new_wax_id(),
-        created_at=clock.now(),
-        updated_at=clock.now(),
-        status=StudentStatus.ACTIVE,
+    again = pg_store.append_history_entry(
+        _entry(wax, "hi", channel="wa", channel_ref="m1")
     )
-    pg_store.create_student(a)
-    pg_store.create_student(b)
-    conv = Conversation(
-        id=new_id(),
-        wax_id=a.wax_id,
-        created_at=clock.now(),
-        updated_at=clock.now(),
+    assert again.id == first.id and len(pg_store.list_history(wax)) == 1
+
+
+def test_read_around_and_time_filters(pg_store: PostgresStorage) -> None:
+    wax = _student(pg_store)
+    entries = [
+        pg_store.append_history_entry(_entry(wax, f"m{i}", NOW + timedelta(minutes=i)))
+        for i in range(6)
+    ]
+    around = pg_store.list_history_around(wax, entries[3].id, before=2, after=1)
+    assert [e.text for e in around] == ["m1", "m2", "m3", "m4"]
+    recent = pg_store.list_history(wax, since=NOW + timedelta(minutes=4))
+    assert [e.text for e in recent] == ["m4", "m5"]
+
+
+def test_blind_word_index_finds_text_without_storing_words(
+    pg_store: PostgresStorage,
+) -> None:
+    wax = _student(pg_store)
+    entry = pg_store.append_history_entry(_entry(wax, "Adeyemi gave worksheet seven"))
+    index = TokenIndex(TEST_CIPHER)
+    pg_store.put_search_tokens(
+        wax, ObjectType.HISTORY, entry.id, NOW, index.hashes(wax, "Adeyemi worksheet")
     )
-    pg_store.create_conversation(conv)
-    msg = Message(
-        id=new_id(),
-        wax_id=a.wax_id,
-        conversation_id=conv.id,
-        role="student",
-        content_type=MessageContentType.TEXT,
-        text_body="only-a",
-        created_at=clock.now(),
+    hashes = index.hashes(wax, "adeyemi")
+    found = pg_store.find_by_tokens(
+        wax,
+        hashes,
+        object_types=(ObjectType.HISTORY,),
+        since=None,
+        until=None,
+        limit=10,
     )
-    pg_store.create_message(msg)
-    nb = pg_store.get_or_create_notebook(a.wax_id, clock.now())
-    pg_store.add_notebook_entry(
-        NotebookEntry(
-            id=new_id(),
-            wax_id=a.wax_id,
-            notebook_id=nb.id,
-            schema_version=1,
-            payload={"observation": "motorcycle lever insight"},
-            source_type="test",
-            source_ref=None,
-            created_at=clock.now(),
-            updated_at=clock.now(),
+    assert [m.object_id for m in found] == [entry.id]
+    stats = pg_store.token_stats(wax, hashes, (ObjectType.HISTORY,))
+    assert stats.total_objects == 1 and stats.document_frequency[hashes[0]] == 1
+
+
+def test_notebook_summary_provenance_round_trip(pg_store: PostgresStorage) -> None:
+    wax = _student(pg_store)
+    source = pg_store.append_history_entry(_entry(wax, "I study at night"))
+    nb = pg_store.get_or_create_notebook(wax, NOW)
+    note = pg_store.add_notebook_entry(
+        NotebookEntry(new_id(), wax, nb.id, 1, {"o": "studies at night"}, NOW, NOW)
+    )
+    newer = pg_store.add_notebook_entry(
+        NotebookEntry(new_id(), wax, nb.id, 1, {"o": "studies mornings"}, NOW, NOW)
+    )
+    pg_store.supersede_notebook_entry(wax, note.id, newer.id, NOW)
+    assert [e.id for e in pg_store.list_notebook_entries(wax, nb.id)] == [newer.id]
+    assert len(pg_store.list_notebook_entries(wax, nb.id, include_superseded=True)) == 2
+    summary = pg_store.add_summary(
+        Summary(new_id(), wax, "Studied at night.", NOW, NOW, 1, "test", NOW)
+    )
+    pg_store.add_provenance_links(
+        (
+            ProvenanceLink(
+                new_id(),
+                wax,
+                ObjectType.SUMMARY,
+                summary.id,
+                ObjectType.HISTORY,
+                source.id,
+                NOW,
+                AuthorKind.STUDENT,
+                "I study at night",
+            ),
         )
     )
-    assert pg_store.get_conversation(b.wax_id, conv.id) is None
-    assert pg_store.get_message(b.wax_id, conv.id, msg.id) is None
-    assert pg_store.get_conversation(a.wax_id, conv.id) is not None
-    entries = pg_store.list_notebook_entries(a.wax_id, nb.id)
-    assert "motorcycle" in entries[0].payload["observation"]
+    link = pg_store.list_provenance(wax, ObjectType.SUMMARY, summary.id)[0]
+    assert (
+        link.quote == "I study at night"
+        and link.source_author_kind is AuthorKind.STUDENT
+    )
+    assert (
+        pg_store.list_unsummarized_history(
+            wax, before=NOW + timedelta(days=1), limit=10
+        )
+        == ()
+    )
+
+
+def test_wrong_student_key_context_cannot_decrypt_rows(
+    pg_store: PostgresStorage,
+) -> None:
+    a, b = _student(pg_store), _student(pg_store)
+    entry = pg_store.append_history_entry(_entry(a, "private"))
+    assert pg_store.get_history_entry(b, entry.id) is None
