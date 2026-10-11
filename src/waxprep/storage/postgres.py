@@ -829,6 +829,10 @@ class PostgresStorage:
         if not links:
             return
         wax_id = links[0].wax_id
+        # Blocker F: polymorphic provenance links cannot be protected by
+        # an ordinary FK, so the service must verify that every source
+        # object belongs to the same student as the derived object.
+        self._verify_provenance_ownership(wax_id, links)
         self._write_many(
             wax_id,
             f"INSERT INTO provenance_links ({LINK_COLUMNS}) "
@@ -850,6 +854,71 @@ class PostgresStorage:
                 for link in links
             ],
         )
+
+    def _verify_provenance_ownership(
+        self, wax_id: WaxId, links: tuple[ProvenanceLink, ...]
+    ) -> None:
+        """Reject provenance links whose source or derived object is owned
+        by a different student. Polymorphic links cannot be FK-protected.
+        """
+        for link in links:
+            if link.wax_id != wax_id:
+                raise ValueError(
+                    "provenance link wax_id does not match the batch owner"
+                )
+            self._check_object_owner(
+                wax_id, link.source_type, link.source_id
+            )
+            self._check_object_owner(
+                wax_id, link.derived_type, link.derived_id
+            )
+
+    def _check_object_owner(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> None:
+        """Verify the object is owned by `wax_id`. Raises ValueError if not.
+
+        Uses the SECURITY DEFINER `waxprep_object_owner` function so the
+        check sees the actual owner even when RLS would hide the row.
+        """
+        if not self._object_owner_table(object_type)[0]:
+            return  # unstructured object types are not ownership-checked
+        set_current_wax_id(self._conn, wax_id)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT waxprep_object_owner(%s, %s)",
+                (object_type.value, object_id),
+            )
+            row = cur.fetchone()
+        self._conn.commit()
+        actual = row[0] if row else None
+        if actual is None:
+            # Could be missing (the object may not have been created yet) —
+            # that's a separate error. We only reject cross-student refs.
+            return
+        if str(actual) != str(wax_id):
+            raise ValueError(
+                f"cross-student reference: {object_type.value} {object_id} "
+                f"is owned by another student"
+            )
+
+    @staticmethod
+    def _object_owner_table(object_type: ObjectType) -> tuple[str | None, str]:
+        if object_type is ObjectType.HISTORY:
+            return "history_entries", "id"
+        if object_type is ObjectType.SUMMARY:
+            return "summaries", "id"
+        if object_type is ObjectType.NOTEBOOK:
+            return "notebook_entries", "id"
+        if object_type is ObjectType.KNOWLEDGE_NODE:
+            return "knowledge_nodes", "id"
+        if object_type is ObjectType.KNOWLEDGE_EDGE:
+            return "knowledge_edges", "id"
+        if object_type is ObjectType.ARTIFACT_VERSION:
+            return "artifact_versions", "id"
+        if object_type is ObjectType.ARTIFACT_CONTENT:
+            return "artifact_contents", "id"
+        return None, "id"
 
     def _link(self, row: Row) -> ProvenanceLink:
         wax_id = WaxId(row["wax_id"])

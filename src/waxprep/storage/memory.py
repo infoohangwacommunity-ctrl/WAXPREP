@@ -406,7 +406,54 @@ class InMemoryStorage:
         for link in links:
             if link.wax_id not in self._students:
                 raise ValueError("unknown student")
+            # Blocker F: polymorphic provenance links cannot be protected
+            # by an ordinary FK; verify ownership at the service level.
+            self._check_object_owner(
+                link.wax_id, link.source_type, link.source_id
+            )
+            self._check_object_owner(
+                link.wax_id, link.derived_type, link.derived_id
+            )
         self._provenance.extend(links)
+
+    def _check_object_owner(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> None:
+        """Raise ValueError if the object exists but is owned by another student."""
+        owner = self._object_owner(wax_id, object_type, object_id)
+        if owner is None:
+            return  # missing object — a separate error, not a cross-tenant ref
+        if owner != wax_id:
+            raise ValueError(
+                f"cross-student reference: {object_type.value} {object_id} "
+                f"is owned by another student"
+            )
+
+    def _object_owner(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> WaxId | None:
+        if object_type is ObjectType.HISTORY:
+            entry = self._history.get((wax_id, object_id))
+            return entry.wax_id if entry else None
+        if object_type is ObjectType.SUMMARY:
+            s = self._summaries.get((wax_id, object_id))
+            return s.wax_id if s else None
+        if object_type is ObjectType.NOTEBOOK:
+            n = self._entries.get((wax_id, object_id))
+            return n.wax_id if n else None
+        if object_type is ObjectType.KNOWLEDGE_NODE:
+            n = self._nodes.get((wax_id, object_id))
+            return n.wax_id if n else None
+        if object_type is ObjectType.KNOWLEDGE_EDGE:
+            e = self._edges.get((wax_id, object_id))
+            return e.wax_id if e else None
+        if object_type is ObjectType.ARTIFACT_VERSION:
+            v = self._versions.get((wax_id, object_id))
+            return v.wax_id if v else None
+        if object_type is ObjectType.ARTIFACT_CONTENT:
+            c = self._content.get((wax_id, object_id))
+            return c.wax_id if c else None
+        return None
 
     def list_provenance(
         self, wax_id: WaxId, derived_type: ObjectType, derived_id: UUID
