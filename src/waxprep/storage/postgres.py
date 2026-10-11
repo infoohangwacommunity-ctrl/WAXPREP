@@ -1588,7 +1588,10 @@ class PostgresStorage:
         from datetime import timedelta
 
         lease_until = now + timedelta(seconds=lease_seconds)
-        with self._conn.cursor() as cur:
+        # RLS requires the current WAX ID to be set; otherwise the
+        # derivation_jobs policy hides all rows.
+        set_current_wax_id(self._conn, wax_id)
+        with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
                 UPDATE derivation_jobs
@@ -1615,6 +1618,8 @@ class PostgresStorage:
                 (lease_until, now, wax_id, now, now, limit),
             )
             rows = cur.fetchall()
+        if self._txn_depth == 0:
+            self._conn.commit()
         jobs: list[DerivationJob] = []
         for r in rows:
             jobs.append(
