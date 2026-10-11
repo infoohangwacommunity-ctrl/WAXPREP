@@ -180,7 +180,13 @@ def backfill_notebook_entries(
     migration 006 drops them after the guards pass. This backfill writes
     the new columns alongside the old ones.
 
-    Idempotent: rows that already have payload_encrypted set are skipped.
+    Atomic + safely resumable: for each notebook entry, the payload
+    encryption AND the provenance link creation happen in ONE transaction.
+    If a crash occurs between them, the transaction rolls back — on
+    re-run, the row is re-processed because payload_encrypted is still NULL.
+    If the payload is already encrypted but the provenance link is missing
+    (e.g., a crash after the first commit in an older version of this
+    backfill), the missing link is created without re-encrypting the payload.
     """
     seen = copied = already = skipped = 0
     errors: list[str] = []
@@ -198,84 +204,94 @@ def backfill_notebook_entries(
     now = datetime.now(UTC)
     for row in rows:
         wax_id = WaxId(row["wax_id"])
-        if row["payload_encrypted"] is not None:
-            already += 1
-            continue
         try:
-            payload = (
-                row["payload"]
-                if isinstance(row["payload"], dict)
-                else json.loads(row["payload"] or "{}")
-            )
-            payload_bytes = json.dumps(payload).encode("utf-8")
-            encrypted = storage._cipher.encrypt_text(  # type: ignore[attr-defined]
-                wax_id, "notebook.payload", payload_bytes.decode("utf-8")
-            )
-            assume_app_role(conn)
-            set_current_wax_id(conn, wax_id)
-            with conn.cursor() as cur2:
-                cur2.execute(
-                    "UPDATE notebook_entries SET payload_encrypted = %s, "
-                    "status = 'active' WHERE id = %s AND wax_id = %s",
-                    (encrypted, row["id"], wax_id),
+            # Determine what needs to be done.
+            need_payload = row["payload_encrypted"] is None
+            need_provenance = bool(row["source_type"] and row["source_ref"])
+
+            # Check if a provenance link already exists (resumable).
+            if need_provenance and not need_payload:
+                # The payload was already encrypted (by a prior run);
+                # check whether the provenance link exists.
+                with conn.cursor() as cur2:
+                    cur2.execute("RESET ROLE")
+                    cur2.execute(
+                        "SELECT 1 FROM provenance_links "
+                        "WHERE wax_id = %s AND derived_type = 'notebook' "
+                        "AND derived_id = %s LIMIT 1",
+                        (wax_id, row["id"]),
+                    )
+                    if cur2.fetchone() is not None:
+                        need_provenance = False
+
+            if not need_payload and not need_provenance:
+                already += 1
+                continue
+
+            # Encrypt the payload if needed.
+            encrypted = None
+            if need_payload:
+                payload = (
+                    row["payload"]
+                    if isinstance(row["payload"], dict)
+                    else json.loads(row["payload"] or "{}")
                 )
-            conn.commit()
-            # Create a provenance link if source_type and source_ref exist.
-            # Use a direct INSERT (as superuser) because the storage's
-            # add_provenance_links calls waxprep_object_owner, which
-            # doesn't exist until migration 010 (after the backfill).
-            if row["source_type"] and row["source_ref"]:
+                payload_bytes = json.dumps(payload).encode("utf-8")
+                encrypted = storage._cipher.encrypt_text(  # type: ignore[attr-defined]
+                    wax_id, "notebook.payload", payload_bytes.decode("utf-8")
+                )
+
+            # Build the provenance link if needed.
+            link = None
+            quote_bytes = None
+            if need_provenance:
                 source_type_str = str(row["source_type"])
                 source_id_str = str(row["source_ref"])
-                try:
-                    source_type = ObjectType(source_type_str)
-                    source_id = UUID(source_id_str)
-                    link = ProvenanceLink(
-                        id=new_id(),
-                        wax_id=wax_id,
-                        derived_type=ObjectType.NOTEBOOK,
-                        derived_id=row["id"],
-                        source_type=source_type,
-                        source_id=source_id,
-                        created_at=now,
+                source_type = ObjectType(source_type_str)
+                source_id = UUID(source_id_str)
+                link = ProvenanceLink(
+                    id=new_id(),
+                    wax_id=wax_id,
+                    derived_type=ObjectType.NOTEBOOK,
+                    derived_id=row["id"],
+                    source_type=source_type,
+                    source_id=source_id,
+                    created_at=now,
+                )
+                quote_bytes = storage._cipher.encrypt_text(  # type: ignore[attr-defined]
+                    wax_id, "provenance.quote", ""
+                )
+
+            # Execute both writes in ONE transaction (atomic).
+            assume_app_role(conn)
+            set_current_wax_id(conn, wax_id)
+            with conn.cursor() as cur3:
+                if need_payload:
+                    cur3.execute(
+                        "UPDATE notebook_entries SET payload_encrypted = %s, "
+                        "status = 'active' WHERE id = %s AND wax_id = %s",
+                        (encrypted, row["id"], wax_id),
                     )
-                    # Encrypt the quote if present.
-                    quote_bytes = (
-                        storage._cipher.encrypt_text(  # type: ignore[attr-defined]
-                            wax_id, "provenance.quote", ""
-                        )
-                        if link.quote is not None
-                        else None
+                if link is not None:
+                    cur3.execute(
+                        "INSERT INTO provenance_links (id, wax_id, "
+                        "derived_type, derived_id, source_type, source_id, "
+                        "source_author_kind, quote_encrypted, created_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (
+                            link.id,
+                            wax_id,
+                            link.derived_type.value,
+                            link.derived_id,
+                            link.source_type.value,
+                            link.source_id,
+                            None,
+                            quote_bytes,
+                            link.created_at,
+                        ),
                     )
-                    assume_app_role(conn)
-                    set_current_wax_id(conn, wax_id)
-                    with conn.cursor() as cur3:
-                        cur3.execute(
-                            "INSERT INTO provenance_links (id, wax_id, "
-                            "derived_type, derived_id, source_type, source_id, "
-                            "source_author_kind, quote_encrypted, created_at) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                            "ON CONFLICT DO NOTHING",
-                            (
-                                link.id,
-                                wax_id,
-                                link.derived_type.value,
-                                link.derived_id,
-                                link.source_type.value,
-                                link.source_id,
-                                None,
-                                quote_bytes,
-                                link.created_at,
-                            ),
-                        )
-                    conn.commit()
-                except (ValueError, Exception) as exc:  # noqa: BLE001
-                    # The source_type/source_ref may be malformed or
-                    # reference a missing object. Log and continue.
-                    errors.append(
-                        f"notebook_entry {row['id']}: provenance creation failed: {exc}"
-                    )
-                    conn.rollback()
+            conn.commit()
             copied += 1
         except Exception as exc:  # noqa: BLE001
             errors.append(f"notebook_entry {row['id']}: {type(exc).__name__}: {exc}")

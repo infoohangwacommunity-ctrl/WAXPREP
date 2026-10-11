@@ -17,6 +17,7 @@ Verifies that the backfill:
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -42,7 +43,9 @@ NOW = datetime(2026, 10, 1, tzinfo=UTC)
 def legacy_db() -> Any:
     """A database with migrations 001-005 applied and representative
     legacy data (messages, notebook entries, artifact filenames)."""
-    url = "postgresql://postgres@localhost:5432/waxprep_test"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        pytest.skip("DATABASE_URL not set")
     conn: psycopg.Connection[Any] = psycopg.connect(url, autocommit=False)
     with conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")

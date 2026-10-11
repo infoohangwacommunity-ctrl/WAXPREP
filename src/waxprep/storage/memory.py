@@ -939,8 +939,11 @@ class InMemoryStorage:
         return record
 
     def append_event(self, event: Event) -> Event:
+        from waxprep.security.event_metadata import validate_event_metadata
+
         if event.wax_id is None:
             return event
+        validate_event_metadata(event.metadata)
         self._events.setdefault(event.wax_id, []).append(event)
         return event
 

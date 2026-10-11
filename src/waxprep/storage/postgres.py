@@ -1720,6 +1720,9 @@ class PostgresStorage:
         return record
 
     def append_event(self, event: Event) -> Event:
+        from waxprep.security.event_metadata import validate_event_metadata
+
+        validated = validate_event_metadata(event.metadata)
         self._write(
             event.wax_id,
             "INSERT INTO events (id, wax_id, kind, object_type, object_id, created_at, "
@@ -1731,7 +1734,7 @@ class PostgresStorage:
                 event.object_type,
                 event.object_id,
                 event.created_at,
-                json.dumps(event.metadata),
+                json.dumps(validated),
             ),
         )
         return event

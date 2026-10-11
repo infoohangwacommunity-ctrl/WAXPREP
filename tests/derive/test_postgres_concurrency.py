@@ -14,6 +14,7 @@ Unlike the in-memory tests, these exercise real PostgreSQL
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -41,7 +42,9 @@ NOW = datetime(2026, 9, 1, tzinfo=UTC)
 @pytest.fixture
 def pg_db() -> Any:
     """A clean, fully migrated database."""
-    url = "postgresql://postgres@localhost:5432/waxprep_test"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        pytest.skip("DATABASE_URL not set")
     conn: psycopg.Connection[Any] = psycopg.connect(url, autocommit=False)
     with conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")

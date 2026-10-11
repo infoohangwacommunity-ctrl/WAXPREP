@@ -1,10 +1,25 @@
 -- Retire the conversation-based model.
--- Safe by construction: it REFUSES to run if any old message has not been
--- copied into history_entries first (see waxprep.history.backfill).
+-- Safe by construction: it REFUSES to run if the backfill
+-- (waxprep.history.backfill) has not converted every legacy row.
 -- On an empty/pre-launch database it simply cleans up.
+--
+-- The guards check for UN-BACKFILLED rows, not for the mere existence of
+-- rows. After the backfill:
+-- - every notebook_entries row has payload_encrypted set
+-- - every artifact_versions row has filename_encrypted set
+-- - every messages row exists in history_entries
+-- The guards pass, and migration 006 drops the old plaintext columns.
 
+-- Step 1: add the new columns idempotently BEFORE the guards so the
+-- guards can check them. The backfill may have already added some of
+-- these; IF NOT EXISTS makes this safe.
+ALTER TABLE artifact_versions ADD COLUMN IF NOT EXISTS filename_encrypted BYTEA;
+
+-- Step 2: guards — refuse to proceed if any legacy data hasn't been
+-- backfilled yet.
 DO $$
 BEGIN
+    -- Messages must be copied to history_entries first.
     IF EXISTS (
         SELECT 1 FROM messages m
         WHERE NOT EXISTS (SELECT 1 FROM history_entries h WHERE h.id = m.id)
@@ -12,10 +27,15 @@ BEGIN
         RAISE EXCEPTION
             'messages not yet copied to history_entries: run the backfill first';
     END IF;
-    IF EXISTS (SELECT 1 FROM notebook_entries) THEN
+    -- Notebook entries must have payload_encrypted set (backfill converts
+    -- plaintext payload → encrypted).
+    IF EXISTS (SELECT 1 FROM notebook_entries WHERE payload_encrypted IS NULL) THEN
         RAISE EXCEPTION
-            'notebook_entries has rows: re-save them through the new notebook first';
+            'notebook_entries has rows without payload_encrypted: run the backfill first';
     END IF;
+    -- Old knowledge/investigation tables must be empty (the app never
+    -- wrote to them; if rows exist, they were written by another process
+    -- and require manual conversion).
     IF EXISTS (SELECT 1 FROM knowledge_nodes)
        OR EXISTS (SELECT 1 FROM knowledge_edges)
        OR EXISTS (SELECT 1 FROM knowledge_evidence)
@@ -24,14 +44,20 @@ BEGIN
         RAISE EXCEPTION
             'old knowledge/investigation tables have rows; they were never written by the app';
     END IF;
-    IF EXISTS (SELECT 1 FROM artifact_versions WHERE original_filename IS NOT NULL) THEN
+    -- Artifact versions must have filename_encrypted set for every row
+    -- that has a plaintext filename.
+    IF EXISTS (
+        SELECT 1 FROM artifact_versions
+        WHERE original_filename IS NOT NULL
+          AND filename_encrypted IS NULL
+    ) THEN
         RAISE EXCEPTION
-            'artifact filenames must be re-saved encrypted before this migration';
+            'artifact_versions has filenames not yet encrypted: run the backfill first';
     END IF;
 END
 $$;
 
--- Attachments now hang off history entries.
+-- Step 3: retire the old schema.
 ALTER TABLE attachments DROP CONSTRAINT IF EXISTS attachments_message_id_fkey;
 ALTER TABLE attachments RENAME COLUMN message_id TO history_entry_id;
 ALTER TABLE attachments
@@ -46,13 +72,23 @@ ALTER TABLE notebook_entries DROP COLUMN IF EXISTS payload;
 ALTER TABLE notebook_entries DROP COLUMN IF EXISTS source_type;
 ALTER TABLE notebook_entries DROP COLUMN IF EXISTS source_ref;
 ALTER TABLE notebook_entries ALTER COLUMN payload_encrypted SET NOT NULL;
-ALTER TABLE notebook_entries
-    ADD CONSTRAINT notebook_entries_status_check
-    CHECK (status IN ('active', 'superseded'));
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'notebook_entries_status_check'
+          AND conrelid = 'notebook_entries'::regclass
+    ) THEN
+        ALTER TABLE notebook_entries
+            ADD CONSTRAINT notebook_entries_status_check
+            CHECK (status IN ('active', 'superseded'));
+    END IF;
+END
+$$;
 
--- Artifact filenames are student information: store them encrypted.
+-- Artifact filenames are student information: drop the plaintext column.
+-- filename_encrypted was added in Step 1.
 ALTER TABLE artifact_versions DROP COLUMN IF EXISTS original_filename;
-ALTER TABLE artifact_versions ADD COLUMN filename_encrypted BYTEA;
 
 -- Knowledge graph: recreate with encrypted text. Evidence now lives in
 -- provenance_links, and vectors live in search_embeddings.
@@ -62,7 +98,7 @@ DROP TABLE IF EXISTS knowledge_evidence CASCADE;
 DROP TABLE IF EXISTS knowledge_edges CASCADE;
 DROP TABLE IF EXISTS knowledge_nodes CASCADE;
 
-CREATE TABLE knowledge_nodes (
+CREATE TABLE IF NOT EXISTS knowledge_nodes (
     id UUID PRIMARY KEY,
     wax_id UUID NOT NULL REFERENCES students (wax_id),
     node_type_encrypted BYTEA NOT NULL,
@@ -77,9 +113,9 @@ CREATE TABLE knowledge_nodes (
     CONSTRAINT knowledge_nodes_wax_id_id_key UNIQUE (wax_id, id)
 );
 
-CREATE INDEX knowledge_nodes_wax_idx ON knowledge_nodes (wax_id);
+CREATE INDEX IF NOT EXISTS knowledge_nodes_wax_idx ON knowledge_nodes (wax_id);
 
-CREATE TABLE knowledge_edges (
+CREATE TABLE IF NOT EXISTS knowledge_edges (
     id UUID PRIMARY KEY,
     wax_id UUID NOT NULL REFERENCES students (wax_id),
     source_node_id UUID NOT NULL,
@@ -95,20 +131,20 @@ CREATE TABLE knowledge_edges (
         FOREIGN KEY (wax_id, target_node_id) REFERENCES knowledge_nodes (wax_id, id)
 );
 
-CREATE INDEX knowledge_edges_source_idx ON knowledge_edges (wax_id, source_node_id);
-CREATE INDEX knowledge_edges_target_idx ON knowledge_edges (wax_id, target_node_id);
+CREATE INDEX IF NOT EXISTS knowledge_edges_source_idx ON knowledge_edges (wax_id, source_node_id);
+CREATE INDEX IF NOT EXISTS knowledge_edges_target_idx ON knowledge_edges (wax_id, target_node_id);
 
-CREATE TABLE context_investigations (
+CREATE TABLE IF NOT EXISTS context_investigations (
     id UUID PRIMARY KEY,
     wax_id UUID NOT NULL REFERENCES students (wax_id),
-    trigger_entry_id UUID REFERENCES history_entries (id),
+    trigger_entry_id UUID,
     input_encrypted BYTEA NOT NULL,
     result_encrypted BYTEA NOT NULL,
     model TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX context_investigations_wax_idx
+CREATE INDEX IF NOT EXISTS context_investigations_wax_idx
     ON context_investigations (wax_id, created_at);
 
 ALTER TABLE knowledge_nodes ENABLE ROW LEVEL SECURITY;
@@ -118,12 +154,15 @@ ALTER TABLE knowledge_edges FORCE ROW LEVEL SECURITY;
 ALTER TABLE context_investigations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE context_investigations FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS knowledge_nodes_isolation ON knowledge_nodes;
 CREATE POLICY knowledge_nodes_isolation ON knowledge_nodes
     FOR ALL USING (wax_id = waxprep_current_wax_id())
     WITH CHECK (wax_id = waxprep_current_wax_id());
+DROP POLICY IF EXISTS knowledge_edges_isolation ON knowledge_edges;
 CREATE POLICY knowledge_edges_isolation ON knowledge_edges
     FOR ALL USING (wax_id = waxprep_current_wax_id())
     WITH CHECK (wax_id = waxprep_current_wax_id());
+DROP POLICY IF EXISTS context_investigations_isolation ON context_investigations;
 CREATE POLICY context_investigations_isolation ON context_investigations
     FOR ALL USING (wax_id = waxprep_current_wax_id())
     WITH CHECK (wax_id = waxprep_current_wax_id());

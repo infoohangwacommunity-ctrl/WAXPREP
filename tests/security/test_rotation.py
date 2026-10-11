@@ -12,6 +12,7 @@ Verifies that:
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,7 +34,9 @@ KEY_NEW = b"n" * 32
 @pytest.fixture
 def rotated_db() -> Any:
     """A database with data encrypted under key 1, then rotated to key 2."""
-    url = "postgresql://postgres@localhost:5432/waxprep_test"
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        pytest.skip("DATABASE_URL not set")
     conn: psycopg.Connection[Any] = psycopg.connect(url, autocommit=False)
     with conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE")

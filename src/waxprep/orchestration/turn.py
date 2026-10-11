@@ -47,6 +47,7 @@ from waxprep.domain.models import (
     new_id,
 )
 from waxprep.history.service import HistoryService
+from waxprep.orchestration.bounded import BoundedConsultation
 from waxprep.orchestration.consultation import CIBackedConsultation
 from waxprep.orchestration.contracts import (
     Teacher,
@@ -139,28 +140,59 @@ class TurnService:
         if not created:
             existing_reply = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
             if existing_reply is not None:
-                # Also look for an existing outbound delivery to return.
+                # The reply exists. Check whether the outbound delivery
+                # record also exists. If a crash occurred between saving
+                # the reply and creating the outbox record, the record
+                # is missing — repair it now without invoking the Teacher.
                 outbound = self._storage.get_outbound_delivery_for_tutor(
                     wax_id, existing_reply.id, channel
                 )
+                outbound_id = outbound.id if outbound is not None else None
+                if outbound is None and channel is not None:
+                    # Repair: create the missing outbox record for the
+                    # existing tutor reply. This does NOT invoke the
+                    # Teacher — it reuses the stored reply.
+                    now = self._clock.now()
+                    repaired = self._storage.create_outbound_delivery(
+                        OutboundDelivery(
+                            id=new_id(),
+                            wax_id=wax_id,
+                            tutor_entry_id=existing_reply.id,
+                            channel=channel,
+                            channel_ref=channel_ref,
+                            status=OutboundStatus.PENDING,
+                            attempts=0,
+                            last_error=None,
+                            delivered_at=None,
+                            run_after=now,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    outbound_id = repaired.id
                 return TurnResult(
                     student_entry=student_entry,
                     tutor_entry=existing_reply,
                     context_summary="Duplicate delivery; tutor reply already stored.",
                     duplicate=True,
                     consultations_made=0,
-                    outbound_delivery_id=(
-                        outbound.id if outbound is not None else None
-                    ),
+                    outbound_delivery_id=outbound_id,
                 )
             # Previous attempt crashed before tutor reply was saved;
             # resume teaching below.
 
         # 3. Teacher drives the turn with bounded consultations.
-        consultation: TeacherConsultation = CIBackedConsultation(
+        # The budget is enforced at the consultation-capability boundary:
+        # every CI call across the entire turn is counted, including
+        # multiple calls within one Teacher.teach() invocation.
+        inner_consultation: TeacherConsultation = CIBackedConsultation(
             self._investigator,
             storage=self._storage,
             context_model_name=self._context_model_name,
+        )
+        consultation = BoundedConsultation(
+            inner_consultation,
+            max_consultations=self._max_consultations,
         )
         reply_text, consultations_made, context_summary = await self._run_teacher(
             wax_id, student_entry, consultation
@@ -176,37 +208,38 @@ class TurnService:
                 consultations_made=consultations_made,
             )
 
-        # 4. Save exactly one tutor reply (linked to student entry).
-        tutor_entry = self._history.record(
-            wax_id,
-            AuthorKind.TUTOR,
-            reply_text,
-            channel=channel,
-            thread_ref=thread_ref,
-            reply_to_id=student_entry.id,
-        )
-
-        # 5. Create outbound delivery record (outbox).
-        outbound_id = None
-        if channel is not None:
-            now = self._clock.now()
-            delivery = self._storage.create_outbound_delivery(
-                OutboundDelivery(
-                    id=new_id(),
-                    wax_id=wax_id,
-                    tutor_entry_id=tutor_entry.id,
-                    channel=channel,
-                    channel_ref=channel_ref,
-                    status=OutboundStatus.PENDING,
-                    attempts=0,
-                    last_error=None,
-                    delivered_at=None,
-                    run_after=now,
-                    created_at=now,
-                    updated_at=now,
-                )
+        # 4+5. Save exactly one tutor reply AND its outbound delivery
+        # record in ONE transaction. A crash between them is repaired
+        # on the next retry (step 2 above).
+        now = self._clock.now()
+        with self._storage.transaction():
+            tutor_entry = self._history.record(
+                wax_id,
+                AuthorKind.TUTOR,
+                reply_text,
+                channel=channel,
+                thread_ref=thread_ref,
+                reply_to_id=student_entry.id,
             )
-            outbound_id = delivery.id
+            outbound_id = None
+            if channel is not None:
+                delivery = self._storage.create_outbound_delivery(
+                    OutboundDelivery(
+                        id=new_id(),
+                        wax_id=wax_id,
+                        tutor_entry_id=tutor_entry.id,
+                        channel=channel,
+                        channel_ref=channel_ref,
+                        status=OutboundStatus.PENDING,
+                        attempts=0,
+                        last_error=None,
+                        delivered_at=None,
+                        run_after=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                outbound_id = delivery.id
 
         return TurnResult(
             student_entry=student_entry,
@@ -221,17 +254,26 @@ class TurnService:
         self,
         wax_id: WaxId,
         student_entry: HistoryEntry,
-        consultation: TeacherConsultation,
+        consultation: BoundedConsultation,
     ) -> tuple[str | None, int, str]:
         """Run the Teacher with bounded consultations.
+
+        The budget is enforced by the ``BoundedConsultation`` wrapper —
+        every ``consult()`` call is counted. When the budget is
+        exhausted, further calls return ``budget_exhausted`` and the
+        Teacher must finish with the context it already has.
 
         Returns ``(reply_text, consultations_made, context_summary)``.
         ``reply_text`` is ``None`` if the Teacher declined to respond.
         """
         prior_results: list = []
-        consultations_made = 0
         last_summary = ""
-        for round_number in range(self._max_consultations):
+        # Run up to max_consultations Teacher rounds. The BoundedConsultation
+        # enforces the hard limit on actual CI calls, so even if the
+        # Teacher calls consult() multiple times in one round, the total
+        # is bounded.
+        max_rounds = self._max_consultations
+        for round_number in range(max_rounds):
             now = self._clock.now()
             inp = TeacherInput(
                 wax_id=wax_id,
@@ -240,27 +282,21 @@ class TurnService:
                 consultation=consultation,
                 prior_results=tuple(prior_results),
                 round_number=round_number,
-                max_rounds=self._max_consultations,
+                max_rounds=max_rounds,
             )
             outcome: TeacherOutcome = await self._teacher.teach(inp)
             prior_results = list(outcome.context_used)
-            if outcome.context_used:
-                # The Teacher actually consulted CI on this round.
-                consultations_made += len(outcome.context_used) - len(inp.prior_results)
             if outcome.finished:
                 if outcome.reply_text is None:
-                    # Teacher declined to respond.
-                    return None, consultations_made, last_summary
+                    return None, consultation.calls_made, last_summary
                 last_summary = self._summarize_context(prior_results)
-                return outcome.reply_text, consultations_made, last_summary
-            # Teacher wants another round. If they asked a question,
-            # the consultation adapter will run via the next iteration's
-            # Teacher.teach() call (the mock Teacher does this; a real
-            # Teacher implementation should call inp.consultation.consult()
-            # directly to gather context before finishing).
+                return outcome.reply_text, consultation.calls_made, last_summary
             last_summary = self._summarize_context(prior_results)
-        # Hit the consultation bound; ask the Teacher one last time
-        # with a finished=True expectation.
+            # If the budget is exhausted, force one final Teacher round
+            # to produce a reply.
+            if consultation.budget_exhausted:
+                break
+        # Final forced round: the Teacher must reply now.
         now = self._clock.now()
         inp = TeacherInput(
             wax_id=wax_id,
@@ -268,12 +304,16 @@ class TurnService:
             now=now,
             consultation=consultation,
             prior_results=tuple(prior_results),
-            round_number=self._max_consultations,
-            max_rounds=self._max_consultations,
+            round_number=max_rounds,
+            max_rounds=max_rounds,
         )
         outcome = await self._teacher.teach(inp)
         reply_text = outcome.reply_text or ""
-        return reply_text, consultations_made, self._summarize_context(prior_results)
+        return (
+            reply_text,
+            consultation.calls_made,
+            self._summarize_context(prior_results),
+        )
 
     @staticmethod
     def _summarize_context(results: list) -> str:

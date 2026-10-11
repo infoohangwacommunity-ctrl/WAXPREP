@@ -89,6 +89,16 @@ class Retriever:
         Paginates through **all** matching token rows, scoring each
         page and keeping a running top-N. There is no arbitrary wall:
         an old relevant record beyond the first page can still surface.
+
+        Early termination: since token matches are ordered by
+        ``object_time DESC``, all future pages have
+        ``object_time <= last_seen_time``. The max possible score for
+        any future object is ``sum_of_all_query_token_weights ×
+        recency_weight(now, last_seen_time)`` (if the object matches
+        every query token and is at the oldest seen time). If the
+        current top-N's minimum score exceeds this bound, no future
+        page can improve the ranking, and we stop. This is rigorously
+        justified — not an arbitrary constant.
         """
         hashes = self._token_index.hashes(wax_id, query)
         if not hashes:
@@ -106,14 +116,17 @@ class Retriever:
         )
         usable = rare or hashes
 
+        # The maximum possible raw token-score for any object is the sum
+        # of all query-token weights (if the object matches every token).
+        max_raw_score = sum(weights.values())
+
         scores: dict[tuple[ObjectType, UUID], float] = defaultdict(float)
         times: dict[tuple[ObjectType, UUID], datetime] = {}
 
-        # Paginated retrieval: continue until the corpus is exhausted.
+        # Paginated retrieval: continue until the corpus is exhausted
+        # or the early-termination bound is met.
         cursor: tuple[datetime, UUID, bytes] | None = None
-        pages = 0
-        max_pages = 1000  # safety bound; one student's corpus is bounded
-        while pages < max_pages:
+        while True:
             page = self._storage.find_by_tokens_page(
                 wax_id,
                 usable,
@@ -131,9 +144,17 @@ class Retriever:
                 times[key] = match.object_time
             last = page[-1]
             cursor = (last.object_time, last.object_id, last.token_hash)
-            pages += 1
             if len(page) < self._token_page_size:
                 break  # last page
+            # Early termination: if the current top-N's min score exceeds
+            # the max possible score from any future page, stop.
+            if len(scores) >= limit and not ignore_recency:
+                current_min = min(scores.values())
+                future_max = max_raw_score * recency_weight(
+                    now, last.object_time, self._half_life
+                )
+                if current_min >= future_max:
+                    break
 
         scored = [
             Scored(
@@ -172,15 +193,21 @@ class Retriever:
 
         Paginates through embeddings in deterministic order. Each page is
         decrypted, scored against the query vector, and the running top-N
-        is kept. Early termination when the top-N's minimum score exceeds
-        the max possible score from any future page (which is bounded by
-        1.0 × recency_weight at the oldest possible time).
+        is kept.
+
+        Early termination: since embeddings are ordered by
+        ``object_time DESC``, all future pages have
+        ``object_time <= last_seen_time``. The max possible score for
+        any future embedding is ``1.0 × recency_weight(now,
+        last_seen_time)`` (max cosine similarity × the recency weight at
+        the oldest seen time). If the current top-N's minimum score
+        exceeds this bound, no future page can improve the ranking, and
+        we stop. This is rigorously justified — not an arbitrary
+        constant.
         """
         scored: list[Scored] = []
         cursor: tuple[datetime, UUID] | None = None
-        pages = 0
-        max_pages = 10000  # safety bound
-        while pages < max_pages:
+        while True:
             page = self._storage.list_embeddings_page(
                 wax_id,
                 object_types,
@@ -213,18 +240,16 @@ class Retriever:
                 )
             last = page[-1]
             cursor = (last.object_time, last.object_id)
-            pages += 1
             if len(page) < self._embedding_page_size:
                 break  # last page
-            # Early termination: if the top-N's min score already exceeds
-            # the max possible score from any future page, stop. The max
-            # possible score for any future embedding is
-            # 1.0 (max cosine similarity) × max recency_weight of any
-            # future time, which is <= 1.0. So if our current top-N min
-            # is >= 1.0, we can stop. This is conservative but correct.
-            if len(scored) >= limit:
+            # Early termination: if the top-N's min score exceeds the max
+            # possible score from any future page, stop.
+            if len(scored) >= limit and not ignore_recency:
                 scored.sort(key=lambda s: s.score, reverse=True)
-                if scored[limit - 1].score >= 1.0:
+                future_max = 1.0 * recency_weight(
+                    now, last.object_time, self._half_life
+                )
+                if scored[limit - 1].score >= future_max:
                     break
 
         scored.sort(key=lambda s: s.score, reverse=True)
