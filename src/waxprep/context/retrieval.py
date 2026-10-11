@@ -24,7 +24,12 @@ from waxprep.storage.protocol import Storage
 
 ALL_INDEXED: tuple[ObjectType, ...] = tuple(sorted(INDEXED_OBJECT_TYPES, key=str))
 COMMON_TOKEN_SHARE = 0.2
-MAX_TOKEN_ROWS = 5000
+# Blocker H (spec 8.2-H): a hard cap on token matches can hide old
+# records. The default is generous; production deployments that exceed
+# this bound should benchmark a real vector + GIN index. The cap is
+# configurable so tests can verify rank-then-limit behaviour without
+# creating thousands of rows.
+MAX_TOKEN_ROWS = 50000
 
 
 @dataclass(frozen=True, slots=True)

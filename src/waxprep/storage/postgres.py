@@ -554,13 +554,18 @@ class PostgresStorage:
     ) -> tuple[TokenMatch, ...]:
         if not token_hashes:
             return ()
+        # Blocker H: deterministic ORDER BY so the limit is reproducible
+        # and a ranked old record can still surface. The limit is now
+        # generous (50k by default); production-scale search needs a real
+        # vector index.
         rows = self._read(
             wax_id,
             "SELECT object_type, object_id, object_time, token_hash FROM search_tokens "
             "WHERE wax_id = %s AND token_hash = ANY(%s::bytea[]) "
             "AND object_type = ANY(%s::text[]) "
             "AND (%s::timestamptz IS NULL OR object_time >= %s) "
-            "AND (%s::timestamptz IS NULL OR object_time < %s) LIMIT %s",
+            "AND (%s::timestamptz IS NULL OR object_time < %s) "
+            "ORDER BY object_time DESC, object_id, token_hash LIMIT %s",
             (
                 wax_id,
                 list(token_hashes),
