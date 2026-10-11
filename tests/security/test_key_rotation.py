@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from support import TEST_CIPHER, add_student, make_world
+from support import add_student, make_world
 from waxprep.derive.worker import sanitize_error
-from waxprep.domain.models import AuthorKind, JobStatus
+from waxprep.domain.models import AuthorKind
 from waxprep.embeddings.mock import DeterministicEmbeddingProvider
 from waxprep.security.cipher import (
     AesGcmFieldCipher,
@@ -36,9 +36,7 @@ async def test_job_error_does_not_leak_student_text() -> None:
     world = make_world(storage=storage, embedder=_ExplodingEmbedder())
     wax = add_student(world)
     student_text = "my SSN is 123-45-6789"
-    world.services.history.record(
-        wax, AuthorKind.STUDENT, student_text
-    )
+    world.services.history.record(wax, AuthorKind.STUDENT, student_text)
     report = await world.services.worker.run_once()
     assert report.retrying >= 1
     jobs = storage.list_jobs(wax)
@@ -56,7 +54,9 @@ async def test_job_error_does_not_leak_student_text() -> None:
 
 def test_sanitize_error_strips_quoted_strings_and_long_tokens() -> None:
     """The sanitizer reduces exception text to an opaque marker."""
-    exc = ValueError("could not process 'Adeyemi exam is in three months' and 0123456789abcdef0123456789")
+    exc = ValueError(
+        "could not process 'Adeyemi exam is in three months' and 0123456789abcdef0123456789"
+    )
     sanitized = sanitize_error(exc)
     assert "Adeyemi" not in sanitized
     assert "exam is in three months" not in sanitized
@@ -68,7 +68,9 @@ def test_sanitize_error_strips_quoted_strings_and_long_tokens() -> None:
 def test_missing_key_produces_fail_closed_error() -> None:
     """§8.3 item 13: a missing key produces an explicit fail-closed error,
     not blank or fabricated context."""
-    cipher = AesGcmFieldCipher(KeyRing(keys={1: b"a" * 32, 2: b"b" * 32}, active_key_id=2))
+    cipher = AesGcmFieldCipher(
+        KeyRing(keys={1: b"a" * 32, 2: b"b" * 32}, active_key_id=2)
+    )
     import uuid
 
     from waxprep.domain.identifiers import WaxId
@@ -95,9 +97,7 @@ def test_old_key_can_still_decrypt_after_rotation() -> None:
     # Encrypt with old key
     blob = old_cipher.encrypt_text(wax_id, "test", "first message")
     # Rotate to key 2
-    new_cipher = AesGcmFieldCipher(
-        KeyRing(keys={1: key1, 2: key2}, active_key_id=2)
-    )
+    new_cipher = AesGcmFieldCipher(KeyRing(keys={1: key1, 2: key2}, active_key_id=2))
     # Old record is still readable
     assert new_cipher.decrypt_text(wax_id, "test", blob) == "first message"
     # New write uses key 2

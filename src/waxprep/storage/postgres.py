@@ -334,8 +334,13 @@ class PostgresStorage:
                     "(wax_id, object_type, object_id, object_time, token_hash) "
                     "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                     [
-                        (wax_id, ObjectType.HISTORY.value, entry.id,
-                         entry.occurred_at, h)
+                        (
+                            wax_id,
+                            ObjectType.HISTORY.value,
+                            entry.id,
+                            entry.occurred_at,
+                            h,
+                        )
                         for h in dict.fromkeys(token_hashes)
                     ],
                 )
@@ -346,10 +351,18 @@ class PostgresStorage:
                     "ON CONFLICT DO NOTHING",
                     [
                         (
-                            j.id, j.wax_id, j.kind, j.object_type.value,
-                            j.object_id, j.status.value, j.attempts,
-                            j.last_error, j.run_after, j.created_at,
-                            j.updated_at, j.lease_until,
+                            j.id,
+                            j.wax_id,
+                            j.kind,
+                            j.object_type.value,
+                            j.object_id,
+                            j.status.value,
+                            j.attempts,
+                            j.last_error,
+                            j.run_after,
+                            j.created_at,
+                            j.updated_at,
+                            j.lease_until,
                         )
                         for j in jobs
                     ],
@@ -871,12 +884,8 @@ class PostgresStorage:
                 raise ValueError(
                     "provenance link wax_id does not match the batch owner"
                 )
-            self._check_object_owner(
-                wax_id, link.source_type, link.source_id
-            )
-            self._check_object_owner(
-                wax_id, link.derived_type, link.derived_id
-            )
+            self._check_object_owner(wax_id, link.source_type, link.source_id)
+            self._check_object_owner(wax_id, link.derived_type, link.derived_id)
 
     def _check_object_owner(
         self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
@@ -1474,7 +1483,6 @@ class PostgresStorage:
                 )
             )
         return tuple(jobs)
-
 
     def release_job_capability_skip(
         self, wax_id: WaxId, job_id: UUID, now: datetime, retry_at: datetime

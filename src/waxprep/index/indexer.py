@@ -151,7 +151,7 @@ class Indexer:
         if not self._has_embedder:
             return 0
         count = 0
-        for object_type, object_id, object_time in objects:
+        for object_type, object_id, _object_time in objects:
             self.enqueue(wax_id, JOB_EMBED, object_type, object_id)
             count += 1
         return count

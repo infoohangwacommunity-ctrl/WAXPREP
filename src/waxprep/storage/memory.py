@@ -48,7 +48,9 @@ class InMemoryStorage:
         self._history_seq: dict[Key, int] = {}
         self._attachments: dict[Key, Attachment] = {}
         self._tokens: dict[WaxId, list[TokenMatch]] = {}
-        self._embeddings: dict[tuple[WaxId, ObjectType, UUID, str], EmbeddingRecord] = {}
+        self._embeddings: dict[
+            tuple[WaxId, ObjectType, UUID, str], EmbeddingRecord
+        ] = {}
         self._notebooks: dict[WaxId, Notebook] = {}
         self._entries: dict[Key, NotebookEntry] = {}
         self._summaries: dict[Key, Summary] = {}
@@ -260,7 +262,9 @@ class InMemoryStorage:
         token_hashes: tuple[bytes, ...],
         object_types: tuple[ObjectType, ...],
     ) -> TokenStats:
-        rows = [r for r in self._tokens.get(wax_id, []) if r.object_type in object_types]
+        rows = [
+            r for r in self._tokens.get(wax_id, []) if r.object_type in object_types
+        ]
         total = len({(r.object_type, r.object_id) for r in rows})
         wanted = set(token_hashes)
         frequency: dict[bytes, int] = {}
@@ -337,9 +341,7 @@ class InMemoryStorage:
         self._entries[(entry.wax_id, entry.id)] = entry
         return entry
 
-    def get_notebook_entry(
-        self, wax_id: WaxId, entry_id: UUID
-    ) -> NotebookEntry | None:
+    def get_notebook_entry(self, wax_id: WaxId, entry_id: UUID) -> NotebookEntry | None:
         return self._entries.get((wax_id, entry_id))
 
     def list_notebook_entries(
@@ -408,12 +410,8 @@ class InMemoryStorage:
                 raise ValueError("unknown student")
             # Blocker F: polymorphic provenance links cannot be protected
             # by an ordinary FK; verify ownership at the service level.
-            self._check_object_owner(
-                link.wax_id, link.source_type, link.source_id
-            )
-            self._check_object_owner(
-                link.wax_id, link.derived_type, link.derived_id
-            )
+            self._check_object_owner(link.wax_id, link.source_type, link.source_id)
+            self._check_object_owner(link.wax_id, link.derived_type, link.derived_id)
         self._provenance.extend(links)
 
     def _check_object_owner(
@@ -448,10 +446,10 @@ class InMemoryStorage:
             e = self._edges.get((wax_id, object_id))
             return e.wax_id if e else None
         if object_type is ObjectType.ARTIFACT_VERSION:
-            v = self._versions.get((wax_id, object_id))
+            v = self._artifact_versions.get((wax_id, object_id))
             return v.wax_id if v else None
         if object_type is ObjectType.ARTIFACT_CONTENT:
-            c = self._content.get((wax_id, object_id))
+            c = self._artifact_content.get((wax_id, object_id))
             return c.wax_id if c else None
         return None
 
@@ -520,7 +518,9 @@ class InMemoryStorage:
             return existing
         if wax_id not in self._students:
             raise ValueError("unknown student")
-        workspace = Workspace(id=new_id(), wax_id=wax_id, created_at=now, updated_at=now)
+        workspace = Workspace(
+            id=new_id(), wax_id=wax_id, created_at=now, updated_at=now
+        )
         self._workspaces[wax_id] = workspace
         return workspace
 
@@ -667,7 +667,6 @@ class InMemoryStorage:
         }
         return tuple(sorted(due, key=str)[:limit])
 
-    
     def find_tutor_reply_to(
         self, wax_id: WaxId, student_entry_id: UUID
     ) -> HistoryEntry | None:
@@ -692,13 +691,10 @@ class InMemoryStorage:
         for (w, jid), j in list(self._jobs.items()):
             if w != wax_id:
                 continue
-            due = (
-                (j.status is JobStatus.PENDING and j.run_after <= now)
-                or (
-                    j.status is JobStatus.RUNNING
-                    and j.lease_until is not None
-                    and j.lease_until <= now
-                )
+            due = (j.status is JobStatus.PENDING and j.run_after <= now) or (
+                j.status is JobStatus.RUNNING
+                and j.lease_until is not None
+                and j.lease_until <= now
             )
             if not due:
                 continue
@@ -721,7 +717,6 @@ class InMemoryStorage:
             if len(claimed) >= limit:
                 break
         return tuple(claimed)
-
 
     def release_job_capability_skip(
         self, wax_id: WaxId, job_id: UUID, now: datetime, retry_at: datetime
@@ -768,9 +763,7 @@ class InMemoryStorage:
         return tuple(sorted(rows, key=lambda j: j.created_at))
 
     # --- audit --------------------------------------------------------------------------------------
-    def record_investigation(
-        self, record: InvestigationRecord
-    ) -> InvestigationRecord:
+    def record_investigation(self, record: InvestigationRecord) -> InvestigationRecord:
         self._investigations.append(record)
         return record
 

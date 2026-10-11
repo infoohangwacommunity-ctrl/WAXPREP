@@ -104,9 +104,7 @@ class TurnService:
             thread_ref=thread_ref,
             reply_to_id=student_entry.id,
         )
-        return TurnResult(
-            student_entry, tutor_entry, package, duplicate=not created
-        )
+        return TurnResult(student_entry, tutor_entry, package, duplicate=not created)
 
     async def _investigate(self, wax_id: WaxId, entry: HistoryEntry) -> ContextPackage:
         now = self._clock.now()

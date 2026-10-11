@@ -15,14 +15,9 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from support import TEST_CIPHER
 from waxprep.domain.identifiers import new_wax_id
 from waxprep.domain.models import (
-    Artifact,
-    ArtifactContent,
     ArtifactStatus,
-    ArtifactVersion,
-    Attachment,
     AuthorKind,
     HistoryEntry,
     NotebookEntry,
@@ -30,15 +25,7 @@ from waxprep.domain.models import (
     ObjectType,
     ProvenanceLink,
     Student,
-    Summary,
-    SummaryStatus,
-    Workspace,
     new_id,
-)
-from waxprep.knowledge.models import (
-    KnowledgeEdge,
-    KnowledgeNode,
-    KnowledgeNodeStatus,
 )
 from waxprep.storage.postgres import PostgresStorage
 from waxprep.storage.session import assume_app_role, set_current_wax_id
@@ -54,9 +41,7 @@ def _student(store: PostgresStorage) -> Any:
 
 
 def _entry(wax: Any, text: str = "x") -> HistoryEntry:
-    return HistoryEntry(
-        new_id(), wax, AuthorKind.STUDENT, "text/plain", text, NOW, NOW
-    )
+    return HistoryEntry(new_id(), wax, AuthorKind.STUDENT, "text/plain", text, NOW, NOW)
 
 
 def _attempt_cross_reference(pg_conn, sql: str, params: tuple[Any, ...]) -> None:

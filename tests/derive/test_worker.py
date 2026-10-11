@@ -65,6 +65,7 @@ async def test_job_gives_up_after_max_attempts_but_history_survives() -> None:
 
 # --- Blocker B: capability-aware indexer -----------------------------------
 
+
 @pytest.mark.asyncio
 async def test_no_embedding_job_enqueued_when_embedder_absent() -> None:
     """(a) No JOB_EMBED is enqueued when no embedder is configured."""
@@ -125,12 +126,9 @@ async def test_backfill_indexes_objects_after_embedder_added() -> None:
         storage=storage, embedder=DeterministicEmbeddingProvider(dimensions=8)
     )
     history = [
-        e for e in storage.list_history(wax, limit=50)
-        if e.text and e.text.strip()
+        e for e in storage.list_history(wax, limit=50) if e.text and e.text.strip()
     ]
-    objects = tuple(
-        (ObjectType.HISTORY, e.id, e.occurred_at) for e in history
-    )
+    objects = tuple((ObjectType.HISTORY, e.id, e.occurred_at) for e in history)
     enqueued = new_world.services.indexer.backfill_embedding_jobs(wax, objects)
     assert enqueued >= 1
     # The new embedding jobs are now due and run.

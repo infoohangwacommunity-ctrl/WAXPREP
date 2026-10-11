@@ -8,10 +8,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
-from support import TEST_CIPHER, add_student, make_world
-from waxprep.context.evolution import EvolutionService, NEEDS_CONFIRMATION
+from support import add_student, make_world
+from waxprep.context.evolution import NEEDS_CONFIRMATION, EvolutionService
 from waxprep.context.proposals import EvidenceRef, Operation, Proposal
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
@@ -23,9 +21,6 @@ from waxprep.domain.models import (
     SummaryStatus,
     new_id,
 )
-from waxprep.index.indexer import Indexer
-from waxprep.index.tokens import TokenIndex
-from waxprep.storage.memory import InMemoryStorage
 
 NOW = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -92,7 +87,10 @@ def test_tutor_only_fact_through_summary_still_needs_confirmation() -> None:
     )
     result = world.services.evolution.apply(proposal, now=NOW)
     assert result.accepted, f"proposal must be accepted; got: {result.reason}"
-    notebook_entry = world.storage.get_notebook_entry(wax, result.created_notebook_entry_id)
+    assert result.created_notebook_entry_id is not None
+    notebook_entry = world.storage.get_notebook_entry(
+        wax, result.created_notebook_entry_id
+    )
     assert notebook_entry is not None
     assert notebook_entry.payload.get(NEEDS_CONFIRMATION) is True, (
         "tutor-only fact passed through a summary must keep the "
@@ -147,7 +145,10 @@ def test_student_fact_through_summary_does_not_need_confirmation() -> None:
     )
     result = world.services.evolution.apply(proposal, now=NOW)
     assert result.accepted
-    notebook_entry = world.storage.get_notebook_entry(wax, result.created_notebook_entry_id)
+    assert result.created_notebook_entry_id is not None
+    notebook_entry = world.storage.get_notebook_entry(
+        wax, result.created_notebook_entry_id
+    )
     assert notebook_entry is not None
     assert notebook_entry.payload.get(NEEDS_CONFIRMATION) is not True, (
         "student-authored fact through a summary must NOT be marked as "
@@ -164,28 +165,48 @@ def test_provenance_cycle_does_not_infinite_loop() -> None:
     # Create two summaries that cite each other (a cycle).
     s1 = storage.add_summary(
         Summary(
-            id=new_id(), wax_id=wax, text="A", covers_from=NOW, covers_until=NOW,
-            level=1, status=SummaryStatus.ACTIVE, produced_by="t", created_at=NOW,
+            id=new_id(),
+            wax_id=wax,
+            text="A",
+            covers_from=NOW,
+            covers_until=NOW,
+            level=1,
+            status=SummaryStatus.ACTIVE,
+            produced_by="t",
+            created_at=NOW,
         )
     )
     s2 = storage.add_summary(
         Summary(
-            id=new_id(), wax_id=wax, text="B", covers_from=NOW, covers_until=NOW,
-            level=1, status=SummaryStatus.ACTIVE, produced_by="t", created_at=NOW,
+            id=new_id(),
+            wax_id=wax,
+            text="B",
+            covers_from=NOW,
+            covers_until=NOW,
+            level=1,
+            status=SummaryStatus.ACTIVE,
+            produced_by="t",
+            created_at=NOW,
         )
     )
     storage.add_provenance_links(
         (
             ProvenanceLink(
-                id=new_id(), wax_id=wax,
-                derived_type=ObjectType.SUMMARY, derived_id=s1.id,
-                source_type=ObjectType.SUMMARY, source_id=s2.id,
+                id=new_id(),
+                wax_id=wax,
+                derived_type=ObjectType.SUMMARY,
+                derived_id=s1.id,
+                source_type=ObjectType.SUMMARY,
+                source_id=s2.id,
                 created_at=NOW,
             ),
             ProvenanceLink(
-                id=new_id(), wax_id=wax,
-                derived_type=ObjectType.SUMMARY, derived_id=s2.id,
-                source_type=ObjectType.SUMMARY, source_id=s1.id,
+                id=new_id(),
+                wax_id=wax,
+                derived_type=ObjectType.SUMMARY,
+                derived_id=s2.id,
+                source_type=ObjectType.SUMMARY,
+                source_id=s1.id,
                 created_at=NOW,
             ),
         )

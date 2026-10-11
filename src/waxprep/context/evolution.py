@@ -175,8 +175,11 @@ class EvolutionService:
         for link in links:
             authors.extend(
                 self._resolve_to_history_authors(
-                    wax_id, link.source_type, link.source_id,
-                    _seen=seen, _depth=_depth + 1,
+                    wax_id,
+                    link.source_type,
+                    link.source_id,
+                    _seen=seen,
+                    _depth=_depth + 1,
                 )
             )
         return authors

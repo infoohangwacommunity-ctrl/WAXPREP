@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from support import TEST_CIPHER, add_student, make_world
 from waxprep.context.retrieval import MAX_TOKEN_ROWS, Retriever
 from waxprep.domain.models import AuthorKind, ObjectType
@@ -40,8 +38,13 @@ def test_old_relevant_record_remains_discoverable_with_many_newer_records() -> N
         # Use the actual default in the application; the test verifies
         # that the cap is large enough and that rank-then-limit works.
     )
-    wax = add_student(make_world(storage=storage).__class__.__name__ and None  # type: ignore[arg-type]
-                      ) if False else None
+    wax = (
+        add_student(
+            make_world(storage=storage).__class__.__name__ and None  # type: ignore[arg-type]
+        )
+        if False
+        else None
+    )
     # Use the support helper for a real student.
     world = make_world(storage=storage)
     wax = add_student(world)
