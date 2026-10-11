@@ -285,3 +285,13 @@ extracted contents are stored and searchable.
 **Status:** Accepted
 
 CI never writes SQL. Every durable change requires evidence and passes structural validation.
+
+## D033 — Media lifecycle and WhatsApp channel (final pre-testing stage)
+
+- Encrypted private byte store (in-memory / filesystem) behind storage_ref.
+- Upstage Document Parse/OCR is the only document/image extraction provider.
+- Gemini/Grok are optional STT only; explicit WAXPREP_VOICE_PROVIDER; no silent failover.
+- Diagrams: validated JSON → safe local SVG; no free-form image generation.
+- Video may be stored but is not semantically processed.
+- WhatsApp Cloud API is a channel adapter only; no second history/session store.
+- Cost/size caps enforced before provider calls.
