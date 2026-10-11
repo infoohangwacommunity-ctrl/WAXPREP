@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import logging
 from collections.abc import AsyncIterator
 
@@ -43,6 +44,8 @@ class ModelGateway:
         config, provider = self._registry.resolve(request.model)
         self._validate_role(request, config.role)
         self._validate_request_capabilities(request, config.capabilities)
+        # Provider APIs need the vendor model id, not the logical registry name.
+        request = replace(request, model=config.model)
         attempts = self._max_retries + 1
         for attempt in range(attempts):
             try:
@@ -66,6 +69,7 @@ class ModelGateway:
         config, provider = self._registry.resolve(request.model)
         self._validate_role(request, config.role)
         self._validate_request_capabilities(request, config.capabilities)
+        request = replace(request, model=config.model)
         if ModelCapability.STREAMING not in config.capabilities:
             raise UnsupportedCapabilityError(
                 f"model {request.model!r} does not support streaming"

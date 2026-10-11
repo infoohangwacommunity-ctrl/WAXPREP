@@ -328,6 +328,14 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     outermost braces when the model wrapped the object in prose.
     """
     stripped = text.strip()
+    # Strip common markdown fences the model may wrap around JSON.
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
     try:
         data = json.loads(stripped)
         return data if isinstance(data, dict) else None
