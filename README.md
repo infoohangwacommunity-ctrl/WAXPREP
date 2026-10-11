@@ -6,11 +6,11 @@ Wax Prep is a personalised educational tutor for Nigerian students, initially de
 
 The goal is not simply to answer questions. Wax Prep should adapt its teaching to the individual learner.
 
-## Foundation status
+## Status
 
-This repository currently contains the engineering foundation only.
-
-Student-facing tutoring capabilities are intentionally not implemented yet.
+The student-world architecture is in place: one unified encrypted history, Context
+Intelligence, derived notebook/summaries/knowledge with provenance, and artifact understanding.
+See docs/IMPLEMENTATION-PLAN.md. The Teacher model and WhatsApp channel are separate builds.
 
 ## What Wax Prep is NOT
 
@@ -45,3 +45,6 @@ Paid provider integration tests are explicitly marked `live` and are excluded fr
 - docs/CONTRIBUTING.md
 - docs/DECISIONS.md
 - docs/LICENCE-POLICY.md
+- docs/DATA-MAP.md
+- docs/CONTEXT-INTELLIGENCE.md
+- docs/IMPLEMENTATION-PLAN.md

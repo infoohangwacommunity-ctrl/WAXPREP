@@ -1,293 +1,308 @@
-"""Hybrid retrieval: lexical + optional semantic, always WAX-ID scoped."""
+"""Retrieval capabilities for Context Intelligence.
+
+Each method is one *capability* (exact words, meaning, time, neighbours,
+sources, relationships). The model decides which to use; this module only
+executes, always scoped to one WAX ID, and never decides relevance itself.
+"""
 
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import UUID
 
+from waxprep.context.evidence import clip, history_evidence, hydrate
 from waxprep.context.models import ContextDecision, Evidence, EvidenceType
+from waxprep.context.temporal import recency_weight
 from waxprep.domain.identifiers import WaxId
-from waxprep.domain.models import Message
+from waxprep.domain.models import INDEXED_OBJECT_TYPES, ObjectType
 from waxprep.embeddings.similarity import cosine_similarity
-from waxprep.knowledge.store import KnowledgeStore
-from waxprep.storage.memory import InMemoryStorage
+from waxprep.index.tokens import TokenIndex
+from waxprep.storage.protocol import Storage
+
+ALL_INDEXED: tuple[ObjectType, ...] = tuple(sorted(INDEXED_OBJECT_TYPES, key=str))
+COMMON_TOKEN_SHARE = 0.2
+MAX_TOKEN_ROWS = 5000
 
 
 @dataclass(frozen=True, slots=True)
-class RankedHit:
-    evidence: Evidence
+class Scored:
+    object_type: ObjectType
+    object_id: UUID
+    object_time: datetime
     score: float
-    channel: str  # lexical | semantic | graph
 
 
-def _clip(text: str, max_chars: int = 2000) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1] + "…"
-
-
-class HybridRetriever:
-    """Combines lexical storage search with optional embedding similarity."""
+class Retriever:
+    """Student-scoped retrieval over one unified world."""
 
     def __init__(
         self,
-        storage: InMemoryStorage,
-        knowledge: KnowledgeStore | None = None,
+        storage: Storage,
+        token_index: TokenIndex,
         *,
-        embedding_index: list[tuple[UUID, str, tuple[float, ...]]] | None = None,
+        recency_half_life_days: float = 180.0,
+        max_semantic_candidates: int = 5000,
     ) -> None:
         self._storage = storage
-        self._knowledge = knowledge or KnowledgeStore()
-        # (object_id, content, vector) precomputed for semantic search
-        self._embedding_index = embedding_index or []
+        self._token_index = token_index
+        self._half_life = recency_half_life_days
+        self._max_candidates = max_semantic_candidates
 
-    def search_conversation(
+    # --- exact words -----------------------------------------------------
+    def find_exact(
         self,
         wax_id: WaxId,
         query: str,
         *,
+        now: datetime,
+        object_types: tuple[ObjectType, ...] = ALL_INDEXED,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 8,
-        conversation_id: UUID | None = None,
+        ignore_recency: bool = False,
     ) -> tuple[Evidence, ...]:
-        q = query.lower().strip()
-        hits: list[RankedHit] = []
-        for message in self._storage.list_all_messages(wax_id):
-            if (
-                conversation_id is not None
-                and message.conversation_id != conversation_id
-            ):
-                continue
-            body = message.text_body or ""
-            if not body:
-                continue
-            score = _lexical_score(q, body.lower())
-            if score <= 0:
-                continue
-            hits.append(
-                RankedHit(
-                    evidence=_message_evidence(wax_id, message, score),
-                    score=score,
-                    channel="lexical",
-                )
-            )
-        hits.sort(key=lambda h: h.score, reverse=True)
-        return tuple(h.evidence for h in hits[:limit])
-
-    def search_notebook(
-        self, wax_id: WaxId, query: str, *, limit: int = 8
-    ) -> tuple[Evidence, ...]:
-        q = query.lower().strip()
-        notebook = self._storage.get_notebook(wax_id)
-        if notebook is None:
+        hashes = self._token_index.hashes(wax_id, query)
+        if not hashes:
             return ()
-        entries = self._storage.list_notebook_entries(wax_id, notebook.id)
-        hits: list[RankedHit] = []
-        for entry in entries:
-            text = str(entry.payload)
-            score = _lexical_score(q, text.lower())
-            if score <= 0:
-                continue
-            hits.append(
-                RankedHit(
-                    evidence=Evidence(
-                        id=entry.id,
-                        wax_id=wax_id,
-                        evidence_type=EvidenceType.NOTEBOOK,
-                        source_id=entry.id,
-                        content=_clip(text),
-                        created_at=entry.created_at,
-                        relevance_reason=f"lexical notebook score={score:.3f}",
-                        decision=ContextDecision.NEEDS_CHECKING,
-                    ),
-                    score=score,
-                    channel="lexical",
-                )
+        stats = self._storage.token_stats(wax_id, hashes, object_types)
+        total = max(stats.total_objects, 1)
+        weights = {
+            h: math.log((total + 1) / (stats.document_frequency.get(h, 0) + 1)) + 0.1
+            for h in hashes
+        }
+        rare = tuple(
+            h
+            for h in hashes
+            if stats.document_frequency.get(h, 0) / total <= COMMON_TOKEN_SHARE
+        )
+        usable = rare or hashes  # only-common words still count when nothing else
+        matches = self._storage.find_by_tokens(
+            wax_id,
+            usable,
+            object_types=object_types,
+            since=since,
+            until=until,
+            limit=MAX_TOKEN_ROWS,
+        )
+        scores: dict[tuple[ObjectType, UUID], float] = defaultdict(float)
+        times: dict[tuple[ObjectType, UUID], datetime] = {}
+        for match in matches:
+            key = (match.object_type, match.object_id)
+            scores[key] += weights.get(match.token_hash, 0.1)
+            times[key] = match.object_time
+        scored = [
+            Scored(
+                object_type=key[0],
+                object_id=key[1],
+                object_time=times[key],
+                score=value
+                * (
+                    1.0
+                    if ignore_recency
+                    else recency_weight(now, times[key], self._half_life)
+                ),
             )
-        hits.sort(key=lambda h: h.score, reverse=True)
-        return tuple(h.evidence for h in hits[:limit])
+            for key, value in scores.items()
+        ]
+        return self._hydrate(wax_id, scored, "exact words", limit)
 
-    def search_workspace(
-        self, wax_id: WaxId, query: str, *, limit: int = 8
-    ) -> tuple[Evidence, ...]:
-        q = query.lower().strip()
-        workspace = self._storage.get_workspace(wax_id)
-        if workspace is None:
-            return ()
-        hits: list[RankedHit] = []
-        for artifact in self._storage.list_artifacts(wax_id, workspace.id):
-            versions = self._storage.list_artifact_versions(wax_id, artifact.id)
-            for ver in versions:
-                hay = " ".join(
-                    filter(
-                        None,
-                        [
-                            ver.original_filename or "",
-                            ver.mime_type or "",
-                            ver.storage_ref,
-                        ],
-                    )
-                ).lower()
-                score = _lexical_score(q, hay)
-                if score <= 0:
-                    continue
-                hits.append(
-                    RankedHit(
-                        evidence=Evidence(
-                            id=ver.id,
-                            wax_id=wax_id,
-                            evidence_type=EvidenceType.ARTIFACT,
-                            source_id=artifact.id,
-                            content=_clip(
-                                f"artifact={artifact.id} file={ver.original_filename} "
-                                f"mime={ver.mime_type} ref={ver.storage_ref}"
-                            ),
-                            created_at=ver.created_at,
-                            relevance_reason=f"lexical workspace score={score:.3f}",
-                            decision=ContextDecision.NEEDS_CHECKING,
-                        ),
-                        score=score,
-                        channel="lexical",
-                    )
-                )
-        hits.sort(key=lambda h: h.score, reverse=True)
-        return tuple(h.evidence for h in hits[:limit])
-
-    def search_knowledge(
-        self, wax_id: WaxId, query: str, *, limit: int = 8
-    ) -> tuple[Evidence, ...]:
-        nodes = self._knowledge.search_nodes(wax_id, query, limit=limit)
-        out: list[Evidence] = []
-        for node in nodes:
-            out.append(
-                Evidence(
-                    id=node.id,
-                    wax_id=wax_id,
-                    evidence_type=EvidenceType.KNOWLEDGE_NODE,
-                    source_id=node.id,
-                    content=_clip(
-                        f"[{node.node_type}] {node.label}: {node.description or ''}"
-                    ),
-                    created_at=node.created_at,
-                    relevance_reason="knowledge lexical match",
-                    decision=ContextDecision.NEEDS_CHECKING,
-                )
-            )
-        return tuple(out)
-
-    def search_semantically(
+    # --- meaning -------------------------------------------------------------
+    def find_by_meaning(
         self,
         wax_id: WaxId,
         query_vector: tuple[float, ...],
         *,
+        now: datetime,
+        object_types: tuple[ObjectType, ...] = ALL_INDEXED,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 8,
+        ignore_recency: bool = False,
     ) -> tuple[Evidence, ...]:
-        """Rank pre-indexed content by cosine similarity (bounded, same student)."""
-        hits: list[RankedHit] = []
-        for object_id, content, vector in self._embedding_index:
-            # index is assumed pre-filtered to this student by caller
+        records = self._storage.list_embeddings(
+            wax_id,
+            object_types,
+            since=since,
+            until=until,
+            limit=self._max_candidates,
+        )
+        scored: list[Scored] = []
+        for record in records:
             try:
-                score = cosine_similarity(query_vector, vector)
+                similarity = cosine_similarity(query_vector, record.vector)
             except ValueError:
+                continue  # vector from a different embedding model
+            if similarity <= 0:
                 continue
-            if score <= 0:
-                continue
-            hits.append(
-                RankedHit(
-                    evidence=Evidence(
-                        id=object_id,
-                        wax_id=wax_id,
-                        evidence_type=EvidenceType.CONVERSATION,
-                        source_id=object_id,
-                        content=_clip(content),
-                        created_at=datetime(1970, 1, 1, tzinfo=UTC),
-                        relevance_reason=f"semantic cosine={score:.3f}",
-                        decision=ContextDecision.NEEDS_CHECKING,
-                    ),
-                    score=score,
-                    channel="semantic",
+            weight = (
+                1.0
+                if ignore_recency
+                else recency_weight(now, record.object_time, self._half_life)
+            )
+            scored.append(
+                Scored(
+                    record.object_type,
+                    record.object_id,
+                    record.object_time,
+                    similarity * weight,
                 )
             )
-        hits.sort(key=lambda h: h.score, reverse=True)
-        return tuple(h.evidence for h in hits[:limit])
+        return self._hydrate(wax_id, scored, "similar meaning", limit)
 
-    def follow_relationships(
+    # --- time ------------------------------------------------------------------
+    def browse_window(
         self,
         wax_id: WaxId,
-        node_id: UUID,
         *,
-        direction: str = "both",
+        since: datetime | None,
+        until: datetime | None,
         limit: int = 8,
+        newest_first: bool = True,
     ) -> tuple[Evidence, ...]:
-        edges = self._knowledge.follow(
-            wax_id, node_id, direction=direction, limit=limit
+        entries = self._storage.list_history(
+            wax_id, since=since, until=until, limit=limit, newest_first=newest_first
         )
-        out: list[Evidence] = []
-        for edge in edges:
-            out.append(
-                Evidence(
-                    id=edge.id,
-                    wax_id=wax_id,
-                    evidence_type=EvidenceType.KNOWLEDGE_EDGE,
-                    source_id=edge.id,
-                    content=_clip(
-                        f"{edge.source_node_id} -[{edge.relation}]-> "
-                        f"{edge.target_node_id}"
-                    ),
-                    created_at=edge.created_at,
-                    relevance_reason="graph traversal",
-                    decision=ContextDecision.NEEDS_CHECKING,
-                )
-            )
-        return tuple(out)
+        return tuple(
+            history_evidence(e, "history in the requested time range") for e in entries
+        )
 
-    def inspect_evidence(
-        self, wax_id: WaxId, evidence_id: UUID
+    def read_around(
+        self, wax_id: WaxId, entry_id: UUID, *, before: int = 4, after: int = 2
     ) -> tuple[Evidence, ...]:
-        # messages
-        for message in self._storage.list_all_messages(wax_id):
-            if message.id == evidence_id:
-                return (_message_evidence(wax_id, message, 1.0),)
-        # knowledge nodes
-        node = self._knowledge.get_node(wax_id, evidence_id)
-        if node is not None:
-            return (
-                Evidence(
-                    id=node.id,
-                    wax_id=wax_id,
-                    evidence_type=EvidenceType.KNOWLEDGE_NODE,
-                    source_id=node.id,
-                    content=_clip(
-                        f"[{node.node_type}] {node.label}: {node.description or ''}"
-                    ),
-                    created_at=node.created_at,
-                    relevance_reason="inspect node",
-                    decision=ContextDecision.INCLUDE,
-                ),
+        entries = self._storage.list_history_around(
+            wax_id, entry_id, before=min(before, 20), after=min(after, 20)
+        )
+        return tuple(
+            history_evidence(e, "history next to the referenced moment")
+            for e in entries
+        )
+
+    # --- inspection -----------------------------------------------------------------
+    def inspect(
+        self, wax_id: WaxId, object_id: UUID, object_type: ObjectType | None = None
+    ) -> tuple[Evidence, ...]:
+        candidates = (
+            (object_type,)
+            if object_type is not None
+            else (
+                ObjectType.HISTORY,
+                ObjectType.SUMMARY,
+                ObjectType.NOTEBOOK,
+                ObjectType.KNOWLEDGE_NODE,
+                ObjectType.ARTIFACT_VERSION,
+                ObjectType.ARTIFACT_CONTENT,
             )
+        )
+        for candidate in candidates:
+            found = hydrate(self._storage, wax_id, candidate, object_id, "inspected")
+            if found is not None:
+                return (found,)
         return ()
 
+    def trace_sources(
+        self, wax_id: WaxId, object_id: UUID, object_type: ObjectType
+    ) -> tuple[Evidence, ...]:
+        links = self._storage.list_provenance(wax_id, object_type, object_id)
+        out: list[Evidence] = []
+        for link in links:
+            found = hydrate(
+                self._storage,
+                wax_id,
+                link.source_type,
+                link.source_id,
+                "source of derived item",
+            )
+            if found is not None:
+                out.append(found)
+        return tuple(out)
 
-def _lexical_score(query: str, haystack: str) -> float:
-    if not query or not haystack:
-        return 0.0
-    if query in haystack:
-        return 1.0 + (len(query) / max(len(haystack), 1))
-    tokens = [t for t in query.split() if t]
-    if not tokens:
-        return 0.0
-    matched = sum(1 for t in tokens if t in haystack)
-    return matched / len(tokens)
+    def check_currency(
+        self, wax_id: WaxId, object_id: UUID, object_type: ObjectType
+    ) -> tuple[Evidence, ...]:
+        """Show an item plus what replaced it (or what it replaced)."""
+        found = hydrate(self._storage, wax_id, object_type, object_id, "currency check")
+        if found is None:
+            return ()
+        related: list[Evidence] = [found]
+        if object_type is ObjectType.NOTEBOOK:
+            entry = self._storage.get_notebook_entry(wax_id, object_id)
+            if entry is not None and entry.superseded_by_id is not None:
+                newer = hydrate(
+                    self._storage,
+                    wax_id,
+                    ObjectType.NOTEBOOK,
+                    entry.superseded_by_id,
+                    "replaced this item",
+                )
+                if newer is not None:
+                    related.append(newer)
+        if object_type is ObjectType.KNOWLEDGE_NODE:
+            for edge in self._storage.list_edges(
+                wax_id, object_id, direction="both", limit=8
+            ):
+                if edge.relation == "superseded_by":
+                    other = (
+                        edge.target_node_id
+                        if edge.source_node_id == object_id
+                        else edge.source_node_id
+                    )
+                    linked = hydrate(
+                        self._storage,
+                        wax_id,
+                        ObjectType.KNOWLEDGE_NODE,
+                        other,
+                        "supersession link",
+                    )
+                    if linked is not None:
+                        related.append(linked)
+        return tuple(related)
+
+    # --- relationships -----------------------------------------------------------------
+    def follow_relationships(
+        self, wax_id: WaxId, node_id: UUID, *, direction: str = "both", limit: int = 8
+    ) -> tuple[Evidence, ...]:
+        edges = self._storage.list_edges(
+            wax_id, node_id, direction=direction, limit=limit
+        )
+        return tuple(
+            Evidence(
+                id=edge.id,
+                wax_id=wax_id,
+                evidence_type=EvidenceType.KNOWLEDGE_EDGE,
+                source_id=edge.id,
+                content=clip(
+                    f"{edge.source_node_id} -[{edge.relation}]-> {edge.target_node_id}"
+                ),
+                created_at=edge.created_at,
+                relevance_reason="relationship traversal",
+                decision=ContextDecision.NEEDS_CHECKING,
+                provenance=("relationship derived from history",),
+            )
+            for edge in edges
+        )
+
+    # --- internals ----------------------------------------------------------------------
+    def _hydrate(
+        self, wax_id: WaxId, scored: list[Scored], reason: str, limit: int
+    ) -> tuple[Evidence, ...]:
+        scored.sort(key=lambda s: s.score, reverse=True)
+        out: list[Evidence] = []
+        for item in scored:
+            found = hydrate(
+                self._storage,
+                wax_id,
+                item.object_type,
+                item.object_id,
+                f"{reason} score={item.score:.3f}",
+            )
+            if found is not None:
+                out.append(found)
+            if len(out) >= limit:
+                break
+        return tuple(out)
 
 
-def _message_evidence(wax_id: WaxId, message: Message, score: float) -> Evidence:
-    return Evidence(
-        id=message.id,
-        wax_id=wax_id,
-        evidence_type=EvidenceType.CONVERSATION,
-        source_id=message.id,
-        content=_clip(message.text_body or ""),
-        created_at=message.created_at,
-        relevance_reason=f"lexical conversation score={score:.3f}",
-        decision=ContextDecision.NEEDS_CHECKING,
-    )
+__all__ = ["ALL_INDEXED", "Retriever"]

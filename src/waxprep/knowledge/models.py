@@ -6,10 +6,10 @@ Nodes and edges are generic; meaning is decided by Context Intelligence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 from waxprep.domain.identifiers import WaxId
@@ -48,22 +48,8 @@ class KnowledgeEdge:
     created_at: datetime
 
 
-@dataclass(frozen=True, slots=True)
-class KnowledgeEvidenceRecord:
-    id: UUID
-    wax_id: WaxId
-    node_id: UUID | None
-    edge_id: UUID | None
-    source_type: str
-    source_id: UUID | None
-    quote: str | None
-    metadata: dict[str, Any] = field(default_factory=lambda: cast(dict[str, Any], {}))
-    created_at: datetime | None = None
-
-
 __all__ = [
     "KnowledgeEdge",
-    "KnowledgeEvidenceRecord",
     "KnowledgeNode",
     "KnowledgeNodeStatus",
 ]

@@ -9,8 +9,8 @@ from dataclasses import dataclass
 class ContextSafetyLimits:
     max_investigation_steps: int = 8
     max_tool_calls: int = 16
-    max_semantic_results: int = 8
-    max_relationship_results: int = 8
+    max_results_per_tool: int = 8
+    max_semantic_candidates: int = 5000
     max_evidence_items: int = 12
     max_single_evidence_chars: int = 3000
     max_total_context_chars: int = 12000

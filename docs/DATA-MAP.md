@@ -1,41 +1,30 @@
 # Data Map
 
-Wax Prep keeps durable data separated by responsibility.
+| Object | Purpose | Encrypted fields | Notes |
+|--------|---------|------------------|-------|
+| Student | Account existence | none | Minimal account record |
+| ChannelIdentity | External id -> WAX ID | none | Looked up by SECURITY DEFINER function |
+| HistoryEntry | **Ground truth**: one message in or out | text | Append-only; idempotent per channel message |
+| Attachment | Media linked to a history entry | none | Points to external bytes |
+| SearchTokens | Blind word index | (hashed) | HMAC of words, per student |
+| SearchEmbedding | Meaning index | vector | A finding aid, not memory |
+| Summary | Compressed span of history | text | Never replaces history |
+| ProvenanceLink | Derived -> source | quote | Records source author kind |
+| Notebook / NotebookEntry | Durable understanding | payload | Open-ended; replaceable via supersede |
+| KnowledgeNode / Edge | Relationships | all text | Derived; supersession preserves history |
+| Workspace / Artifact / ArtifactVersion | Durable objects | filename | Versions immutable |
+| ArtifactReference | Links artifact to other objects | none | |
+| ArtifactContent | What could be read from an artifact | text | Searchable |
+| DerivationJob | Retryable background work | none | Failure never touches history |
+| InvestigationRecord | Audit of one CI run | input, result | Points at triggering entry |
+| Event | Minimal domain event | none | |
 
-| Object | Purpose | Student-scoped | Notes |
-|--------|---------|----------------|-------|
-| Student | Account existence | yes | Minimal account record |
-| ChannelIdentity | External channel → WAX ID | yes | Not the student profile |
-| Conversation | Dialogue container | yes | Records interaction |
-| Message | One interaction item | yes | Text/content representation |
-| Attachment | Media attached to a message | yes | Points to external storage |
-| Workspace | Student educational storage container | yes | Not a coding workspace |
-| Artifact | Durable educational item | yes | Logical identity |
-| ArtifactVersion | Immutable stored artifact version | yes | Points to actual bytes |
-| ArtifactReference | Connects artifact to another object | yes | Avoids duplicating bytes |
-| Notebook | Open-ended semantic notebook container | yes | Not Memory |
-| NotebookEntry | Open-ended notebook information | yes | Flexible JSON payload |
-| Event | Durable domain event | when WAX ID set | No full message-body duplication |
+## Source of truth
 
-## Important boundaries
+History is the source of truth. Notebook, summaries, knowledge, indexes and artifact
+contents are *projections* of the same student world and always link back to evidence.
 
-### Conversation
-Records what happened.
+## Migrations
 
-### Workspace
-Records what durable educational material exists.
-
-### Notebook
-Records information Wax Prep deliberately considers useful to retain.
-Open-ended: no required school/class/subjects/strengths/weaknesses/goals/learning-style fields.
-
-### Memory
-Memory is a future capability and is not implemented by Build 2.5.
-
-## Artifact storage
-PostgreSQL stores artifact metadata and relationships.
-Actual file bytes are referenced by `storage_ref` (external storage boundary).
-
-## Versioning
-Artifact versions are immutable. SQL migrations are append-only:
-001 → 002 → 003 → 004…
+Append-only: 001 -> 002 -> 003 -> 004 -> 005 (additive) -> 006 (retire conversations,
+guarded: it refuses to run if old data has not been copied).

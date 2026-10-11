@@ -230,3 +230,58 @@ A `superseded_by` edge may link old → new. Temporal queries can recover either
 
 Write/evolution applies explicit proposals only. There is no silent pipeline that
 turns every conversation into profile fields or mass graph writes.
+
+
+## D033 — One unified history; no conversation concept
+
+**Status:** Accepted (supersedes D011 and the conversation parts of D027)
+
+Every student and tutor message is saved in one timestamped history. There are no
+conversation types, "current", "recent" or "ongoing" notions. CI decides what is relevant.
+
+## D034 — Save first, judge never
+
+**Status:** Accepted
+
+Nothing decides at save time whether a message matters. Derived work is asynchronous and
+retried; its failure never affects the saved message.
+
+## D035 — Derived layers always carry provenance
+
+**Status:** Accepted
+
+Notebook, summaries, knowledge and artifact contents link to their sources. The application
+records the author kind of each source; tutor statements are not student facts.
+
+## D036 — Age changes retrieval, not truth
+
+**Status:** Accepted
+
+No retention rule deletes history. Recency only breaks ties.
+
+## D037 — Application-level field encryption with blind indexes
+
+**Status:** Accepted
+
+AES-256-GCM with per-student keys; blind HMAC word hashes for exact search; vectors encrypted.
+Trade-off: embeddings are compared in the application over a bounded candidate set.
+Revisit (e.g. pgvector with storage-level encryption) when a student's history makes this slow.
+
+## D038 — Time is explicit
+
+**Status:** Accepted
+
+CI and the Teacher receive the current time; every evidence item carries its date and age.
+
+## D039 — Artifacts are generic
+
+**Status:** Accepted
+
+No artifact-type classes. Capability to read a file is injected (a model through the gateway);
+extracted contents are stored and searchable.
+
+## D040 — CI proposes, services execute
+
+**Status:** Accepted
+
+CI never writes SQL. Every durable change requires evidence and passes structural validation.

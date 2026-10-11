@@ -1,67 +1,59 @@
-# Context Intelligence (Read / Investigation)
+# Context Intelligence
 
-Context Intelligence (CI) is a **small AI model** that investigates the student's
-world and produces a compact evidence-backed context package for the Teacher Model.
-
-CI does **not** teach. The Teacher Model is separate and not integrated in this build.
+CI is a **small AI model** that turns "the student just said X, at time T" into a compact,
+dated, traceable context package for the Teacher. CI does **not** teach.
 
 ## Loop
 
 ```text
-message → CI decide → tool (read-only) → evidence → decide … → stop → ContextPackage
+new message + now -> CI decides -> tool (read-only) -> evidence -> decide ... -> stop -> ContextPackage
 ```
 
-- Model chooses actions; application executes tools and enforces limits.
-- No keyword vocabulary routes semantic meaning.
-- Blank messages are mechanical; non-empty messages are eligible for CI.
+The model chooses actions; the application executes tools and enforces limits.
+A failing tool is reported to the model and never crashes the turn.
 
-## Retrieval (hybrid)
+## Tools (capabilities, not tables)
 
-| Channel | Role |
-|---------|------|
-| Lexical | Conversation / notebook / workspace / knowledge text match |
-| Semantic | Optional embeddings + cosine ranking (standard Postgres, no mandatory pgvector) |
-| Graph | Follow generic knowledge edges (not autonomous meaning) |
+| Tool | What it does |
+|------|--------------|
+| find_exact | Words, names, numbers, file names (blind index; rarity-weighted per student) |
+| find_by_meaning | Embedding similarity (reports honestly when embeddings are unavailable) |
+| browse_time_window | What happened in a period |
+| read_around | What happened just before/after a moment (defaults to the newest message) |
+| inspect_item | Look closely at one item |
+| trace_sources | Original evidence behind a summary/notebook entry/relationship |
+| check_currency | Was this replaced? What replaced it? |
+| follow_relationships | Walk the knowledge graph |
+| read_artifact | Extracted contents of an artifact version |
 
-All paths are **WAX-ID scoped**. Cross-student access must fail.
+## Evidence always carries
 
-## Adapters
+time, age relative to now, author kind (student/tutor/system), whether it is superseded,
+and a plain-language provenance note.
 
-- `GatewayContextModel` — CI via existing Model Gateway
-- `HttpEmbeddingProvider` — OpenAI-compatible `/embeddings`
-- `DeterministicEmbeddingProvider` — offline tests only (not real semantics)
+## Write side
+
+CI **proposes**; the application validates, checks the evidence exists for the same student,
+persists, links provenance, and indexes. Operations: create_node, create_edge, supersede_node,
+attach_evidence, add_notebook_entry, supersede_notebook_entry, supersede_summary, link_artifact.
+Every operation requires evidence. Support that is only tutor-authored is flagged
+`needs_student_confirmation`.
+
+## Retrieval of old history
+
+Recency is a gentle tie-breaker (between 0.5x and 1x), never a filter. CI can set
+`ignore_recency`. Old items are always reachable.
+
+## Failure behaviour
+
+If CI fails, the turn continues without context (`context_unavailable`).
+If embeddings, summaries, or artifact reading fail, the history entry is unaffected and the job retries.
 
 ## Configuration
 
 ```text
-WAXPREP_CONTEXT_MODEL=...          # logical registry name
-WAXPREP_EMBEDDING_API_KEY=...      # optional live embeddings
-WAXPREP_EMBEDDING_BASE_URL=...
-WAXPREP_EMBEDDING_MODEL=...
+WAXPREP_MASTER_KEYS=1:<base64 32 bytes>[,2:...]   # required (encryption)
+WAXPREP_ACTIVE_KEY_ID=...                          # optional
+WAXPREP_CONTEXT_MODEL=...                          # logical registry name
+WAXPREP_EMBEDDING_API_KEY / _BASE_URL / _MODEL     # optional live embeddings
 ```
-
-Ordinary `make check` uses mocks only. Live tests remain opt-in (`-m live`).
-
-## Write / evolution
-
-Durable knowledge mutation is **out of scope** for this read build.
-
-
-## Write / Evolution
-
-CI may **propose** durable knowledge changes. The application validates and persists.
-
-Supported operations:
-
-- `create_node`
-- `create_edge`
-- `supersede_node` (old node remains SUPERSEDED; history preserved)
-- `attach_evidence`
-- `add_notebook_entry`
-
-Rules:
-
-- No automatic extraction of fixed profile fields.
-- No keyword-driven writes.
-- Supersession does not delete prior evidence.
-- Edges require both endpoints to exist **for the same WAX ID**.

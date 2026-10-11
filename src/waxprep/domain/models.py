@@ -1,7 +1,8 @@
 """Wax Prep domain models.
 
-Build 2: identity, conversation, attachments, open-ended notebook.
-Build 2.5: Workspace/Artifact substrate (no tutoring intelligence).
+The student's world is one unified, timestamped history. Everything else
+(notebook, summaries, knowledge, embeddings) is derived from it and points
+back to it. There is no separate chat-session concept.
 """
 
 from __future__ import annotations
@@ -15,20 +16,61 @@ from uuid import UUID, uuid4
 from waxprep.domain.identifiers import WaxId
 
 
-class MessageContentType(StrEnum):
-    """Supported message content categories."""
-
-    TEXT = "text"
-    AUDIO = "audio"
-    IMAGE = "image"
-    DOCUMENT = "document"
-
-
 class StudentStatus(StrEnum):
     """Minimal account lifecycle status."""
 
     ACTIVE = "active"
     DISABLED = "disabled"
+
+
+class AuthorKind(StrEnum):
+    """Who produced a history entry (a provenance fact, not a topic)."""
+
+    STUDENT = "student"
+    TUTOR = "tutor"
+    SYSTEM = "system"
+
+
+class ObjectType(StrEnum):
+    """Kinds of stored objects that can be indexed, cited, or traced."""
+
+    HISTORY = "history"
+    SUMMARY = "summary"
+    NOTEBOOK = "notebook"
+    KNOWLEDGE_NODE = "knowledge_node"
+    KNOWLEDGE_EDGE = "knowledge_edge"
+    ARTIFACT_VERSION = "artifact_version"
+    ARTIFACT_CONTENT = "artifact_content"
+
+
+# Object types that can be found by words or by meaning.
+INDEXED_OBJECT_TYPES: frozenset[ObjectType] = frozenset(
+    {
+        ObjectType.HISTORY,
+        ObjectType.SUMMARY,
+        ObjectType.NOTEBOOK,
+        ObjectType.KNOWLEDGE_NODE,
+        ObjectType.ARTIFACT_VERSION,
+        ObjectType.ARTIFACT_CONTENT,
+    }
+)
+
+
+class NotebookEntryStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+
+
+class SummaryStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+
+
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
 
 
 class ArtifactStatus(StrEnum):
@@ -62,36 +104,34 @@ class ChannelIdentity:
 
 
 @dataclass(frozen=True, slots=True)
-class Conversation:
-    """Durable conversation owned by exactly one WAX ID."""
+class HistoryEntry:
+    """One thing that happened in a student's world (message in or out).
+
+    ``occurred_at`` is when it happened; ``recorded_at`` is when we saved it.
+    ``thread_ref`` is a purely technical channel detail and never meaning.
+    """
 
     id: UUID
     wax_id: WaxId
-    created_at: datetime
-    updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class Message:
-    """One message in a conversation."""
-
-    id: UUID
-    wax_id: WaxId
-    conversation_id: UUID
-    role: str
-    content_type: MessageContentType
-    text_body: str | None
-    created_at: datetime
+    author_kind: AuthorKind
+    content_kind: str
+    text: str | None
+    occurred_at: datetime
+    recorded_at: datetime
+    channel: str | None = None
+    channel_ref: str | None = None
+    thread_ref: str | None = None
+    reply_to_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class Attachment:
-    """Media/document metadata linked to a message (bytes outside PostgreSQL)."""
+    """Media/document metadata linked to a history entry (bytes elsewhere)."""
 
     id: UUID
     wax_id: WaxId
-    message_id: UUID
-    media_category: MessageContentType
+    history_entry_id: UUID
+    media_category: str
     mime_type: str | None
     storage_ref: str
     size_bytes: int | None
@@ -111,17 +151,105 @@ class Notebook:
 
 @dataclass(frozen=True, slots=True)
 class NotebookEntry:
-    """One open-ended notebook entry with unconstrained payload."""
+    """Durable understanding derived from history; payload is open-ended."""
 
     id: UUID
     wax_id: WaxId
     notebook_id: UUID
     schema_version: int
     payload: dict[str, Any]
-    source_type: str | None
-    source_ref: str | None
     created_at: datetime
     updated_at: datetime
+    status: NotebookEntryStatus = NotebookEntryStatus.ACTIVE
+    superseded_by_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Summary:
+    """A compressed view of a span of history. Never replaces the history."""
+
+    id: UUID
+    wax_id: WaxId
+    text: str
+    covers_from: datetime
+    covers_until: datetime
+    level: int
+    produced_by: str
+    created_at: datetime
+    status: SummaryStatus = SummaryStatus.ACTIVE
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceLink:
+    """Says: this derived object is supported by that source object."""
+
+    id: UUID
+    wax_id: WaxId
+    derived_type: ObjectType
+    derived_id: UUID
+    source_type: ObjectType
+    source_id: UUID
+    created_at: datetime
+    source_author_kind: AuthorKind | None = None
+    quote: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingRecord:
+    """A retrieval vector for one stored object (an index, not memory)."""
+
+    id: UUID
+    wax_id: WaxId
+    object_type: ObjectType
+    object_id: UUID
+    object_time: datetime
+    model: str
+    vector: tuple[float, ...]
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationJob:
+    """Background work that can fail and retry without touching history."""
+
+    id: UUID
+    wax_id: WaxId
+    kind: str
+    object_type: ObjectType
+    object_id: UUID
+    status: JobStatus
+    attempts: int
+    run_after: datetime
+    created_at: datetime
+    updated_at: datetime
+    last_error: str | None = None
+    lease_until: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactContent:
+    """Text-like representation extracted from an artifact version."""
+
+    id: UUID
+    wax_id: WaxId
+    artifact_version_id: UUID
+    representation: str
+    text: str
+    produced_by: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationRecord:
+    """Audit record of one Context Intelligence investigation."""
+
+    id: UUID
+    wax_id: WaxId
+    trigger_entry_id: UUID | None
+    input_text: str
+    result: dict[str, Any]
+    model: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,20 +322,30 @@ def new_id() -> UUID:
 
 
 __all__ = [
+    "INDEXED_OBJECT_TYPES",
     "Artifact",
+    "ArtifactContent",
     "ArtifactReference",
     "ArtifactStatus",
     "ArtifactVersion",
     "Attachment",
+    "AuthorKind",
     "ChannelIdentity",
-    "Conversation",
+    "DerivationJob",
+    "EmbeddingRecord",
     "Event",
-    "Message",
-    "MessageContentType",
+    "HistoryEntry",
+    "InvestigationRecord",
+    "JobStatus",
     "Notebook",
     "NotebookEntry",
+    "NotebookEntryStatus",
+    "ObjectType",
+    "ProvenanceLink",
     "Student",
     "StudentStatus",
+    "Summary",
+    "SummaryStatus",
     "Workspace",
     "new_id",
 ]
