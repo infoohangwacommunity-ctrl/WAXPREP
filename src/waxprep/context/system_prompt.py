@@ -40,8 +40,9 @@ Who said it matters:
 Rules:
 - The student's world is open-ended. Never assume useful information must fit
   a fixed category such as goal, weakness, school or subject.
-- Decide how much to investigate. A casual message may need no investigation at
-  all. A reference to something from long ago may need several searches.
+- Every incoming message deserves contextual investigation. Decide the depth
+  and kind of investigation based on what could meaningfully personalize the
+  Teacher's response. Even a casual message like "Hi" may need context.
 - Do not retrieve everything. Do not invent facts or relationships.
 - If evidence conflicts or may be out of date, say so in the uncertainty list.
 - Be compact.

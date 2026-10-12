@@ -1,6 +1,9 @@
-"""Teacher-first turn orchestration.
+"""Teacher-first turn orchestration (DEPRECATED).
 
-The architecture is:
+DEPRECATED: This architecture has been superseded by CI-first orchestration
+in ``turn_ci_first.py``. See docs/ARCHITECTURE.md for the current design.
+
+The old architecture was:
 
     Student message arrives
         |
@@ -27,6 +30,9 @@ The exact student message reaches the Teacher untouched. CI may receive
 the original text as part of an investigation request, but the
 Teacher always holds the original ``HistoryEntry`` and CI's synthesis
 never replaces it.
+
+NEW ARCHITECTURE (use turn_ci_first.py):
+    Student message -> Save -> CI (mandatory) -> Teacher -> Save reply -> Outbox
 """
 
 from __future__ import annotations
@@ -74,7 +80,9 @@ class TurnResult:
 
 
 class TurnService:
-    """Teacher-first turn orchestrator.
+    """Teacher-first turn orchestrator (DEPRECATED).
+
+    DEPRECATED: Use TurnServiceCiFirst from turn_ci_first.py instead.
 
     The Teacher decides whether to consult CI, what to ask, and whether
     the result is sufficient. The orchestrator enforces a configurable
