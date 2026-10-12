@@ -17,12 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
-from uuid import UUID
 
-from waxprep.channel.contracts import OutboundPayload, OutboundResult
+from waxprep.channel.contracts import OutboundPayload
 from waxprep.channel.whatsapp.client import WhatsAppClient
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
@@ -30,6 +28,7 @@ from waxprep.domain.models import (
     HistoryEntry,
     OutboundDelivery,
     OutboundStatus,
+    new_id,
 )
 from waxprep.storage.protocol import Storage
 
@@ -106,7 +105,7 @@ class WhatsAppOutbox:
                 await asyncio.sleep(self._config.poll_interval_seconds)
             except asyncio.CancelledError:
                 break
-            except Exception as exc:
+            except Exception:
                 logger.exception("outbox loop error")
                 await asyncio.sleep(self._config.poll_interval_seconds)
 
@@ -163,10 +162,8 @@ class WhatsAppOutbox:
             )
             return
 
-        # Get the student's channel identity
-        channel_identity = self._storage.get_channel_identity(
-            self._config.channel, tutor_entry.channel_ref or ""
-        )
+        # Resolve recipient: channel identity for this student on WhatsApp
+        channel_identity = self._resolve_channel_identity(delivery.wax_id)
         if channel_identity is None:
             logger.error(
                 "channel identity not found for delivery",
@@ -208,7 +205,9 @@ class WhatsAppOutbox:
                     "provider_message_id": attempt.provider_message_id,
                 },
             )
-        elif attempt.temporary_failure and delivery.attempts < self._config.max_attempts:
+        elif (
+            attempt.temporary_failure and delivery.attempts < self._config.max_attempts
+        ):
             next_attempt = delivery.attempts + 1
             delay = self._calculate_backoff(next_attempt)
             retry_at = now + timedelta(seconds=delay)
@@ -246,7 +245,9 @@ class WhatsAppOutbox:
 
     def _calculate_backoff(self, attempt: int) -> float:
         """Calculate exponential backoff delay."""
-        delay = self._config.base_delay_seconds * (self._config.backoff_multiplier ** (attempt - 1))
+        delay = self._config.base_delay_seconds * (
+            self._config.backoff_multiplier ** (attempt - 1)
+        )
         return min(delay, self._config.max_delay_seconds)
 
     async def _attempt_delivery(
@@ -289,9 +290,7 @@ class WhatsAppOutbox:
         Returns True if the status was processed successfully.
         """
         now = self._clock.now()
-        delivery = self._storage.get_outbound_delivery_for_tutor(
-            wax_id, provider_message_id, self._config.channel
-        )
+        delivery = self._find_delivery_by_provider_id(wax_id, provider_message_id)
         if delivery is None:
             logger.warning(
                 "delivery status for unknown message",
@@ -330,6 +329,24 @@ class WhatsAppOutbox:
                 extra={"status": status, "provider_message_id": provider_message_id},
             )
             return False
+
+    def _find_delivery_by_provider_id(
+        self, wax_id: WaxId, provider_message_id: str
+    ) -> OutboundDelivery | None:
+        list_fn = getattr(self._storage, "list_outbound_deliveries_for_wax", None)
+        if callable(list_fn):
+            for d in list(list_fn(wax_id)):  # type: ignore[arg-type]
+                if d.channel_ref == provider_message_id:
+                    return d
+        return None
+
+    def _resolve_channel_identity(self, wax_id: WaxId):
+        list_fn = getattr(self._storage, "list_channel_identities_for_wax", None)
+        if callable(list_fn):
+            for identity in list(list_fn(wax_id)):  # type: ignore[arg-type]
+                if identity.channel == self._config.channel:
+                    return identity
+        return None
 
     async def enqueue_delivery(
         self,

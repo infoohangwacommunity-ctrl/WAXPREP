@@ -1,16 +1,16 @@
 """Tests for WhatsApp outbox delivery service."""
 
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+import asyncio
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
-from waxprep.channel.contracts import OutboundPayload, OutboundResult
+from waxprep.channel.contracts import OutboundResult
 from waxprep.channel.whatsapp.client import WhatsAppClient
-from waxprep.channel.whatsapp.outbox import WhatsAppOutbox, OutboxConfig
+from waxprep.channel.whatsapp.outbox import OutboxConfig, WhatsAppOutbox
 from waxprep.clock import SystemClock
-from waxprep.domain.identifiers import WaxId, new_wax_id
+from waxprep.domain.identifiers import new_wax_id
 from waxprep.domain.models import (
     AuthorKind,
     ChannelIdentity,
@@ -57,26 +57,38 @@ class TestDeliveryEnqueue:
     def test_enqueue_delivery(self, storage, outbox) -> None:
         """Test enqueuing a new outbound delivery."""
         wax_id = new_wax_id()
-        student = Student(wax_id=wax_id, created_at=datetime.now(tz=timezone.utc), updated_at=datetime.now(tz=timezone.utc))
+        student = Student(
+            wax_id=wax_id,
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
         storage.create_student(student)
-        
+
+        storage.create_channel_identity(
+            ChannelIdentity(
+                id=new_id(),
+                wax_id=wax_id,
+                channel="whatsapp",
+                external_id="2348012345678",
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
         tutor_entry = HistoryEntry(
             id=new_id(),
             wax_id=wax_id,
             author_kind=AuthorKind.TUTOR,
             content_kind="text/plain",
             text="This is a test response",
-            occurred_at=datetime.now(tz=timezone.utc),
-            recorded_at=datetime.now(tz=timezone.utc),
+            occurred_at=datetime.now(tz=UTC),
+            recorded_at=datetime.now(tz=UTC),
             channel="whatsapp",
             channel_ref="test_ref",
         )
         storage.append_history_entry(tutor_entry)
-        
-        delivery = asyncio.run(outbox.enqueue_delivery(
-            wax_id, tutor_entry, "test_ref"
-        ))
-        
+
+        delivery = asyncio.run(outbox.enqueue_delivery(wax_id, tutor_entry, "test_ref"))
+
         assert delivery.id is not None
         assert delivery.wax_id == wax_id
         assert delivery.tutor_entry_id == tutor_entry.id
@@ -91,43 +103,49 @@ class TestDeliveryProcessing:
     async def test_process_delivery_success(self, storage, outbox) -> None:
         """Test successful delivery processing."""
         wax_id = new_wax_id()
-        student = Student(wax_id=wax_id, created_at=datetime.now(tz=timezone.utc), updated_at=datetime.now(tz=timezone.utc))
+        student = Student(
+            wax_id=wax_id,
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
         storage.create_student(student)
-        
+
         identity = ChannelIdentity(
             id=new_id(),
             wax_id=wax_id,
             channel="whatsapp",
             external_id="2348012345678",
-            created_at=datetime.now(tz=timezone.utc),
+            created_at=datetime.now(tz=UTC),
         )
         storage.create_channel_identity(identity)
-        
+
         tutor_entry = HistoryEntry(
             id=new_id(),
             wax_id=wax_id,
             author_kind=AuthorKind.TUTOR,
             content_kind="text/plain",
             text="This is a test response",
-            occurred_at=datetime.now(tz=timezone.utc),
-            recorded_at=datetime.now(tz=timezone.utc),
+            occurred_at=datetime.now(tz=UTC),
+            recorded_at=datetime.now(tz=UTC),
             channel="whatsapp",
             channel_ref="test_ref",
         )
         storage.append_history_entry(tutor_entry)
-        
+
         delivery = await outbox.enqueue_delivery(wax_id, tutor_entry, "test_ref")
-        
+
         # Mock successful delivery
-        outbox._client.send_text = AsyncMock(return_value=OutboundResult(
-            success=True,
-            provider_message_id="wamid.SUCCESS123",
-            temporary_failure=False,
-        ))
-        
-        now = datetime.now(tz=timezone.utc)
+        outbox._client.send_text = AsyncMock(
+            return_value=OutboundResult(
+                success=True,
+                provider_message_id="wamid.SUCCESS123",
+                temporary_failure=False,
+            )
+        )
+
+        now = datetime.now(tz=UTC)
         await outbox._process_delivery(delivery, now)
-        
+
         # Check delivery was marked as delivered
         updated = storage.get_outbound_delivery_for_tutor(
             wax_id, tutor_entry.id, "whatsapp"
@@ -139,51 +157,57 @@ class TestDeliveryProcessing:
     async def test_process_delivery_temporary_failure(self, storage, outbox) -> None:
         """Test delivery with temporary failure and retry."""
         wax_id = new_wax_id()
-        student = Student(wax_id=wax_id, created_at=datetime.now(tz=timezone.utc), updated_at=datetime.now(tz=timezone.utc))
+        student = Student(
+            wax_id=wax_id,
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
         storage.create_student(student)
-        
+
         identity = ChannelIdentity(
             id=new_id(),
             wax_id=wax_id,
             channel="whatsapp",
             external_id="2348012345678",
-            created_at=datetime.now(tz=timezone.utc),
+            created_at=datetime.now(tz=UTC),
         )
         storage.create_channel_identity(identity)
-        
+
         tutor_entry = HistoryEntry(
             id=new_id(),
             wax_id=wax_id,
             author_kind=AuthorKind.TUTOR,
             content_kind="text/plain",
             text="This is a test response",
-            occurred_at=datetime.now(tz=timezone.utc),
-            recorded_at=datetime.now(tz=timezone.utc),
+            occurred_at=datetime.now(tz=UTC),
+            recorded_at=datetime.now(tz=UTC),
             channel="whatsapp",
             channel_ref="test_ref",
         )
         storage.append_history_entry(tutor_entry)
-        
+
         delivery = await outbox.enqueue_delivery(wax_id, tutor_entry, "test_ref")
-        
+
         # Mock temporary failure
-        outbox._client.send_text = AsyncMock(return_value=OutboundResult(
-            success=False,
-            provider_message_id=None,
-            temporary_failure=True,
-            error_code="timeout",
-            error_detail="request timed out",
-        ))
-        
-        now = datetime.now(tz=timezone.utc)
+        outbox._client.send_text = AsyncMock(
+            return_value=OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=True,
+                error_code="timeout",
+                error_detail="request timed out",
+            )
+        )
+
+        now = datetime.now(tz=UTC)
         await outbox._process_delivery(delivery, now)
-        
+
         # Check delivery was marked as failed with retry
         updated = storage.get_outbound_delivery_for_tutor(
             wax_id, tutor_entry.id, "whatsapp"
         )
         assert updated is not None
-        assert updated.status == OutboundStatus.FAILED
+        assert updated.status == OutboundStatus.PENDING  # retry scheduled
         assert updated.attempts == 1
         assert updated.last_error == "request timed out"
         assert updated.run_after > now
@@ -196,13 +220,13 @@ class TestBackoffCalculation:
         """Test backoff calculation."""
         # First attempt
         assert outbox._calculate_backoff(1) == 1.0
-        
+
         # Second attempt
         assert outbox._calculate_backoff(2) == 2.0
-        
+
         # Third attempt
         assert outbox._calculate_backoff(3) == 4.0
-        
+
         # Fourth attempt
         assert outbox._calculate_backoff(4) == 8.0
 
@@ -214,22 +238,36 @@ class TestDeliveryStatus:
     async def test_handle_delivery_status_delivered(self, storage, outbox) -> None:
         """Test handling delivered status callback."""
         wax_id = new_wax_id()
-        student = Student(wax_id=wax_id, created_at=datetime.now(tz=timezone.utc), updated_at=datetime.now(tz=timezone.utc))
+        student = Student(
+            wax_id=wax_id,
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
         storage.create_student(student)
-        
+
+        storage.create_channel_identity(
+            ChannelIdentity(
+                id=new_id(),
+                wax_id=wax_id,
+                channel="whatsapp",
+                external_id="2348012345678",
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
         tutor_entry = HistoryEntry(
             id=new_id(),
             wax_id=wax_id,
             author_kind=AuthorKind.TUTOR,
             content_kind="text/plain",
             text="This is a test response",
-            occurred_at=datetime.now(tz=timezone.utc),
-            recorded_at=datetime.now(tz=timezone.utc),
+            occurred_at=datetime.now(tz=UTC),
+            recorded_at=datetime.now(tz=UTC),
             channel="whatsapp",
             channel_ref="wamid.TEST123",
         )
         storage.append_history_entry(tutor_entry)
-        
+
         delivery = OutboundDelivery(
             id=new_id(),
             wax_id=wax_id,
@@ -240,18 +278,18 @@ class TestDeliveryStatus:
             attempts=0,
             last_error=None,
             delivered_at=None,
-            run_after=datetime.now(tz=timezone.utc),
-            created_at=datetime.now(tz=timezone.utc),
-            updated_at=datetime.now(tz=timezone.utc),
+            run_after=datetime.now(tz=UTC),
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
         )
         storage.create_outbound_delivery(delivery)
-        
+
         result = await outbox.handle_delivery_status(
             wax_id, "wamid.TEST123", "delivered"
         )
-        
+
         assert result is True
-        
+
         updated = storage.get_outbound_delivery_for_tutor(
             wax_id, tutor_entry.id, "whatsapp"
         )
@@ -262,22 +300,36 @@ class TestDeliveryStatus:
     async def test_handle_delivery_status_failed(self, storage, outbox) -> None:
         """Test handling failed status callback."""
         wax_id = new_wax_id()
-        student = Student(wax_id=wax_id, created_at=datetime.now(tz=timezone.utc), updated_at=datetime.now(tz=timezone.utc))
+        student = Student(
+            wax_id=wax_id,
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
+        )
         storage.create_student(student)
-        
+
+        storage.create_channel_identity(
+            ChannelIdentity(
+                id=new_id(),
+                wax_id=wax_id,
+                channel="whatsapp",
+                external_id="2348012345678",
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
         tutor_entry = HistoryEntry(
             id=new_id(),
             wax_id=wax_id,
             author_kind=AuthorKind.TUTOR,
             content_kind="text/plain",
             text="This is a test response",
-            occurred_at=datetime.now(tz=timezone.utc),
-            recorded_at=datetime.now(tz=timezone.utc),
+            occurred_at=datetime.now(tz=UTC),
+            recorded_at=datetime.now(tz=UTC),
             channel="whatsapp",
             channel_ref="wamid.TEST123",
         )
         storage.append_history_entry(tutor_entry)
-        
+
         delivery = OutboundDelivery(
             id=new_id(),
             wax_id=wax_id,
@@ -288,18 +340,16 @@ class TestDeliveryStatus:
             attempts=0,
             last_error=None,
             delivered_at=None,
-            run_after=datetime.now(tz=timezone.utc),
-            created_at=datetime.now(tz=timezone.utc),
-            updated_at=datetime.now(tz=timezone.utc),
+            run_after=datetime.now(tz=UTC),
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
         )
         storage.create_outbound_delivery(delivery)
-        
-        result = await outbox.handle_delivery_status(
-            wax_id, "wamid.TEST123", "failed"
-        )
-        
+
+        result = await outbox.handle_delivery_status(wax_id, "wamid.TEST123", "failed")
+
         assert result is True
-        
+
         updated = storage.get_outbound_delivery_for_tutor(
             wax_id, tutor_entry.id, "whatsapp"
         )

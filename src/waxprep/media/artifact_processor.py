@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -32,7 +32,7 @@ from waxprep.domain.models import (
     new_id,
 )
 from waxprep.media.byte_store import ByteStore
-from waxprep.media.content_sniff import ContentCategory, sniff_content
+from waxprep.media.content_sniff import sniff_content
 from waxprep.model_gateway.gateway import ModelGateway
 from waxprep.model_gateway.models import (
     ContentItem,
@@ -62,12 +62,12 @@ class ArtifactProcessingConfig:
     base_delay_seconds: float = 1.0
     max_delay_seconds: float = 300.0
     backoff_multiplier: float = 2.0
-    
+
     # Model names for different content types
     text_model: str = "solar-mini"
     image_model: str = "solar-mini"  # Placeholder - needs vision model
     document_model: str = "document-parse"
-    
+
     # Processing timeout
     timeout_seconds: float = 120.0
 
@@ -149,12 +149,18 @@ class ArtifactProcessor:
 
         # Process based on content type
         try:
-            if sniff.media_category == ContentCategory.IMAGE:
-                content = await self._process_image(wax_id, artifact_version, data, sniff)
-            elif sniff.media_category == ContentCategory.DOCUMENT:
-                content = await self._process_document(wax_id, artifact_version, data, sniff)
-            elif sniff.media_category == ContentCategory.TEXT:
-                content = await self._process_text(wax_id, artifact_version, data, sniff)
+            if sniff.media_category == "image":
+                content = await self._process_image(
+                    wax_id, artifact_version, data, sniff
+                )
+            elif sniff.media_category == "document":
+                content = await self._process_document(
+                    wax_id, artifact_version, data, sniff
+                )
+            elif sniff.media_category == "document":
+                content = await self._process_text(
+                    wax_id, artifact_version, data, sniff
+                )
             else:
                 logger.warning(
                     "unsupported content category",
@@ -209,9 +215,10 @@ class ArtifactProcessor:
         # The image data needs to be encoded for the model
         # For now, we'll create a placeholder description
         # In production, this would call a vision model
-        
+
         # Create a data URI for the image
         import base64
+
         mime_type = artifact_version.mime_type or sniff.mime_type or "image/jpeg"
         encoded = base64.b64encode(data).decode("ascii")
         data_uri = f"data:{mime_type};base64,{encoded}"
@@ -286,9 +293,10 @@ class ArtifactProcessor:
 
         # Build model request
         mime_type = artifact_version.mime_type or sniff.mime_type or "application/pdf"
-        
+
         # Create a data URI for the document
         import base64
+
         encoded = base64.b64encode(data).decode("ascii")
         data_uri = f"data:{mime_type};base64,{encoded}"
 
@@ -479,5 +487,7 @@ class ArtifactProcessor:
 
     def _calculate_backoff(self, attempt: int) -> float:
         """Calculate exponential backoff delay."""
-        delay = self._config.base_delay_seconds * (self._config.backoff_multiplier ** (attempt - 1))
+        delay = self._config.base_delay_seconds * (
+            self._config.backoff_multiplier ** (attempt - 1)
+        )
         return min(delay, self._config.max_delay_seconds)

@@ -11,8 +11,6 @@ The provider handles:
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import logging
 from typing import Any
 
@@ -20,12 +18,10 @@ import httpx
 
 from waxprep.model_gateway.errors import ModelGatewayError
 from waxprep.model_gateway.models import (
-    ContentItem,
     ContentType,
     ModelCapability,
     ModelRequest,
     ModelResponse,
-    ModelRole,
     ModelUsage,
     ToolCall,
 )
@@ -63,10 +59,12 @@ class UpstageDocumentProvider(ModelProvider):
 
     @property
     def capabilities(self) -> frozenset[ModelCapability]:
-        return frozenset({
-            ModelCapability.TEXT_INPUT,
-            ModelCapability.FILE_INPUT,
-        })
+        return frozenset(
+            {
+                ModelCapability.TEXT_INPUT,
+                ModelCapability.FILE_INPUT,
+            }
+        )
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         """Execute a document parsing request."""
@@ -75,7 +73,7 @@ class UpstageDocumentProvider(ModelProvider):
         text_items = [item for item in request.input if item.type == ContentType.TEXT]
 
         if not file_items:
-            raise ModelGatewayError("No file input for document parsing", retryable=False)
+            raise ModelGatewayError("No file input for document parsing")
 
         # For now, handle the first file
         file_item = file_items[0]
@@ -83,10 +81,12 @@ class UpstageDocumentProvider(ModelProvider):
         # The file URI should be a storage reference
         # In production, this would be resolved to actual bytes
         # For now, we'll simulate the document parsing response
-        
+
         # Build the request
-        prompt = text_items[0].text if text_items else "Extract all text from this document"
-        
+        prompt = (
+            text_items[0].text if text_items else "Extract all text from this document"
+        )
+
         # Upstage document parsing uses the /document/parse endpoint
         # But for now, we'll use chat/completions with a document-parse model
         body = {
@@ -101,7 +101,7 @@ class UpstageDocumentProvider(ModelProvider):
                         },
                         {
                             "type": "file",
-                            "file": self._encode_file_uri(file_item.uri),
+                            "file": self._encode_file_uri(file_item.uri or ""),
                         },
                     ],
                 }
@@ -118,13 +118,11 @@ class UpstageDocumentProvider(ModelProvider):
         if response.status_code >= 500:
             raise ModelGatewayError(
                 f"Upstage server error: {response.status_code}",
-                retryable=True,
             )
         if response.status_code >= 400:
             error_detail = response.text[:500]
             raise ModelGatewayError(
                 f"Upstage API error: {response.status_code}: {error_detail}",
-                retryable=False,
             )
 
         data = response.json()
@@ -148,9 +146,11 @@ class UpstageDocumentProvider(ModelProvider):
         """
         # For now, return a placeholder
         # In production: fetch from byte store and encode as base64
-        return f"data:application/octet-stream;base64,PLACEHOLDER"
+        return "data:application/octet-stream;base64,PLACEHOLDER"
 
-    def _parse_response(self, data: dict[str, Any], request: ModelRequest) -> ModelResponse:
+    def _parse_response(
+        self, data: dict[str, Any], request: ModelRequest
+    ) -> ModelResponse:
         """Parse Upstage response into ModelResponse."""
         text = ""
         tool_calls: list[ToolCall] = []
@@ -167,8 +167,10 @@ class UpstageDocumentProvider(ModelProvider):
         # Extract usage
         usage_data = data.get("usage", {})
         usage = ModelUsage(
-            input_tokens=usage_data.get("prompt_tokens") or usage_data.get("input_tokens"),
-            output_tokens=usage_data.get("completion_tokens") or usage_data.get("output_tokens"),
+            input_tokens=usage_data.get("prompt_tokens")
+            or usage_data.get("input_tokens"),
+            output_tokens=usage_data.get("completion_tokens")
+            or usage_data.get("output_tokens"),
             total_tokens=usage_data.get("total_tokens"),
         )
 

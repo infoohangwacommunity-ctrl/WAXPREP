@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 
 from waxprep.channel.contracts import NormalizedInbound
-from waxprep.channel.whatsapp.handler import InboundResult, WhatsAppInboundHandler
+from waxprep.channel.whatsapp.handler import InboundResult
 from waxprep.channel.whatsapp.normalize import normalize_webhook_payload
 from waxprep.channel.whatsapp.security import verify_signature, verify_webhook_challenge
 from waxprep.domain.identifiers import WaxId
@@ -26,7 +27,7 @@ def build_whatsapp_router(
     verify_token: str,
     app_secret: str,
     resolve_sender: Callable[[str], WaxId | None],
-    accept_inbound: Callable[[NormalizedInbound], InboundResult],
+    accept_inbound: Callable[[NormalizedInbound], InboundResult | None],
 ) -> APIRouter:
     router = APIRouter(prefix="/channels/whatsapp", tags=["whatsapp"])
 
@@ -56,14 +57,11 @@ def build_whatsapp_router(
         except Exception as exc:
             raise HTTPException(status_code=400, detail="invalid json") from exc
 
-        # Normalize all messages from the payload
         messages = normalize_webhook_payload(payload, resolve_wax_id=None)
-        
         results: list[dict[str, Any]] = []
         needs_linking = False
-        
+
         for msg in messages:
-            # Resolve sender for each message
             wax = resolve_sender(msg.provider_sender_id)
             if wax is None:
                 logger.info(
@@ -72,33 +70,28 @@ def build_whatsapp_router(
                 )
                 needs_linking = True
                 continue
-            
-            # Rebuild with resolved wax_id
-            from dataclasses import replace
+
             resolved = replace(msg, wax_id=wax)
-            
-            # Process through durable handler
             result = accept_inbound(resolved)
-            results.append({
-                "provider_message_id": msg.provider_message_id,
-                "accepted": result.accepted,
-                "wax_id": str(result.wax_id) if result.wax_id else None,
-                "student_entry_id": str(result.student_entry_id) if result.student_entry_id else None,
-                "outbound_delivery_id": str(result.outbound_delivery_id) if result.outbound_delivery_id else None,
-                "error": result.error,
-            })
-            
+            if result is None:
+                continue
+            results.append(
+                {
+                    "provider_message_id": msg.provider_message_id,
+                    "accepted": result.accepted,
+                    "wax_id": str(result.wax_id) if result.wax_id else None,
+                    "error": result.error,
+                }
+            )
             if result.needs_linking:
                 needs_linking = True
-        
-        response: dict[str, Any] = {
+
+        return {
             "status": "accepted",
             "message_count": len(messages),
             "processed_count": len(results),
             "needs_linking": needs_linking,
             "results": results,
         }
-        
-        return response
 
     return router

@@ -20,13 +20,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from io import BytesIO
-from typing import Any
 
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     Artifact,
     ArtifactContent,
+    ArtifactStatus,
     ArtifactVersion,
     Attachment,
     HistoryEntry,
@@ -134,7 +133,7 @@ class PDFProcessor:
                 "PDF validation failed",
                 extra={
                     "attachment_id": str(attachment.id),
-                    "error": exc.message,
+                    "error": str(exc),
                 },
             )
             return None
@@ -142,7 +141,7 @@ class PDFProcessor:
         # Extract text
         try:
             extraction = await self._extract_text(data, page_count, needs_ocr)
-        except Exception as exc:
+        except Exception:
             logger.exception(
                 "PDF extraction failed",
                 extra={"attachment_id": str(attachment.id)},
@@ -197,7 +196,7 @@ class PDFProcessor:
             id=new_id(),
             wax_id=wax_id,
             workspace_id=workspace.id,
-            status="active",
+            status=ArtifactStatus.ACTIVE,
             current_version_id=None,
             created_at=now,
             updated_at=now,

@@ -18,9 +18,7 @@ The handler ensures:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any
+from dataclasses import dataclass
 from uuid import UUID
 
 from waxprep.channel.contracts import NormalizedInbound
@@ -28,13 +26,8 @@ from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     AuthorKind,
-    ChannelIdentity,
-    HistoryEntry,
-    OutboundDelivery,
-    OutboundStatus,
     Student,
     StudentStatus,
-    new_id,
 )
 from waxprep.history.service import HistoryService
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
@@ -109,9 +102,7 @@ class WhatsAppInboundHandler:
         This is the production sender-resolution function that replaces
         the placeholder in app.py.
         """
-        identity = self._storage.get_channel_identity(
-            self._config.channel, sender
-        )
+        identity = self._storage.get_channel_identity(self._config.channel, sender)
         if identity is not None:
             return identity.wax_id
         return None
@@ -188,10 +179,8 @@ class WhatsAppInboundHandler:
                 error="student_disabled_or_not_found",
             )
 
-        # Step 3: Check for duplicate delivery (idempotency)
-        existing = self._storage.get_history_entry(
-            wax_id, msg.provider_message_id
-        )
+        # Step 3: Check for duplicate delivery (idempotency by channel_ref)
+        existing = self._find_by_channel_ref(wax_id, msg.provider_message_id)
         if existing is not None:
             logger.info(
                 "duplicate whatsapp message detected",
@@ -201,9 +190,7 @@ class WhatsAppInboundHandler:
                 },
             )
             # Find existing tutor reply
-            tutor_reply = self._storage.find_tutor_reply_to(
-                wax_id, existing.id
-            )
+            tutor_reply = self._storage.find_tutor_reply_to(wax_id, existing.id)
             if tutor_reply is not None:
                 outbound = self._storage.get_outbound_delivery_for_tutor(
                     wax_id, tutor_reply.id, self._config.channel
@@ -279,13 +266,15 @@ class WhatsAppInboundHandler:
 
         # Step 5: Process through CI-first turn service
         try:
-            turn_result: TurnResultCiFirst = await self._turn_service.handle_student_message(
-                wax_id=wax_id,
-                text=msg.text or "",
-                channel=self._config.channel,
-                channel_ref=msg.provider_message_id,
-                thread_ref=msg.reply_to_provider_id,
-                occurred_at=msg.occurred_at,
+            turn_result: TurnResultCiFirst = (
+                await self._turn_service.handle_student_message(
+                    wax_id=wax_id,
+                    text=msg.text or "",
+                    channel=self._config.channel,
+                    channel_ref=msg.provider_message_id,
+                    thread_ref=msg.reply_to_provider_id,
+                    occurred_at=msg.occurred_at,
+                )
             )
 
             logger.info(
@@ -328,6 +317,15 @@ class WhatsAppInboundHandler:
                 needs_linking=False,
                 error=f"processing_failed: {type(exc).__name__}",
             )
+
+    def _find_by_channel_ref(self, wax_id: WaxId, provider_message_id: str):
+        for entry in self._storage.list_history(wax_id, limit=500):
+            if (
+                entry.channel == self._config.channel
+                and entry.channel_ref == provider_message_id
+            ):
+                return entry
+        return None
 
     def create_linking_response(self, sender: str) -> str:
         """Create a response for unlinked senders."""

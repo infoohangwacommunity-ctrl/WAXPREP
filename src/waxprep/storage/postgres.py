@@ -1793,8 +1793,12 @@ class PostgresStorage:
         return self._outbound(row) if row else None
 
     def list_due_outbound_deliveries(
-        self, wax_id: WaxId, now: datetime, limit: int
+        self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]:
+        if wax_id is None:
+            raise ValueError(
+                "postgres backend requires wax_id for outbound due listing"
+            )
         rows = self._read(
             wax_id,
             "SELECT * FROM outbound_deliveries WHERE wax_id = %s "

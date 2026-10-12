@@ -113,6 +113,16 @@ class InMemoryStorage:
     ) -> ChannelIdentity | None:
         return self._channels.get((channel, external_id))
 
+    def list_channel_identities_for_wax(
+        self, wax_id: WaxId
+    ) -> tuple[ChannelIdentity, ...]:
+        return tuple(c for c in self._channels.values() if c.wax_id == wax_id)
+
+    def list_outbound_deliveries_for_wax(
+        self, wax_id: WaxId
+    ) -> tuple[OutboundDelivery, ...]:
+        return tuple(d for d in self._outbound.values() if d.wax_id == wax_id)
+
     # --- unified history ------------------------------------------------
     def append_history_entry(self, entry: HistoryEntry) -> HistoryEntry:
         if entry.wax_id not in self._students:
@@ -886,12 +896,12 @@ class InMemoryStorage:
         return None
 
     def list_due_outbound_deliveries(
-        self, wax_id: WaxId, now: datetime, limit: int
+        self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]:
         due = [
             d
             for d in self._outbound.values()
-            if d.wax_id == wax_id
+            if (wax_id is None or d.wax_id == wax_id)
             and d.status in (OutboundStatus.PENDING, OutboundStatus.IN_PROGRESS)
             and d.run_after <= now
         ]
@@ -928,6 +938,7 @@ class InMemoryStorage:
             status=OutboundStatus.PENDING
             if retry_at is not None
             else OutboundStatus.FAILED,
+            attempts=old.attempts + 1,
             last_error=error,
             run_after=retry_at or old.run_after,
             updated_at=now,

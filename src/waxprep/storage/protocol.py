@@ -372,7 +372,7 @@ class Storage(Protocol):
     ) -> OutboundDelivery | None: ...
 
     def list_due_outbound_deliveries(
-        self, wax_id: WaxId, now: datetime, limit: int
+        self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]: ...
 
     def mark_outbound_delivered(

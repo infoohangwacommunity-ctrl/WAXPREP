@@ -20,26 +20,23 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
-from typing import Any
 
-from PIL import Image
+from PIL import Image  # type: ignore[import-not-found]
 
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     Artifact,
     ArtifactContent,
+    ArtifactStatus,
     ArtifactVersion,
     Attachment,
-    DerivationJob,
     HistoryEntry,
     ObjectType,
     ProvenanceLink,
     new_id,
 )
 from waxprep.media.byte_store import ByteStore
-from waxprep.media.capabilities import MediaCapabilities
-from waxprep.media.ingest import ingest_bytes, IngestedAttachment
-from waxprep.media.limits import MediaLimitError, enforce_image_limits
+from waxprep.media.limits import MediaLimitError
 from waxprep.settings import MediaLimits
 from waxprep.storage.protocol import Storage
 
@@ -66,8 +63,8 @@ class ImageProcessor:
         self,
         storage: Storage,
         byte_store: ByteStore,
-        capabilities: MediaCapabilities,
         limits: MediaLimits,
+        capabilities: object | None = None,
     ) -> None:
         self._storage = storage
         self._byte_store = byte_store
@@ -139,7 +136,7 @@ class ImageProcessor:
                 "image validation failed",
                 extra={
                     "attachment_id": str(attachment.id),
-                    "error": exc.message,
+                    "error": str(exc),
                 },
             )
             return None
@@ -147,7 +144,7 @@ class ImageProcessor:
         # Generate description
         try:
             description = await self._describe_image(data, width, height)
-        except Exception as exc:
+        except Exception:
             logger.exception(
                 "image description failed",
                 extra={"attachment_id": str(attachment.id)},
@@ -200,7 +197,7 @@ class ImageProcessor:
             id=new_id(),
             wax_id=wax_id,
             workspace_id=workspace.id,
-            status="active",
+            status=ArtifactStatus.ACTIVE,
             current_version_id=None,
             created_at=now,
             updated_at=now,
