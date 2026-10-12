@@ -94,7 +94,7 @@ def build_worker_services(
         cipher=cipher_obj,
         clock=clock,
         context_model=context_model or MockContextModel(),
-        teacher=teacher or MockTeacher(),
+        teacher=teacher if teacher is not None else MockTeacher(),  # type: ignore[arg-type]
         embedder=embedder,
         consolidation_model=consolidation_model,
         artifact_processor=artifact_processor,
