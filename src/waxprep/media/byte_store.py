@@ -105,7 +105,9 @@ class EncryptedFileByteStore:
         if not path.is_file():
             raise KeyError(storage_ref)
         _, wax_s, _ = _parse_ref(storage_ref)
-        return self._cipher.decrypt_bytes(parse_wax_id(wax_s), PURPOSE, path.read_bytes())
+        return self._cipher.decrypt_bytes(
+            parse_wax_id(wax_s), PURPOSE, path.read_bytes()
+        )
 
     def delete(self, storage_ref: str) -> None:
         path = self._path(storage_ref)

@@ -161,7 +161,9 @@ async def test_builds_provider_neutral_request_with_teacher_role() -> None:
     assert outcome.finished
     request = provider.requests[0]
     assert request.role is ModelRole.TEACHER
-    assert request.model == "mock-teacher-endpoint", "gateway must pass the registered vendor model id to the provider"
+    assert request.model == "mock-teacher-endpoint", (
+        "gateway must pass the registered vendor model id to the provider"
+    )
     assert request.wax_id == inp.wax_id
     assert request.instructions == TEACHER_SYSTEM_PROMPT
     assert request.metadata["wax_id"] == str(inp.wax_id)

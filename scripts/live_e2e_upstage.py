@@ -1,4 +1,5 @@
 """Live end-to-end conversations against real Upstage + repository services."""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +28,9 @@ from waxprep.wiring import build_services
 
 API_KEY = os.environ.get("UPSTAGE_API_KEY") or ""
 MODEL = os.environ.get("WAXPREP_LIVE_MODEL", "solar-mini")
-EMBED_MODEL = os.environ.get("WAXPREP_LIVE_EMBED_MODEL", "solar-embedding-1-large-query")
+EMBED_MODEL = os.environ.get(
+    "WAXPREP_LIVE_EMBED_MODEL", "solar-embedding-1-large-query"
+)
 BASE = "https://api.upstage.ai/v1"
 
 
@@ -87,60 +90,90 @@ def make_gateway(api_key: str) -> ModelGateway:
 
 
 MULTI = [
-    ("Ada-SS1", [
-        "Hello, I am Ada. I am in SS1 and I struggle with algebra.",
-        "Can you explain what a variable is with a simple example?",
-        "Using that, how do I solve x + 5 = 12?",
-        "What if it is 2x + 5 = 12 instead?",
-        "Please quiz me with one short question on this.",
-    ]),
-    ("Chidi-JSS3", [
-        "Hi, my name is Chidi. I need help with basic science.",
-        "What is photosynthesis in simple English?",
-        "Where does photosynthesis happen in the plant?",
-        "Earlier you mentioned chlorophyll — why is it important?",
-    ]),
-    ("Fatima-SS2", [
-        "I am Fatima in SS2. Help me with English comprehension.",
-        "What does the word 'infer' mean in exam questions?",
-        "Give me one short paragraph and ask me what I can infer.",
-    ]),
-    ("Emeka-math", [
-        "Please help me revise simultaneous equations.",
-        "Solve: x + y = 10 and x - y = 2. Show steps.",
-        "Can you check: is x=6, y=4 correct for that?",
-    ]),
-    ("Ngozi-history", [
-        "I am preparing for WAEC history.",
-        "When did Nigeria gain independence?",
-        "Who was the first Prime Minister of Nigeria?",
-        "Remind me what year independence was — I forgot.",
-    ]),
-    ("Tunde-chem", [
-        "Explain atoms vs molecules briefly.",
-        "Is water a molecule or an atom?",
-        "Based on what you said, give one more example of a molecule.",
-    ]),
-    ("Aisha-english", [
-        "Help me write a better topic sentence.",
-        "My topic is 'benefits of reading every day'.",
-        "Improve this: Reading is good for students.",
-    ]),
-    ("Kelechi-geo", [
-        "What is the capital of Nigeria?",
-        "Is Lagos still the capital?",
-        "Name one river in Nigeria.",
-    ]),
-    ("Blessing-bio", [
-        "What is the function of the heart?",
-        "How is that different from the lungs?",
-        "Summarize both organs in two sentences.",
-    ]),
-    ("Ibrahim-physics", [
-        "Define force in physics simply.",
-        "What is the unit of force?",
-        "Give one everyday example of force.",
-    ]),
+    (
+        "Ada-SS1",
+        [
+            "Hello, I am Ada. I am in SS1 and I struggle with algebra.",
+            "Can you explain what a variable is with a simple example?",
+            "Using that, how do I solve x + 5 = 12?",
+            "What if it is 2x + 5 = 12 instead?",
+            "Please quiz me with one short question on this.",
+        ],
+    ),
+    (
+        "Chidi-JSS3",
+        [
+            "Hi, my name is Chidi. I need help with basic science.",
+            "What is photosynthesis in simple English?",
+            "Where does photosynthesis happen in the plant?",
+            "Earlier you mentioned chlorophyll — why is it important?",
+        ],
+    ),
+    (
+        "Fatima-SS2",
+        [
+            "I am Fatima in SS2. Help me with English comprehension.",
+            "What does the word 'infer' mean in exam questions?",
+            "Give me one short paragraph and ask me what I can infer.",
+        ],
+    ),
+    (
+        "Emeka-math",
+        [
+            "Please help me revise simultaneous equations.",
+            "Solve: x + y = 10 and x - y = 2. Show steps.",
+            "Can you check: is x=6, y=4 correct for that?",
+        ],
+    ),
+    (
+        "Ngozi-history",
+        [
+            "I am preparing for WAEC history.",
+            "When did Nigeria gain independence?",
+            "Who was the first Prime Minister of Nigeria?",
+            "Remind me what year independence was — I forgot.",
+        ],
+    ),
+    (
+        "Tunde-chem",
+        [
+            "Explain atoms vs molecules briefly.",
+            "Is water a molecule or an atom?",
+            "Based on what you said, give one more example of a molecule.",
+        ],
+    ),
+    (
+        "Aisha-english",
+        [
+            "Help me write a better topic sentence.",
+            "My topic is 'benefits of reading every day'.",
+            "Improve this: Reading is good for students.",
+        ],
+    ),
+    (
+        "Kelechi-geo",
+        [
+            "What is the capital of Nigeria?",
+            "Is Lagos still the capital?",
+            "Name one river in Nigeria.",
+        ],
+    ),
+    (
+        "Blessing-bio",
+        [
+            "What is the function of the heart?",
+            "How is that different from the lungs?",
+            "Summarize both organs in two sentences.",
+        ],
+    ),
+    (
+        "Ibrahim-physics",
+        [
+            "Define force in physics simply.",
+            "What is the unit of force?",
+            "Give one everyday example of force.",
+        ],
+    ),
 ]
 
 SINGLES = [
@@ -206,7 +239,11 @@ async def run() -> RunReport:
         max_consultations=2,
     )
 
-    for phrase in ["photosynthesis", "quadratic equations", "Nigeria independence 1960"]:
+    for phrase in [
+        "photosynthesis",
+        "quadratic equations",
+        "Nigeria independence 1960",
+    ]:
         try:
             vec = await embedder.embed(phrase)
             assert len(vec) > 10
@@ -216,23 +253,33 @@ async def run() -> RunReport:
             report.embed_fail += 1
             print(f"[embed FAIL] {phrase!r}: {exc}")
 
-    async def one_turn(wax: WaxId, user_label: str, turn_index: int, message: str, ref: str) -> TurnRecord:
+    async def one_turn(
+        wax: WaxId, user_label: str, turn_index: int, message: str, ref: str
+    ) -> TurnRecord:
         try:
             result = await services.turns.handle_student_message(
                 wax, message, channel="live-test", channel_ref=ref
             )
             reply = result.tutor_entry.text if result.tutor_entry else None
-            rec = TurnRecord(user_label, turn_index, message, reply, result.consultations_made)
+            rec = TurnRecord(
+                user_label, turn_index, message, reply, result.consultations_made
+            )
             if not reply or not str(reply).strip():
                 rec.error = "empty tutor reply"
             return rec
         except Exception as exc:
-            return TurnRecord(user_label, turn_index, message, None, 0, f"{type(exc).__name__}: {exc}")
+            return TurnRecord(
+                user_label, turn_index, message, None, 0, f"{type(exc).__name__}: {exc}"
+            )
 
     for label, messages in MULTI:
         wax = new_wax_id()
         now = datetime.now(tz=UTC)
-        storage.create_student(Student(wax_id=wax, created_at=now, updated_at=now, status=StudentStatus.ACTIVE))
+        storage.create_student(
+            Student(
+                wax_id=wax, created_at=now, updated_at=now, status=StudentStatus.ACTIVE
+            )
+        )
         print(f"\n===== USER {label} =====")
         for i, msg in enumerate(messages, start=1):
             rec = await one_turn(wax, label, i, msg, f"{label}-{i}")
@@ -247,7 +294,11 @@ async def run() -> RunReport:
     for label, msg in SINGLES:
         wax = new_wax_id()
         now = datetime.now(tz=UTC)
-        storage.create_student(Student(wax_id=wax, created_at=now, updated_at=now, status=StudentStatus.ACTIVE))
+        storage.create_student(
+            Student(
+                wax_id=wax, created_at=now, updated_at=now, status=StudentStatus.ACTIVE
+            )
+        )
         rec = await one_turn(wax, label, 1, msg, f"{label}-1")
         report.turns.append(rec)
         status = "OK" if not rec.error else f"FAIL:{rec.error}"

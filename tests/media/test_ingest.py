@@ -2,7 +2,13 @@ from datetime import UTC, datetime
 
 from support import TEST_CIPHER
 from waxprep.domain.identifiers import new_wax_id
-from waxprep.domain.models import AuthorKind, HistoryEntry, Student, StudentStatus, new_id
+from waxprep.domain.models import (
+    AuthorKind,
+    HistoryEntry,
+    Student,
+    StudentStatus,
+    new_id,
+)
 from waxprep.media.byte_store import InMemoryByteStore
 from waxprep.media.ingest import ingest_bytes
 from waxprep.settings import MediaLimits

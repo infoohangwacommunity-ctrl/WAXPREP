@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from waxprep.model_gateway.errors import (
     ModelGatewayError,
