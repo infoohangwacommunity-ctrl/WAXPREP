@@ -50,9 +50,3 @@ Paid provider integration tests are explicitly marked `live` and are excluded fr
 - docs/DATA-MAP.md
 - docs/CONTEXT-INTELLIGENCE.md
 - docs/IMPLEMENTATION-PLAN.md
-
-## Deploy (Railway)
-
-See [docs/RAILWAY.md](docs/RAILWAY.md) for web + worker + Postgres setup.
-Repository files: `railway.toml` (web), `railway.worker.toml` (worker reference).
-
