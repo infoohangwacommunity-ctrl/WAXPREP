@@ -87,13 +87,14 @@ def build_worker_services(
     # The worker doesn't teach, but build_services requires a Teacher
     # and ContextModel. Use mocks.
     from waxprep.context.mock_model import MockContextModel
+    from waxprep.orchestration.mock_teacher import MockTeacher
 
     services = build_services(
         storage=storage,
         cipher=cipher_obj,
         clock=clock,
         context_model=context_model or MockContextModel(),
-        teacher=None,
+        teacher=teacher or MockTeacher(),
         embedder=embedder,
         consolidation_model=consolidation_model,
         artifact_processor=artifact_processor,
