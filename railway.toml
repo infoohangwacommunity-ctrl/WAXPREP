@@ -1,0 +1,26 @@
+# WAXPREP — Railway web service (default)
+#
+# Create a *second* Railway service from the same GitHub repo for the
+# background worker. Do not put secrets here; set them in the Railway UI.
+#
+# Web start:   uv run uvicorn waxprep.app:app --host 0.0.0.0 --port $PORT
+# Worker:      uv run python -m waxprep.scheduler run-interval --seconds 30
+# See docs/RAILWAY.md for the full checklist.
+
+[build]
+builder = "NIXPACKS"
+# Install production dependencies only (matches uv.lock).
+buildCommand = "uv sync --frozen --no-dev"
+
+[deploy]
+# Railway injects PORT. Bind 0.0.0.0 so the proxy can reach the process.
+startCommand = "uv run uvicorn waxprep.app:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Apply SQL migrations before the new web release takes traffic.
+# Requires DATABASE_URL (from the Railway Postgres plugin) and encryption
+# keys already set on this service.
+preDeployCommand = "uv run python -c \"import os, psycopg; from waxprep.migrations import apply_migrations; url=os.environ['DATABASE_URL']; conn=psycopg.connect(url); applied=apply_migrations(conn); conn.commit(); conn.close(); print('migrations:', applied or 'none')\""

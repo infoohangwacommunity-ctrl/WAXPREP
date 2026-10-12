@@ -1,0 +1,19 @@
+# WAXPREP — Railway worker service (background derivation / outbox jobs)
+#
+# Deploy as a separate Railway service from the same repository.
+# In the Railway dashboard for that service, set the start command below
+# (or point the service at this file if your Railway plan supports custom
+# config paths).
+#
+# Required env (same as web, plus DATABASE_URL):
+#   DATABASE_URL, WAXPREP_MASTER_KEYS, WAXPREP_ACTIVE_KEY_ID
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "uv sync --frozen --no-dev"
+
+[deploy]
+# Long-running loop; no public HTTP port needed.
+startCommand = "uv run python -m waxprep.scheduler run-interval --seconds 30"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
