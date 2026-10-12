@@ -38,8 +38,7 @@ from waxprep.context.model import ContextModel
 from waxprep.derive.artifacts import ArtifactProcessor
 from waxprep.derive.consolidation import ConsolidationModel
 from waxprep.embeddings.protocol import EmbeddingProvider
-from waxprep.orchestration.contracts import Teacher
-from waxprep.orchestration.mock_teacher import MockTeacher
+from waxprep.orchestration.contracts_ci_first import Teacher
 from waxprep.security.cipher import FieldCipher, load_cipher_from_env
 from waxprep.storage.postgres import PostgresStorage
 from waxprep.wiring import WaxPrepServices, build_services
@@ -94,7 +93,7 @@ def build_worker_services(
         cipher=cipher_obj,
         clock=clock,
         context_model=context_model or MockContextModel(),
-        teacher=teacher or MockTeacher(),
+        teacher=None,
         embedder=embedder,
         consolidation_model=consolidation_model,
         artifact_processor=artifact_processor,

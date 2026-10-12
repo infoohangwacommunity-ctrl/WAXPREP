@@ -16,7 +16,7 @@ import pytest
 
 from support import RecordingTeacher, add_student, make_world
 from waxprep.domain.models import OutboundStatus
-from waxprep.orchestration import TeacherInput, TeacherOutcome
+from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
 
 
 class _TrackingTeacher(RecordingTeacher):
@@ -30,12 +30,7 @@ class _TrackingTeacher(RecordingTeacher):
     async def teach(self, inp: TeacherInput) -> TeacherOutcome:
         self.teach_calls += 1
         self.seen_inputs.append(inp)
-        return TeacherOutcome(
-            reply_text=self.reply_text,
-            next_question=None,
-            context_used=inp.prior_results,
-            finished=True,
-        )
+        return TeacherOutcome(reply_text=self.reply_text)
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ import pytest
 
 from support import RecordingTeacher, add_student, make_world
 from waxprep.domain.models import AuthorKind
-from waxprep.orchestration import TeacherInput, TeacherOutcome
+from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
 
 
 class _CrashingTeacher(RecordingTeacher):
@@ -33,7 +33,7 @@ class _CrashingTeacher(RecordingTeacher):
         self.seen_inputs.append(inp)
         if self.calls == 1:
             raise RuntimeError("process crashed before saving tutor reply")
-        return await super().teach(inp)
+        return TeacherOutcome(reply_text=self.reply_text)
 
 
 @pytest.mark.asyncio
@@ -82,7 +82,7 @@ class _TeacherCrashesAfterReply(RecordingTeacher):
     async def teach(self, inp: TeacherInput) -> TeacherOutcome:
         self.calls += 1
         self.seen_inputs.append(inp)
-        return await super().teach(inp)
+        return TeacherOutcome(reply_text=self.reply_text)
 
 
 @pytest.mark.asyncio

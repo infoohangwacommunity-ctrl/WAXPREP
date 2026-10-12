@@ -50,6 +50,12 @@ class ContextInvestigator:
         seen_ids: set[UUID] = set()
         limits = request.limits
 
+        # GUARANTEE: Every message performs at least one contextual inspection.
+        # This ensures CI always checks the student's history before producing
+        # the ContextPackage. The model may still decide to stop after one
+        # inspection if it finds sufficient context.
+        performed_contextual_inspection = False
+
         def model_request(visible: str) -> ContextModelRequest:
             return ContextModelRequest(
                 system_prompt=CONTEXT_INTELLIGENCE_SYSTEM_PROMPT,
@@ -69,6 +75,50 @@ class ContextInvestigator:
             )
             decision = await self.model.decide(model_request(visible))
             investigated.append(f"{decision.action}: {decision.reason}")
+
+            # GUARANTEE: CI must perform at least one contextual inspection.
+            # If CI tries to stop without any tool calls and no evidence,
+            # force at least a browse_time_window to check recent history.
+            if decision.action == "stop" and tool_calls == 0 and len(evidence) == 0:
+                # Force at least one contextual inspection
+                logger.debug(
+                    "CI attempted to stop without inspection; forcing baseline check"
+                )
+                # Use browse_time_window as the guaranteed baseline inspection
+                tool = self.tools.get("browse_time_window")
+                if tool is not None:
+                    tool_calls += 1
+                    try:
+                        result = await tool.execute(
+                            ToolInvocation(
+                                wax_id=request.wax_id,
+                                arguments={"limit": 5, "newest_first": True},
+                                now=request.now,
+                                trigger_entry_id=request.trigger_entry_id,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.exception("baseline browse_time_window failed")
+                        investigated.append(
+                            f"baseline_tool_failed:browse_time_window:{type(exc).__name__}"
+                        )
+                        continue
+                    for item in result.results:
+                        if item.id in seen_ids:
+                            continue
+                        seen_ids.add(item.id)
+                        evidence.append(item)
+                        if len(evidence) >= limits.max_evidence:
+                            break
+                    if len(evidence) >= limits.max_evidence:
+                        break
+                    # Continue to let model finalize with this evidence
+                    continue
+                else:
+                    logger.warning(
+                        "CI stop without inspection and no browse_time_window tool available"
+                    )
+
             if decision.action == "stop":
                 break
             tool = self.tools.get(decision.action)
@@ -76,6 +126,11 @@ class ContextInvestigator:
                 investigated.append(f"missing_tool:{decision.action}")
                 continue
             tool_calls += 1
+
+            # Mark that we performed at least one contextual inspection
+            if not performed_contextual_inspection:
+                performed_contextual_inspection = True
+
             try:
                 result = await tool.execute(
                     ToolInvocation(

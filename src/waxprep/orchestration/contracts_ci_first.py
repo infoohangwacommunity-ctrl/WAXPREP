@@ -38,6 +38,9 @@ from waxprep.context.models import ContextPackage
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import HistoryEntry
 
+# Default logical model name for CI-first Teacher
+DEFAULT_TEACHER_MODEL_NAME = "teacher"
+
 
 @dataclass(frozen=True, slots=True)
 class TeacherInput:
@@ -89,6 +92,7 @@ class Teacher(Protocol):
 
 
 __all__ = [
+    "DEFAULT_TEACHER_MODEL_NAME",
     "Teacher",
     "TeacherInput",
     "TeacherOutcome",

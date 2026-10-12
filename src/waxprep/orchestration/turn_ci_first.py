@@ -220,15 +220,20 @@ class TurnServiceCiFirst:
         )
         outcome: TeacherOutcomeCiFirst = await self._teacher.teach(teacher_input)
 
-        # If the Teacher declined to reply, finish without a tutor entry.
+        # Handle empty Teacher response explicitly.
+        # A blank or None reply is a controlled failure, not a silent completion.
         if outcome.reply_text is None:
-            return TurnResultCiFirst(
-                student_entry=student_entry,
-                tutor_entry=None,
-                context_package=context_package,
-                duplicate=not created,
+            logger.warning(
+                "Teacher returned None for wax_id=%s, message_id=%s; "
+                "this is a controlled failure, not a valid turn completion",
+                wax_id,
+                student_entry.id,
+            )
+            raise InvalidTeacherOutcomeError(
+                "Teacher returned None (no reply) for a processed message"
             )
 
+        # Validate that the reply is not blank/whitespace
         reply_text = self._validated_reply_text(outcome.reply_text)
 
         # 5+6. Save exactly one tutor reply AND its outbound delivery

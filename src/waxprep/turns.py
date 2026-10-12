@@ -8,6 +8,6 @@ from ``waxprep.orchestration`` directly.
 
 from __future__ import annotations
 
-from waxprep.orchestration import Teacher, TurnResult, TurnService
+from waxprep.orchestration import TurnResult, TurnService
 
-__all__ = ["Teacher", "TurnResult", "TurnService"]
+__all__ = ["TurnResult", "TurnService"]
