@@ -6,6 +6,7 @@ No model work inside the webhook request.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import replace
@@ -60,6 +61,7 @@ def build_whatsapp_router(
         messages = normalize_webhook_payload(payload, resolve_wax_id=None)
         results: list[dict[str, Any]] = []
         needs_linking = False
+        durable_failures = 0
 
         for msg in messages:
             wax = resolve_sender(msg.provider_sender_id)
@@ -83,8 +85,28 @@ def build_whatsapp_router(
                     "error": result.error,
                 }
             )
+            if not result.accepted:
+                durable_failures += 1
             if result.needs_linking:
                 needs_linking = True
+
+        if durable_failures:
+            # Never acknowledge as durably accepted when saving failed.
+            # WhatsApp will redeliver unacknowledged webhooks.
+            return Response(
+                content=json.dumps(
+                    {
+                        "status": "rejected",
+                        "message_count": len(messages),
+                        "processed_count": len(results),
+                        "durable_failures": durable_failures,
+                        "needs_linking": needs_linking,
+                        "results": results,
+                    }
+                ),
+                media_type="application/json",
+                status_code=503,
+            )
 
         return {
             "status": "accepted",

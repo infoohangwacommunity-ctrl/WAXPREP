@@ -197,6 +197,7 @@ class WhatsAppOutbox:
                 delivery.wax_id,
                 delivery.id,
                 now,
+                provider_message_id=attempt.provider_message_id,
             )
             logger.info(
                 "delivery succeeded",
@@ -365,6 +366,7 @@ class WhatsAppOutbox:
             tutor_entry_id=tutor_entry.id,
             channel=self._config.channel,
             channel_ref=channel_ref,
+            provider_message_id=None,
             status=OutboundStatus.PENDING,
             attempts=0,
             last_error=None,

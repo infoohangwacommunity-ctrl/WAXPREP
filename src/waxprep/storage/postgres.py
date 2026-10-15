@@ -427,6 +427,20 @@ class PostgresStorage:
         )
         return tuple(self._history(r) for r in rows)
 
+    def find_history_by_channel_ref(
+        self, wax_id: WaxId, channel: str, channel_ref: str
+    ) -> HistoryEntry | None:
+        rows = self._read(
+            wax_id,
+            f"SELECT {HISTORY_COLUMNS} FROM history_entries "
+            "WHERE wax_id = %s AND channel = %s AND channel_ref = %s "
+            "LIMIT 1",
+            (wax_id, channel, channel_ref),
+        )
+        if not rows:
+            return None
+        return self._history(rows[0])
+
     def list_history_around(
         self, wax_id: WaxId, entry_id: UUID, *, before: int, after: int
     ) -> tuple[HistoryEntry, ...]:
@@ -1745,10 +1759,10 @@ class PostgresStorage:
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO outbound_deliveries "
-                "(id, wax_id, tutor_entry_id, channel, channel_ref, status, "
-                "attempts, last_error, delivered_at, run_after, created_at, "
-                "updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "(id, wax_id, tutor_entry_id, channel, channel_ref, "
+                "provider_message_id, status, attempts, last_error, "
+                "delivered_at, run_after, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT DO NOTHING",
                 (
                     delivery.id,
@@ -1756,6 +1770,7 @@ class PostgresStorage:
                     delivery.tutor_entry_id,
                     delivery.channel,
                     delivery.channel_ref,
+                    delivery.provider_message_id,
                     delivery.status.value,
                     delivery.attempts,
                     delivery.last_error,
@@ -1813,16 +1828,26 @@ class PostgresStorage:
         wax_id: WaxId,
         delivery_id: UUID,
         now: datetime,
+        provider_message_id: str | None = None,
     ) -> None:
         # Delivery attempts are counted in the channel adapter; this
         # method records the final delivered state without incrementing
         # attempts (the channel adapter updates attempts separately).
-        self._write(
-            wax_id,
-            "UPDATE outbound_deliveries SET status = 'delivered', "
-            "delivered_at = %s, updated_at = %s WHERE wax_id = %s AND id = %s",
-            (now, now, wax_id, delivery_id),
-        )
+        if provider_message_id is not None:
+            self._write(
+                wax_id,
+                "UPDATE outbound_deliveries SET status = 'delivered', "
+                "provider_message_id = %s, delivered_at = %s, updated_at = %s "
+                "WHERE wax_id = %s AND id = %s",
+                (provider_message_id, now, now, wax_id, delivery_id),
+            )
+        else:
+            self._write(
+                wax_id,
+                "UPDATE outbound_deliveries SET status = 'delivered', "
+                "delivered_at = %s, updated_at = %s WHERE wax_id = %s AND id = %s",
+                (now, now, wax_id, delivery_id),
+            )
 
     def mark_outbound_failed(
         self,
@@ -1854,6 +1879,7 @@ class PostgresStorage:
             tutor_entry_id=row["tutor_entry_id"],
             channel=row["channel"],
             channel_ref=row["channel_ref"],
+            provider_message_id=row.get("provider_message_id"),
             status=OutboundStatus(row["status"]),
             attempts=row["attempts"],
             last_error=row["last_error"],

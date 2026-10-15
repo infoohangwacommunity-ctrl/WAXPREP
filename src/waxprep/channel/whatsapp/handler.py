@@ -26,14 +26,23 @@ from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     AuthorKind,
+    DerivationJob,
+    JobStatus,
+    ObjectType,
     Student,
     StudentStatus,
+    new_id,
 )
 from waxprep.history.service import HistoryService
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
+
+# Job kind for retrying CI+Teacher processing after a transient failure.
+# A worker can claim and run these jobs independently of the webhook path,
+# so an accepted student message is never stranded.
+JOB_PROCESS_TURN = "process_turn"
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,8 +188,11 @@ class WhatsAppInboundHandler:
                 error="student_disabled_or_not_found",
             )
 
-        # Step 3: Check for duplicate delivery (idempotency by channel_ref)
-        existing = self._find_by_channel_ref(wax_id, msg.provider_message_id)
+        # Step 3: Check for duplicate delivery (idempotency by channel_ref).
+        # Use the indexed unique lookup instead of scanning 500 entries.
+        existing = self._storage.find_history_by_channel_ref(
+            wax_id, self._config.channel, msg.provider_message_id
+        )
         if existing is not None:
             logger.info(
                 "duplicate whatsapp message detected",
@@ -308,7 +320,35 @@ class WhatsAppInboundHandler:
                     "error": str(exc),
                 },
             )
-            # Message is saved, processing failed - can be retried
+            # Message is saved, processing failed. Persist a durable,
+            # independently retryable processing job so a worker can recover
+            # this turn after a timeout, process restart, or deployment.
+            # The message is accepted as saved but NOT as fully processed.
+            now = self._clock.now()
+            try:
+                self._storage.enqueue_job(
+                    DerivationJob(
+                        id=new_id(),
+                        wax_id=wax_id,
+                        kind=JOB_PROCESS_TURN,
+                        object_type=ObjectType.HISTORY,
+                        object_id=student_entry.id,
+                        status=JobStatus.PENDING,
+                        attempts=0,
+                        run_after=now,
+                        created_at=now,
+                        updated_at=now,
+                        last_error=f"processing_failed: {type(exc).__name__}",
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "failed to enqueue turn-processing recovery job",
+                    extra={
+                        "wax_id": str(wax_id),
+                        "student_entry_id": str(student_entry.id),
+                    },
+                )
             return InboundResult(
                 accepted=True,
                 wax_id=wax_id,
@@ -317,15 +357,6 @@ class WhatsAppInboundHandler:
                 needs_linking=False,
                 error=f"processing_failed: {type(exc).__name__}",
             )
-
-    def _find_by_channel_ref(self, wax_id: WaxId, provider_message_id: str):
-        for entry in self._storage.list_history(wax_id, limit=500):
-            if (
-                entry.channel == self._config.channel
-                and entry.channel_ref == provider_message_id
-            ):
-                return entry
-        return None
 
     def create_linking_response(self, sender: str) -> str:
         """Create a response for unlinked senders."""

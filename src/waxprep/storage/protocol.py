@@ -120,6 +120,16 @@ class Storage(Protocol):
         self, wax_id: WaxId, entry_id: UUID, *, before: int, after: int
     ) -> tuple[HistoryEntry, ...]: ...
 
+    def find_history_by_channel_ref(
+        self, wax_id: WaxId, channel: str, channel_ref: str
+    ) -> HistoryEntry | None:
+        """Lookup one history entry by (wax_id, channel, channel_ref).
+
+        Uses the unique partial index on (wax_id, channel, channel_ref)
+        instead of scanning up to 500 entries. Returns None when not found.
+        """
+        ...
+
     def list_unsummarized_history(
         self, wax_id: WaxId, *, before: datetime, limit: int
     ) -> tuple[HistoryEntry, ...]: ...
@@ -380,6 +390,7 @@ class Storage(Protocol):
         wax_id: WaxId,
         delivery_id: UUID,
         now: datetime,
+        provider_message_id: str | None = None,
     ) -> None: ...
 
     def mark_outbound_failed(

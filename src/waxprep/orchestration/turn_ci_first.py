@@ -257,6 +257,7 @@ class TurnServiceCiFirst:
                         tutor_entry_id=tutor_entry.id,
                         channel=channel,
                         channel_ref=channel_ref,
+                        provider_message_id=None,
                         status=OutboundStatus.PENDING,
                         attempts=0,
                         last_error=None,

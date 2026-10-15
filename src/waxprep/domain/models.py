@@ -249,6 +249,10 @@ class OutboundDelivery:
     tracks the channel delivery of that reply. A crash between saving
     the reply and marking this delivered is recoverable: the retry
     sends the same stored reply without invoking the Teacher again.
+
+    ``provider_message_id`` is the WhatsApp message ID returned when the
+    provider accepts the message. It is persisted so delivery-status
+    callbacks can be matched to the correct outbound record.
     """
 
     id: UUID
@@ -256,6 +260,7 @@ class OutboundDelivery:
     tutor_entry_id: UUID
     channel: str | None
     channel_ref: str | None
+    provider_message_id: str | None = None
     status: OutboundStatus
     attempts: int
     last_error: str | None

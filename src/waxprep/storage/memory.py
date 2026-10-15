@@ -67,6 +67,7 @@ class InMemoryStorage:
         self._students: dict[WaxId, Student] = {}
         self._channels: dict[tuple[str, str], ChannelIdentity] = {}
         self._history: dict[Key, HistoryEntry] = {}
+        self._history_by_channel_ref: dict[tuple[WaxId, str, str], HistoryEntry] = {}
         self._history_seq: dict[Key, int] = {}
         self._attachments: dict[Key, Attachment] = {}
         self._tokens: dict[WaxId, list[TokenMatch]] = {}
@@ -139,6 +140,10 @@ class InMemoryStorage:
             raise ValueError("history entry already exists")
         self._history[(entry.wax_id, entry.id)] = entry
         self._history_seq[(entry.wax_id, entry.id)] = len(self._history_seq)
+        if entry.channel is not None and entry.channel_ref is not None:
+            self._history_by_channel_ref[
+                (entry.wax_id, entry.channel, entry.channel_ref)
+            ] = entry
         return entry
 
     def append_history_entry_with_jobs(
@@ -169,6 +174,10 @@ class InMemoryStorage:
         # All pre-checks passed; mutate.
         self._history[(entry.wax_id, entry.id)] = entry
         self._history_seq[(entry.wax_id, entry.id)] = len(self._history_seq)
+        if entry.channel is not None and entry.channel_ref is not None:
+            self._history_by_channel_ref[
+                (entry.wax_id, entry.channel, entry.channel_ref)
+            ] = entry
         if token_hashes:
             self._put_search_tokens_locked(
                 entry.wax_id,
@@ -208,6 +217,12 @@ class InMemoryStorage:
         if newest_first:
             rows.reverse()
         return tuple(rows[:limit])
+
+    def find_history_by_channel_ref(
+        self, wax_id: WaxId, channel: str, channel_ref: str
+    ) -> HistoryEntry | None:
+        key = (wax_id, channel, channel_ref)
+        return self._history_by_channel_ref.get(key)
 
     def list_history_around(
         self, wax_id: WaxId, entry_id: UUID, *, before: int, after: int
@@ -913,12 +928,14 @@ class InMemoryStorage:
         wax_id: WaxId,
         delivery_id: UUID,
         now: datetime,
+        provider_message_id: str | None = None,
     ) -> None:
         key = (wax_id, delivery_id)
         old = self._outbound[key]
         self._outbound[key] = replace(
             old,
             status=OutboundStatus.DELIVERED,
+            provider_message_id=provider_message_id or old.provider_message_id,
             delivered_at=now,
             updated_at=now,
         )
