@@ -77,7 +77,7 @@ class WhatsAppClient:
                     try:
                         from datetime import UTC, datetime, timedelta
 
-                        retry_at = datetime.now(tz=UTC) + timedelta(
+                        _retry_at = datetime.now(tz=UTC) + timedelta(
                             seconds=int(retry_after)
                         )
                     except (TypeError, ValueError):
