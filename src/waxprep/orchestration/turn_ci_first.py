@@ -54,6 +54,7 @@ from waxprep.context.models import (
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     AuthorKind,
+    DerivationJob,
     HistoryEntry,
     OutboundDelivery,
     OutboundStatus,
@@ -212,6 +213,22 @@ class TurnServiceCiFirst:
         )
 
         # 4. Teacher receives student message + ContextPackage, produces final response.
+        logger.info(
+            "ci_investigation_complete",
+            extra={
+                "wax_id": str(wax_id),
+                "student_entry_id": str(student_entry.id),
+                "evidence_count": len(context_package.evidence)
+                if context_package is not None
+                else 0,
+                "has_summary": bool(
+                    context_package.summary if context_package else None
+                ),
+                "uncertainty_count": len(context_package.uncertainty)
+                if context_package and context_package.uncertainty
+                else 0,
+            },
+        )
         teacher_input = TeacherInputCiFirst(
             wax_id=wax_id,
             original_message=student_entry,
@@ -239,6 +256,14 @@ class TurnServiceCiFirst:
         # 5+6. Save exactly one tutor reply AND its outbound delivery
         # record in ONE transaction. A crash between them is repaired
         # on the next retry (step 2 above).
+        logger.info(
+            "tutor_reply_ready",
+            extra={
+                "wax_id": str(wax_id),
+                "student_entry_id": str(student_entry.id),
+                "reply_chars": len(outcome.reply_text or ""),
+            },
+        )
         with self._storage.transaction():
             tutor_entry = self._history.record(
                 wax_id,
@@ -275,6 +300,49 @@ class TurnServiceCiFirst:
             context_package=context_package,
             duplicate=not created,
             outbound_delivery_id=outbound_id,
+        )
+
+    async def process_turn_job(self, job: DerivationJob) -> TurnResultCiFirst:
+        """Recover a saved student message by re-running the full CI-first path.
+
+        Idempotent: if a tutor reply already exists for the student entry,
+        do not re-teach — return the existing outcome so outbox can finish.
+        The exact student text is loaded from history and never altered.
+        """
+        wax_id = job.wax_id
+        student_entry = self._storage.get_history_entry(wax_id, job.object_id)
+        if student_entry is None:
+            raise ValueError("process_turn: student history entry not found")
+
+        existing = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
+        if existing is not None:
+            outbound = self._storage.get_outbound_delivery_for_tutor(
+                wax_id, existing.id, student_entry.channel
+            )
+            logger.info(
+                "process_turn recovery: tutor reply already exists",
+                extra={
+                    "wax_id": str(wax_id),
+                    "student_entry_id": str(student_entry.id),
+                    "tutor_entry_id": str(existing.id),
+                },
+            )
+            return TurnResultCiFirst(
+                student_entry=student_entry,
+                tutor_entry=existing,
+                context_package=None,
+                duplicate=True,
+                outbound_delivery_id=outbound.id if outbound else None,
+            )
+
+        # Re-run full CI-first path with the exact saved student text.
+        return await self.handle_student_message(
+            wax_id,
+            student_entry.text or "",
+            channel=student_entry.channel,
+            channel_ref=student_entry.channel_ref,
+            thread_ref=student_entry.thread_ref,
+            occurred_at=student_entry.occurred_at,
         )
 
     @staticmethod

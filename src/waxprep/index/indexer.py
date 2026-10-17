@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 JOB_INDEX_TOKENS = "index_tokens"
 JOB_EMBED = "embed"
 JOB_UNDERSTAND_ARTIFACT = "understand_artifact"
+JOB_PROCESS_TURN = "process_turn"
 
 
 @dataclass(frozen=True, slots=True)

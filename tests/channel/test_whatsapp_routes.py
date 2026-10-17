@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
-
-from waxprep.channel.contracts import NormalizedInbound
 from waxprep.channel.whatsapp.handler import InboundResult
 from waxprep.channel.whatsapp.routes import build_whatsapp_router
-from waxprep.domain.identifiers import WaxId
+from waxprep.domain.identifiers import new_wax_id
 
 
 def _router_with_accept(accept_result: InboundResult | None):
     def resolve_sender(sender: str):
-        return WaxId(int=1)
+        return new_wax_id()
 
     def accept_inbound(msg):
         return accept_result
@@ -35,7 +30,7 @@ class TestDurableAcceptance:
         router = _router_with_accept(
             InboundResult(
                 accepted=True,
-                wax_id=WaxId(int=1),
+                wax_id=new_wax_id(),
                 student_entry_id=None,
                 outbound_delivery_id=None,
             )

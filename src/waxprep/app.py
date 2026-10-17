@@ -13,11 +13,11 @@ from fastapi import FastAPI
 from waxprep import __version__
 from waxprep.channel.contracts import NormalizedInbound
 from waxprep.channel.whatsapp.handler import (
+    InboundResult,
     WhatsAppInboundConfig,
     WhatsAppInboundHandler,
-    InboundResult,
 )
-from waxprep.channel.whatsapp.outbox import WhatsAppOutbox, OutboxConfig
+from waxprep.channel.whatsapp.outbox import OutboxConfig, WhatsAppOutbox
 from waxprep.clock import SystemClock
 from waxprep.settings import load_settings
 from waxprep.storage.protocol import Storage
@@ -43,8 +43,8 @@ def health() -> dict[str, str]:
         "version": __version__,
     }
     if _services is None:
-        status["status"] = "degraded"
-        status["reason"] = "services not composed"
+        # Process is up; full composition happens on lifespan startup.
+        status["composition"] = "pending"
         return status
     try:
         # Probe storage reachability: a get_student call exercises the

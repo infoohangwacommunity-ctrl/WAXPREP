@@ -23,6 +23,7 @@ No JSON parsing is required - the model returns prose directly.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime
 
 from waxprep.context.evidence import format_for_model
@@ -34,6 +35,7 @@ from waxprep.model_gateway.models import (
     ModelRequest,
     ModelResponse,
     ModelRole,
+    StreamEventType,
 )
 from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
 
@@ -139,6 +141,26 @@ class ModelTeacherCiFirst:
             max_output_tokens=self._max_output_tokens,
             timeout_seconds=self._timeout_seconds,
         )
+        # Prefer streaming accumulation when the gateway/provider supports it.
+        # Final persisted text is always the complete answer — never a partial.
+        # Prefer streaming accumulation when the provider advertises STREAMING.
+        # History always stores the final complete text only.
+        stream_fn = getattr(self._gateway, "stream", None)
+        if callable(stream_fn):
+            chunks: list[str] = []
+            try:
+                stream_request = replace(request, stream=True)
+                async for event in stream_fn(stream_request):  # type: ignore[attr-defined]
+                    if (
+                        getattr(event, "type", None) is StreamEventType.TEXT_DELTA
+                        and event.text
+                    ):
+                        chunks.append(event.text)
+                if chunks:
+                    return self._parse_reply("".join(chunks))
+            except Exception:
+                # Transport or capability errors fall back to complete().
+                pass
         response: ModelResponse = await self._gateway.complete(request)
         return self._parse_reply(response.text)
 

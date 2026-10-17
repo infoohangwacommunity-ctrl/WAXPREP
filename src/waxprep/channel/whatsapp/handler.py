@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 # Job kind for retrying CI+Teacher processing after a transient failure.
 # A worker can claim and run these jobs independently of the webhook path,
 # so an accepted student message is never stranded.
-JOB_PROCESS_TURN = "process_turn"
 
 
 @dataclass(frozen=True, slots=True)

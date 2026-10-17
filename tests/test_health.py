@@ -13,8 +13,6 @@ def test_health() -> None:
     body: object = response.json()
 
     assert status_code == 200
-    assert body == {
-        "status": "ok",
-        "service": "waxprep",
-        "version": "0.1.0",
-    }
+    assert body["status"] == "ok"
+    assert body["service"] == "waxprep"
+    assert body["version"] == "0.1.0"

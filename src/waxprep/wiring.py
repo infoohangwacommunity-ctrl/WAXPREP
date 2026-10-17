@@ -161,9 +161,6 @@ def build_services(
         if consolidation_model is not None
         else None
     )
-    worker = DerivationWorker(
-        storage, token_index, clock, embedder=embedder, artifacts=artifacts
-    )
     turns = TurnService(
         storage,
         history,
@@ -171,6 +168,14 @@ def build_services(
         teacher,
         clock,
         ci_limits=ci_limits,
+    )
+    worker = DerivationWorker(
+        storage,
+        token_index,
+        clock,
+        embedder=embedder,
+        artifacts=artifacts,
+        turn_processor=turns,
     )
     return WaxPrepServices(
         storage=storage,

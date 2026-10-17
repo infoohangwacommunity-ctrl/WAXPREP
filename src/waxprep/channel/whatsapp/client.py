@@ -75,13 +75,13 @@ class WhatsAppClient:
                 retry_at = None
                 if retry_after:
                     try:
-                        from datetime import datetime, timedelta, UTC
+                        from datetime import UTC, datetime, timedelta
 
                         retry_at = datetime.now(tz=UTC) + timedelta(
                             seconds=int(retry_after)
                         )
                     except (TypeError, ValueError):
-                        retry_at = None
+                        pass
                 return OutboundResult(
                     success=False,
                     provider_message_id=None,
@@ -124,3 +124,13 @@ class WhatsAppClient:
         finally:
             if close:
                 await client.aclose()
+
+    async def send_typing(self, recipient_external_id: str) -> None:
+        """Best-effort typing indicator.
+
+        WhatsApp Cloud API typing indicators are channel-level UX. This
+        method is a safe no-op hook so progressive delivery can call it
+        without educational branching. Override or extend when the Meta
+        presence API is configured for the phone number.
+        """
+        return

@@ -1,33 +1,4 @@
-"""The real, model-backed Teacher.
-
-Implements the existing ``Teacher`` Protocol on top of the provider-neutral
-``ModelGateway`` and the logical model registry. The Teacher owns teaching:
-it interprets the current student message, decides whether Context
-Intelligence (CI) would help, requests free-form investigations through the
-provided ``TeacherConsultation`` capability, evaluates the returned evidence,
-and composes the final educational answer itself.
-
-Responsibility boundaries preserved:
-- The exact student message reaches the model unchanged, every round.
-- CI evidence is input to the Teacher, never the student-facing answer.
-- The Teacher never writes to history or storage; persistence stays with
-  the ``TurnService`` and storage layer.
-- No keyword routing, phrase lists, or student-specific branches live here.
-  Every decision is made by the model from the actual message and evidence;
-  this adapter only enforces the response contract, the consultation bound,
-  and provider-neutral request construction.
-
-Response contract (validated strictly, following the CI gateway-model
-convention of a JSON object returned as text):
-
-    {"action": "reply", "reply_text": "<final student-facing answer>"}
-    {"action": "consult", "question": "<free-form investigation request>"}
-
-Any other shape — unknown action, missing fields, blank text, non-JSON
-output, or a consultation request after the budget is exhausted — raises
-``TeacherModelError`` so the turn fails in a controlled way instead of
-persisting an invalid reply.
-"""
+"""DEPRECATED: Teacher-first ModelTeacher — use CI-first modules instead.\n\nLive WhatsApp and production composition use\n`turn_ci_first.TurnServiceCiFirst` and\n`model_teacher_ci_first.ModelTeacherCiFirst` only.\nThis module remains only for legacy tests until Package E removal."""
 
 from __future__ import annotations
 

@@ -22,6 +22,7 @@ from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.index.indexer import (
     JOB_EMBED,
     JOB_INDEX_TOKENS,
+    JOB_PROCESS_TURN,
     JOB_UNDERSTAND_ARTIFACT,
 )
 from waxprep.index.objects import describe_object
@@ -71,6 +72,8 @@ class DerivationWorker:
         *,
         embedder: EmbeddingProvider | None = None,
         artifacts: ArtifactUnderstandingService | None = None,
+        turn_processor: object
+        | None = None,  # TurnServiceCiFirst; typed loose to avoid cycle
         max_attempts: int = 5,
         retry_base_seconds: float = 60.0,
     ) -> None:
@@ -79,6 +82,7 @@ class DerivationWorker:
         self._clock = clock
         self._embedder = embedder
         self._artifacts = artifacts
+        self._turn_processor = turn_processor
         self._max_attempts = max_attempts
         self._retry_base = retry_base_seconds
 
@@ -90,6 +94,8 @@ class DerivationWorker:
             handlers[JOB_EMBED] = self._embed
         if self._artifacts is not None:
             handlers[JOB_UNDERSTAND_ARTIFACT] = self._understand
+        if self._turn_processor is not None:
+            handlers[JOB_PROCESS_TURN] = self._process_turn
         return handlers
 
     async def run_once(
@@ -180,6 +186,17 @@ class DerivationWorker:
                 created_at=self._clock.now(),
             )
         )
+
+    async def _process_turn(self, job: DerivationJob) -> None:
+        """Re-run the full CI-first teaching path for a saved student message.
+
+        Bound only when a turn processor is configured. Never deletes history.
+        Idempotent against an existing tutor reply for the same student entry.
+        """
+        processor = self._turn_processor
+        if processor is None:
+            raise RuntimeError("process_turn handler not configured")
+        await processor.process_turn_job(job)  # type: ignore[attr-defined]
 
     async def _understand(self, job: DerivationJob) -> None:
         assert self._artifacts is not None
