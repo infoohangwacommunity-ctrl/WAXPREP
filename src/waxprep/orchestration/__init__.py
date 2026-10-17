@@ -1,10 +1,6 @@
-from __future__ import annotations
-
 """Orchestration package.
 
-Live path: turn_ci_first + model_teacher_ci_first.
-Teacher-first modules are deprecated and kept only for legacy tests.
-
+Live WhatsApp path uses CI-first only; Teacher-first is deprecated.
 
 CI-FIRST ARCHITECTURE (current, recommended):
 - ``TurnServiceCiFirst`` \u2014 drives a student turn: save \u2192 CI (mandatory) \u2192 Teacher \u2192 save tutor reply \u2192 outbox.
@@ -30,6 +26,7 @@ Use CI-first for all new development. The old architecture remains for
 backward compatibility during migration.
 """
 
+from __future__ import annotations
 
 # Old Teacher-first architecture (deprecated)
 from waxprep.orchestration.bounded import (
