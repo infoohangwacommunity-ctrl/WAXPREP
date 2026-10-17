@@ -36,20 +36,16 @@ _outbox: WhatsAppOutbox | None = None
 
 @app.get("/health", tags=["system"])
 def health() -> dict[str, str]:
-    """Report whether the application process can serve core dependencies."""
+    """Report process liveness. Composition is optional until lifespan runs."""
     status: dict[str, str] = {
         "status": "ok",
         "service": "waxprep",
         "version": __version__,
     }
     if _services is None:
-        # Process is up; full composition happens on lifespan startup.
         status["composition"] = "pending"
         return status
     try:
-        # Probe storage reachability: a get_student call exercises the
-        # storage round trip (RLS, connection pool, encryption setup)
-        # without mutating anything.
         from waxprep.domain.identifiers import new_wax_id
 
         _services.get_student(new_wax_id())
@@ -79,31 +75,36 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             yield
             return
 
+        cipher = build_cipher()
+        storage = services_storage(cipher)
+        clock = SystemClock()
         services = build_services(
-            storage=services_storage(),
-            cipher=build_cipher(),
-            clock=SystemClock(),
-            context_model=build_context_model(),
+            storage=storage,
+            cipher=cipher,
+            clock=clock,
+            context_model=build_context_model(settings),
             teacher=None,
             gateway=build_gateway(settings),
         )
-        _services = services.storage
+        # Bind locals so nested callbacks see non-None Storage
+        active_storage: Storage = services.storage
+        _services = active_storage
         _turn_service = services.turns
         _history = services.history
-        _clock = SystemClock()
+        _clock = clock
 
         from waxprep.channel.whatsapp.routes import build_whatsapp_router
 
         def resolve_sender(sender: str):
-            identity = _services.get_channel_identity("whatsapp", sender)
+            identity = active_storage.get_channel_identity("whatsapp", sender)
             return identity.wax_id if identity is not None else None
 
         async def accept_inbound(msg: NormalizedInbound) -> InboundResult | None:
             handler = WhatsAppInboundHandler(
-                storage=_services,
-                history=_history,
-                turn_service=_turn_service,
-                clock=_clock,
+                storage=active_storage,
+                history=services.history,
+                turn_service=services.turns,
+                clock=clock,
                 config=WhatsAppInboundConfig(),
             )
             return await handler.handle_message(msg)
@@ -118,14 +119,24 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
         client = build_whatsapp_client(settings)
         _outbox = WhatsAppOutbox(
-            storage=_services,
+            storage=active_storage,
             client=client,
-            clock=_clock,
+            clock=clock,
             config=OutboxConfig(),
         )
         asyncio.create_task(_outbox.start())
 
-        logger.info("whatsapp channel mounted and outbox worker started")
+        # Background derivation worker (embeds, process_turn recovery, artifacts)
+        async def _worker_loop() -> None:
+            while True:
+                try:
+                    await services.worker.run_once()
+                except Exception:
+                    logger.exception("derivation worker iteration failed")
+                await asyncio.sleep(2.0)
+
+        asyncio.create_task(_worker_loop())
+        logger.info("whatsapp channel mounted; outbox and recovery worker started")
     except Exception:
         logger.exception("failed to compose whatsapp services")
     yield
@@ -140,44 +151,100 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 app.router.lifespan_context = lifespan
 
 
-def services_storage() -> Storage:
+def services_storage(cipher: Any | None = None) -> Storage:
     """Build the production storage backend."""
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
+        import psycopg
+        from psycopg.rows import dict_row
+
         from waxprep.storage.postgres import PostgresStorage
 
-        return PostgresStorage(database_url)
+        if cipher is None:
+            cipher = build_cipher()
+        conn = psycopg.connect(database_url, row_factory=dict_row)  # type: ignore[arg-type]
+        return PostgresStorage(conn, cipher)
     from waxprep.storage.memory import InMemoryStorage
 
     return InMemoryStorage()
 
 
 def build_cipher():
-    from waxprep.security.cipher import FieldCipher
+    """Load AES-GCM field cipher from environment (or deterministic test key)."""
 
-    return FieldCipher()
+    from waxprep.security.cipher import AesGcmFieldCipher, KeyRing, load_cipher_from_env
+
+    try:
+        return load_cipher_from_env()
+    except RuntimeError:
+        # Local/dev without keys: fixed test key so the process can still boot.
+        # Production must set WAXPREP_MASTER_KEYS.
+        raw = b"0" * 32
+        return AesGcmFieldCipher(KeyRing(keys={1: raw}, active_key_id=1))
 
 
-def build_context_model():
-    from waxprep.context.model import ContextModel
+def build_context_model(settings: Any = None):
+    """Prefer gateway-backed CI model when Upstage is configured; else mock."""
+    from waxprep.context.mock_model import MockContextModel
 
-    return ContextModel()
+    try:
+        if settings is not None and getattr(settings, "upstage_api_key", None):
+            from waxprep.context.gateway_model import GatewayContextModel
+
+            gateway = build_gateway(settings)
+            return GatewayContextModel(gateway)
+    except Exception:
+        logger.exception("falling back to MockContextModel for CI")
+    return MockContextModel()
 
 
-def build_gateway(settings):
+def build_gateway(settings: Any):
+    """Register Upstage provider + logical teacher/context models."""
     from waxprep.model_gateway.gateway import ModelGateway
+    from waxprep.model_gateway.models import ModelCapability, ModelRole
+    from waxprep.model_gateway.providers.upstage import UpstageResponsesProvider
+    from waxprep.model_gateway.registry import ModelConfig, ModelRegistry
 
-    return ModelGateway(
-        api_key=settings.upstage_api_key,
-        base_url=settings.upstage_base_url,
+    registry = ModelRegistry()
+    api_key = getattr(settings, "upstage_api_key", None) or os.environ.get(
+        "WAXPREP_UPSTAGE_API_KEY", ""
     )
+    base_url = (
+        getattr(settings, "upstage_base_url", None) or "https://api.upstage.ai/v1"
+    )
+    provider = UpstageResponsesProvider(api_key=api_key or "missing", base_url=base_url)
+    registry.register_provider(provider)
+    endpoint = getattr(settings, "upstage_model", None) or "solar-mini4"
+    caps = provider.capabilities(endpoint)
+    for name, role in (
+        ("teacher", ModelRole.TEACHER),
+        ("context", ModelRole.CONTEXT),
+    ):
+        registry.register_model(
+            ModelConfig(
+                name=name,
+                provider=provider.name,
+                model=endpoint,
+                role=role,
+                capabilities=caps
+                if caps
+                else frozenset(
+                    {
+                        ModelCapability.TEXT_INPUT,
+                        ModelCapability.STREAMING,
+                        ModelCapability.TOOL_CALLING,
+                    }
+                ),
+            )
+        )
+    return ModelGateway(registry)
 
 
-def build_whatsapp_client(settings):
+def build_whatsapp_client(settings: Any):
     from waxprep.channel.whatsapp.client import WhatsAppClient
 
     return WhatsAppClient(
-        token=settings.whatsapp_token or "",
-        phone_number_id=settings.whatsapp_phone_number_id or "",
-        api_version=settings.whatsapp_api_version,
+        getattr(settings, "whatsapp_token", None) or "",
+        getattr(settings, "whatsapp_phone_number_id", None) or "",
+        api_version=getattr(settings, "whatsapp_api_version", None) or "v21.0",
     )

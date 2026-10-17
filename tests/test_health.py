@@ -10,7 +10,8 @@ client = TestClient(app)
 def test_health() -> None:
     response = client.get("/health")
     status_code: int = response.status_code
-    body: object = response.json()
+    body = response.json()
+    assert isinstance(body, dict)
 
     assert status_code == 200
     assert body["status"] == "ok"

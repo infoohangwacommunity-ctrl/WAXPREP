@@ -16,8 +16,9 @@ The outbox ensures:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from waxprep.channel.contracts import OutboundPayload
@@ -33,6 +34,41 @@ from waxprep.domain.models import (
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
+
+
+def split_text_for_delivery(text: str, soft_limit: int = 900) -> list[str]:
+    """Split long tutor text into complete WhatsApp messages.
+
+    Infrastructure only: paragraph boundaries, then character soft limit.
+    Not an educational rule — short replies yield one chunk.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= soft_limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= soft_limit:
+            chunks.append(remaining.strip())
+            break
+        window = remaining[:soft_limit]
+        # Prefer paragraph, then sentence, then space
+        cut = window.rfind("\n\n")
+        if cut < 40:
+            cut = window.rfind(". ")
+            if cut >= 40:
+                cut = cut + 1
+        if cut < 40:
+            cut = window.rfind(" ")
+        if cut < 40:
+            cut = soft_limit
+        piece = remaining[:cut].strip()
+        remaining = remaining[cut:].lstrip()
+        if piece:
+            chunks.append(piece)
+    return chunks or [text]
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,15 +290,53 @@ class WhatsAppOutbox:
     async def _attempt_delivery(
         self, payload: OutboundPayload, attempt: int
     ) -> DeliveryAttempt:
-        """Attempt to deliver a message via WhatsApp API."""
+        """Attempt to deliver a message via WhatsApp API.
+
+        Long replies are sent as successive complete messages (progressive
+        delivery). Only the last provider message id is retained for status
+        callbacks. History already holds the full final text.
+        """
         try:
-            result = await self._client.send_text(payload)
+            typing = getattr(self._client, "send_typing", None)
+            if callable(typing):
+                try:
+                    maybe = typing(payload.recipient_external_id)
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                except Exception:
+                    logger.debug("typing indicator failed", exc_info=True)
+
+            chunks = split_text_for_delivery(payload.text or "")
+            if not chunks:
+                return DeliveryAttempt(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=False,
+                    error_code="empty_text",
+                    error_detail="tutor reply text is empty",
+                    retry_after=None,
+                )
+
+            last = None
+            for chunk in chunks:
+                piece = replace(payload, text=chunk)
+                last = await self._client.send_text(piece)
+                if not last.success:
+                    return DeliveryAttempt(
+                        success=False,
+                        provider_message_id=last.provider_message_id,
+                        temporary_failure=last.temporary_failure,
+                        error_code=last.error_code,
+                        error_detail=last.error_detail,
+                        retry_after=None,
+                    )
+            assert last is not None
             return DeliveryAttempt(
-                success=result.success,
-                provider_message_id=result.provider_message_id,
-                temporary_failure=result.temporary_failure,
-                error_code=result.error_code,
-                error_detail=result.error_detail,
+                success=True,
+                provider_message_id=last.provider_message_id,
+                temporary_failure=False,
+                error_code=None,
+                error_detail=None,
                 retry_after=None,
             )
         except Exception as exc:

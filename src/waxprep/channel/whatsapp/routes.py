@@ -6,9 +6,10 @@ No model work inside the webhook request.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
@@ -28,7 +29,9 @@ def build_whatsapp_router(
     verify_token: str,
     app_secret: str,
     resolve_sender: Callable[[str], WaxId | None],
-    accept_inbound: Callable[[NormalizedInbound], InboundResult | None],
+    accept_inbound: Callable[
+        [NormalizedInbound], InboundResult | None | Awaitable[InboundResult | None]
+    ],
 ) -> APIRouter:
     router = APIRouter(prefix="/channels/whatsapp", tags=["whatsapp"])
 
@@ -45,11 +48,11 @@ def build_whatsapp_router(
             raise HTTPException(status_code=403, detail="verification failed")
         return Response(content=challenge, media_type="text/plain")
 
-    @router.post("/webhook")
+    @router.post("/webhook", response_model=None)
     async def webhook_receive(
         request: Request,
         x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
-    ) -> dict[str, Any]:
+    ) -> Any:
         body = await request.body()
         if not verify_signature(app_secret, body, x_hub_signature_256):
             raise HTTPException(status_code=403, detail="invalid signature")
@@ -75,6 +78,8 @@ def build_whatsapp_router(
 
             resolved = replace(msg, wax_id=wax)
             result = accept_inbound(resolved)
+            if inspect.isawaitable(result):
+                result = await result
             if result is None:
                 continue
             results.append(
