@@ -34,6 +34,7 @@ from waxprep.domain.models import (
     new_id,
 )
 from waxprep.history.service import HistoryService
+from waxprep.index.indexer import JOB_PROCESS_TURN
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
 from waxprep.storage.protocol import Storage
 
