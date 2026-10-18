@@ -91,6 +91,14 @@ class ContextInvestigator:
         stopped_by_model = False
         hit_step_budget = False
         hit_tool_budget = False
+        # Hitting the evidence cap is a *legitimate* stop, not a failure.
+        # The runtime tells the model "you have enough, finalise now" —
+        # distinct from hitting the step or tool budget, which is genuinely
+        # running out of room. The status computation uses this to
+        # distinguish SUCCESSFUL (evidence cap reached with evidence in
+        # hand) from INCOMPLETE (step/tool budget reached before the
+        # model finished).
+        hit_evidence_budget = False
 
         def model_request(visible: str) -> ContextModelRequest:
             return ContextModelRequest(
@@ -154,6 +162,7 @@ class ContextInvestigator:
                     seen_ids.add(item.id)
                     evidence.append(item)
                     if len(evidence) >= limits.max_evidence:
+                        hit_evidence_budget = True
                         break
                 # Continue to let the model decide what to do with this
                 # baseline evidence (stop, search more, etc.).
@@ -185,6 +194,30 @@ class ContextInvestigator:
                     f"tool_failed:{decision.action}:{type(exc).__name__}"
                 )
                 continue
+            # Surface write-side proposal outcomes in the investigated
+            # audit trail. Read tools return evidence; write tools return
+            # empty results but metadata describing the proposal's
+            # acceptance/rejection and what was created/invalidated.
+            # The Teacher (and any operator) can see what CI proposed
+            # and what the application actually did — the model's claim
+            # of an operation is not sufficient.
+            if result.metadata:
+                accepted = result.metadata.get("accepted")
+                operation = result.metadata.get("operation") or decision.action
+                if accepted is True:
+                    investigated.append(f"proposal_accepted:{operation}")
+                elif accepted is False:
+                    investigated.append(
+                        f"proposal_rejected:{operation}:{result.metadata.get('reason', '')[:80]}"
+                    )
+                # Surface the structural counts so the audit trail is
+                # self-explanatory without re-reading the metadata dict.
+                inv_count = result.metadata.get("invalidated_count")
+                if inv_count:
+                    investigated.append(f"invalidated:{inv_count}")
+                del_id = result.metadata.get("deletion_request_id")
+                if del_id:
+                    investigated.append(f"deletion_request:{del_id}")
             for item in result.results:
                 if item.id in seen_ids:
                     continue
@@ -193,10 +226,12 @@ class ContextInvestigator:
                 if len(evidence) >= limits.max_evidence:
                     break
             if len(evidence) >= limits.max_evidence:
-                # Hitting the evidence cap mid-investigation is not a
-                # successful stop; it is the runtime telling the model
-                # "you have enough, finalize now". The final status will
-                # reflect whatever the model does next.
+                # Hitting the evidence cap mid-investigation is a
+                # legitimate stop: the runtime is telling the model
+                # "you have enough evidence, finalise now". It is NOT
+                # the same as hitting the step budget (genuinely out
+                # of room). The status computation distinguishes them.
+                hit_evidence_budget = True
                 break
         else:
             # The for-loop fell through without `break`, meaning we hit
@@ -238,6 +273,7 @@ class ContextInvestigator:
             stopped_by_model=stopped_by_model,
             hit_step_budget=hit_step_budget,
             hit_tool_budget=hit_tool_budget,
+            hit_evidence_budget=hit_evidence_budget,
             tool_calls=tool_calls,
             failed_tool_calls=failed_tool_calls,
             evidence_count=len(selected),
@@ -254,6 +290,8 @@ class ContextInvestigator:
             investigated.append("stop_reason:step_budget_reached")
         elif hit_tool_budget:
             investigated.append("stop_reason:tool_budget_reached")
+        elif hit_evidence_budget:
+            investigated.append("stop_reason:evidence_budget_reached")
         elif stopped_by_model:
             investigated.append("stop_reason:model_finalized")
 
@@ -294,6 +332,7 @@ def _compute_status(
     stopped_by_model: bool,
     hit_step_budget: bool,
     hit_tool_budget: bool,
+    hit_evidence_budget: bool,
     tool_calls: int,
     failed_tool_calls: int,
     evidence_count: int,
@@ -307,8 +346,10 @@ def _compute_status(
     1. FAILED: the investigation never got off the ground. Either no tool
        was called at all and no model stop happened, or every tool call
        failed.
-    2. INCOMPLETE: a hard mechanical budget was hit before the model
-       signalled stop. The model never said "I'm done".
+    2. INCOMPLETE: a hard mechanical *budget* (step or tool) was hit
+       before the model signalled stop. The model never said "I'm done".
+       Hitting the *evidence* cap is NOT incomplete — it is a legitimate
+       "you have enough, finalise now" stop.
     3. PARTIAL: the model finalised, but at least one tool failed along
        the way. Distinct from INCOMPLETE because the cause is tool failure,
        not budget exhaustion.
@@ -316,8 +357,34 @@ def _compute_status(
        but no evidence was returned (or the model's selection matched
        nothing — which we treat as an honest empty, not a success).
     5. SUCCESSFUL: the model finalised and at least one piece of evidence
-       survived selection.
+       survived selection. This includes the case where the evidence cap
+       was reached — that is a successful "enough evidence" stop.
     """
+    # Hitting the evidence cap is a successful stop, *provided* we have
+    # at least one piece of evidence in hand (which the cap implies)
+    # AND the model's final selection did not invalidate the result.
+    # The Teacher should see SUCCESSFUL — the runtime told the model
+    # "you have enough, finalise now", which is exactly what happened.
+    # This must be checked before the FAILED check below, because
+    # `stopped_by_model` is False when we broke out for the evidence cap.
+    if hit_evidence_budget and evidence_count > 0 and not invalid_selection:
+        # If some tools failed along the way, the package is partial —
+        # but partial of a successful investigation, not of a failed one.
+        # Still surface the tool failure honestly.
+        if failed_tool_calls > 0 and failed_tool_calls < tool_calls:
+            return InvestigationStatus.PARTIAL
+        return InvestigationStatus.SUCCESSFUL
+
+    # If the model returned an invalid evidence selection (ids that
+    # matched nothing gathered), the runtime ships an empty evidence
+    # tuple and sets invalid_selection=True. The Teacher must see this
+    # as EMPTY (with the invalid_selection flag), not as a clean
+    # SUCCESSFUL — regardless of why the investigation stopped. This
+    # case can arise even when the evidence cap was hit, if the model
+    # then returned an invalid final selection.
+    if invalid_selection and evidence_count == 0:
+        return InvestigationStatus.EMPTY
+
     # The model never produced a "stop" decision and we never hit a hard
     # cap — that can only happen if max_steps is 0 or some other
     # pathological misconfiguration. Treat as FAILED.

@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from waxprep.context.evidence import hydrate
+from waxprep.context.proposals import EvidenceRef, Proposal
 from waxprep.context.retrieval import ALL_INDEXED, Retriever
 from waxprep.context.tools import ToolInvocation, ToolResult
 from waxprep.domain.models import ObjectType
 from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.storage.protocol import Storage
+
+if TYPE_CHECKING:
+    from waxprep.context.evolution import EvolutionResult, EvolutionService
 
 MAX_RESULTS = 8
 
@@ -266,12 +270,128 @@ class ReadArtifactTool:
         return ToolResult(name=self.name, results=tuple(evidence))
 
 
+class ProposeLifecycleChangeTool:
+    """Write-side proposal tool: the model proposes, the application validates.
+
+    The model invokes this tool with an operation name, a payload, and a
+    list of evidence references. The application:
+
+    1. Validates the arguments structurally (ProposalValidator).
+    2. Checks that every cited evidence reference exists and belongs to
+       the same student (EvolutionService._first_missing_evidence).
+    3. Applies the proposal in a single storage transaction
+       (EvolutionService.apply) so derived-object + provenance + index
+       writes commit atomically — a crash mid-proposal rolls back the
+       whole thing.
+
+    The tool returns no Evidence — it is a write tool, not a read tool.
+    The result metadata carries the proposal's outcome (accepted/rejected,
+    reason, ids of created/invalidated objects). The investigator records
+    this metadata in the `investigated` audit trail so the Teacher and
+    any operator can see what CI proposed and what the application did.
+
+    Authorization (Blueprint §30):
+    - Every cited evidence object is loaded via the student-scoped
+      ``hydrate`` helper, which uses ``storage.get_*`` methods that
+      enforce Row-Level Security on wax_id. A model cannot cite
+      another student's evidence.
+    - The proposal's ``wax_id`` comes from the ToolInvocation, not
+      from the model's arguments — the model cannot forge a different
+      student's identity.
+    - The application's ProposalValidator enforces structural rules
+      (text length, payload size, allowed operations). The closed
+      ``Operation`` enum means the model cannot invent new operations.
+    """
+
+    name = "propose_lifecycle_change"
+
+    def __init__(self, evolution: EvolutionService) -> None:
+        self._evolution = evolution
+
+    async def execute(self, invocation: ToolInvocation) -> ToolResult:
+        a = invocation.arguments
+        operation = str(a.get("operation") or "")
+        raw_payload = a.get("payload")
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        raw_refs_obj = a.get("evidence_refs")
+        raw_refs: list[object] = (
+            list(raw_refs_obj) if isinstance(raw_refs_obj, list) else []
+        )
+        reason = str(a.get("reason") or "")[:2000]
+
+        # Map the model's free-form evidence_refs to typed EvidenceRef.
+        # The model cannot invent object types — only known ObjectType
+        # values are accepted. Unknown types are filtered out.
+        evidence_refs: list[EvidenceRef] = []
+        for raw in raw_refs:
+            if not isinstance(raw, dict):
+                continue
+            ot = _type_or_none(raw.get("object_type"))
+            oid = _uuid(raw.get("object_id"))
+            if ot is None or oid is None:
+                continue
+            quote = raw.get("quote")
+            quote_str = str(quote) if quote is not None else None
+            evidence_refs.append(EvidenceRef(ot, oid, quote_str))
+
+        proposal = Proposal(
+            wax_id=invocation.wax_id,
+            operation=operation,
+            payload=payload,
+            evidence=tuple(evidence_refs),
+            reason=reason,
+        )
+        # The application validates and applies. EvolutionService.apply
+        # runs everything in one storage transaction; a failure rolls
+        # back. The result is what the application actually did — the
+        # model's claim of an operation is not sufficient.
+        result: EvolutionResult = self._evolution.apply(proposal, now=invocation.now)
+        return ToolResult(
+            name=self.name,
+            results=(),
+            metadata={
+                "accepted": result.accepted,
+                "reason": result.reason,
+                "operation": operation,
+                "created_node_id": (
+                    str(result.created_node_id) if result.created_node_id else None
+                ),
+                "created_edge_id": (
+                    str(result.created_edge_id) if result.created_edge_id else None
+                ),
+                "superseded_id": (
+                    str(result.superseded_id) if result.superseded_id else None
+                ),
+                "created_notebook_entry_id": (
+                    str(result.created_notebook_entry_id)
+                    if result.created_notebook_entry_id
+                    else None
+                ),
+                "created_summary_id": (
+                    str(result.created_summary_id)
+                    if result.created_summary_id
+                    else None
+                ),
+                "deletion_request_id": (
+                    str(result.deletion_request_id)
+                    if result.deletion_request_id
+                    else None
+                ),
+                "invalidated_count": len(result.invalidated_ids),
+                "tokens_dropped": result.tokens_dropped,
+                "embeddings_dropped": result.embeddings_dropped,
+            },
+        )
+
+
 def build_default_tools(
     storage: Storage,
     retriever: Retriever,
     embedder: EmbeddingProvider | None = None,
+    *,
+    evolution: EvolutionService | None = None,
 ) -> dict[str, Any]:
-    tools = [
+    tools: list[Any] = [
         FindExactTool(retriever),
         FindByMeaningTool(retriever, embedder),
         BrowseTimeWindowTool(retriever),
@@ -282,4 +402,6 @@ def build_default_tools(
         FollowRelationshipsTool(retriever),
         ReadArtifactTool(storage),
     ]
+    if evolution is not None:
+        tools.append(ProposeLifecycleChangeTool(evolution))
     return {t.name: t for t in tools}

@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from waxprep.clock import Clock
+from waxprep.context.deletion import DeletionService
 from waxprep.context.evolution import EvolutionService
 from waxprep.context.investigator import ContextInvestigator
 from waxprep.context.model import ContextModel
@@ -78,6 +79,7 @@ class WaxPrepServices:
     investigator: ContextInvestigator
     turns: TurnService
     worker: DerivationWorker
+    deletion: DeletionService
     consolidation: ConsolidationService | None
     artifacts: ArtifactUnderstandingService | None
 
@@ -148,7 +150,7 @@ def build_services(
     evolution = EvolutionService(storage=storage, indexer=indexer)
     investigator = ContextInvestigator(
         model=context_model,
-        tools=build_default_tools(storage, retriever, embedder),
+        tools=build_default_tools(storage, retriever, embedder, evolution=evolution),
     )
     artifacts = (
         ArtifactUnderstandingService(storage, indexer, artifact_processor, clock)
@@ -168,6 +170,11 @@ def build_services(
         clock,
         ci_limits=ci_limits,
     )
+    # Blueprint Part IV §16-17: the deletion workflow is wired into the
+    # worker so pending requests are actually processed by the running
+    # application. DeletionService.execute does the claim atomically
+    # inside its own transaction; multiple workers can run safely.
+    deletion = DeletionService(storage=storage)
     worker = DerivationWorker(
         storage,
         token_index,
@@ -175,6 +182,7 @@ def build_services(
         embedder=embedder,
         artifacts=artifacts,
         turn_processor=turns,
+        deletion_service=deletion,
     )
     return WaxPrepServices(
         storage=storage,
@@ -185,6 +193,7 @@ def build_services(
         investigator=investigator,
         turns=turns,
         worker=worker,
+        deletion=deletion,
         consolidation=consolidation,
         artifacts=artifacts,
     )

@@ -10,7 +10,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from waxprep.domain.identifiers import WaxId
@@ -503,11 +503,47 @@ class Storage(Protocol):
         self, wax_id: WaxId, *, status: str | None = None, limit: int = 50
     ) -> tuple[DeletionRequest, ...]: ...
 
+    def list_wax_ids_with_pending_deletion_requests(
+        self, limit: int
+    ) -> tuple[WaxId, ...]:
+        """List every wax_id that has at least one PENDING deletion request.
+
+        Used by the worker to drive the deletion workflow forward —
+        for each wax_id returned, the worker then calls
+        ``list_deletion_requests(wax_id, status='pending')`` and
+        executes each via ``DeletionService``. The two-step API keeps
+        the storage layer's surface small while still letting the
+        worker find pending work without scanning all students.
+        """
+        ...
+
     def update_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
         """Atomically update the status, completed_at, and propagation_log
         of a deletion request. Caller must supply the full new state;
         optimistic concurrency is the caller's responsibility (the storage
         layer writes what it is given)."""
+        ...
+
+    def claim_deletion_request(
+        self,
+        wax_id: WaxId,
+        request_id: UUID,
+        *,
+        now: datetime,
+        propagation_log: dict[str, Any],
+    ) -> DeletionRequest | None:
+        """Atomically transition a deletion request from PENDING to
+        IN_PROGRESS, but only if it is currently PENDING. Returns the
+        claimed request (with status=IN_PROGRESS) or None if another
+        worker already claimed it or it has moved to a terminal state.
+
+        This is the concurrency-safe claim primitive for the deletion
+        workflow. The claim must be done *inside* the propagation
+        transaction so that a failure rolls back the claim too —
+        otherwise the request would be stuck in IN_PROGRESS forever
+        if propagation raised after the claim committed. The
+        ``DeletionService`` calls this inside its transaction.
+        """
         ...
 
 

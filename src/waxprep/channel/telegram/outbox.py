@@ -76,7 +76,8 @@ class TelegramOutbox:
     def _resolve_identity(self, wax_id: WaxId):
         list_fn = getattr(self._storage, "list_channel_identities_for_wax", None)
         if callable(list_fn):
-            for identity in list(list_fn(wax_id)):
+            identities = list_fn(wax_id)
+            for identity in list(identities):  # type: ignore[arg-type]
                 if identity.channel == self._config.channel:
                     return identity
         return None
@@ -86,7 +87,11 @@ class TelegramOutbox:
         identity = self._resolve_identity(delivery.wax_id)
         if identity is None:
             self._storage.mark_outbound_failed(
-                delivery.wax_id, delivery.id, now, error="channel_identity_not_found"
+                delivery.wax_id,
+                delivery.id,
+                now,
+                error="channel_identity_not_found",
+                retry_at=None,
             )
             return
         entry = self._storage.get_history_entry(
@@ -95,7 +100,11 @@ class TelegramOutbox:
         text = (entry.text if entry is not None else None) or ""
         if not text.strip():
             self._storage.mark_outbound_failed(
-                delivery.wax_id, delivery.id, now, error="empty_tutor_text"
+                delivery.wax_id,
+                delivery.id,
+                now,
+                error="empty_tutor_text",
+                retry_at=None,
             )
             return
 
@@ -116,6 +125,7 @@ class TelegramOutbox:
                     delivery.id,
                     now,
                     error=result.error_detail or result.error_code or "send_failed",
+                    retry_at=None,
                 )
                 return
             last_mid = result.provider_message_id

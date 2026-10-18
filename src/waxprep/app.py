@@ -169,7 +169,11 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                     turn_service=services.turns,
                     clock=clock,
                     config=WhatsAppInboundConfig(channel="telegram"),
-                    whatsapp_client=tg_client,  # duck-typed: send_text + send_typing
+                    # TelegramClient duck-types as WhatsAppClient: both
+                    # expose ``send_text`` and ``send_typing``. The cast
+                    # keeps the type checker happy without forcing a
+                    # shared base class or a Protocol refactor.
+                    whatsapp_client=tg_client,  # type: ignore[arg-type]
                 )
                 return await handler.handle_message(msg)
 

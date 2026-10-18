@@ -154,39 +154,72 @@ class DeletionService:
                 status=DeletionRequestStatus.REJECTED,
             )
 
-        # Mark the request in_progress first so a crash mid-propagation
-        # leaves an observable state, not a fake 'pending'.
-        in_progress = replace(
-            request,
-            status=DeletionRequestStatus.IN_PROGRESS,
-            propagation_log=log,
-        )
-        self.storage.update_deletion_request(in_progress)
-
+        # Everything below is one atomic transaction. On exception, the
+        # whole thing rolls back: the claim (PENDING → IN_PROGRESS), the
+        # propagation writes, and the final COMPLETED update. The request
+        # is back to PENDING — the next worker run can retry it. There is
+        # no stuck IN_PROGRESS state. (Blueprint §17: a failed update must
+        # not leave the request changed while its provenance or indexes
+        # remain partially updated.)
         try:
             with self.storage.transaction():
-                self._propagate(request, now, log)
+                # Conditional claim: PENDING → IN_PROGRESS. If another
+                # worker already claimed it (or it has moved to a
+                # terminal state), this returns None and we skip. The
+                # claim is inside the transaction so it rolls back on
+                # failure — no stuck IN_PROGRESS marker.
+                claimed = self.storage.claim_deletion_request(
+                    request.wax_id,
+                    request.id,
+                    now=now,
+                    propagation_log=log,
+                )
+                if claimed is None:
+                    # Not an error — another worker got there first,
+                    # or the request is in a terminal state. Roll back
+                    # the (empty) transaction and return a skipped
+                    # outcome. The request is unaffected.
+                    logger.info(
+                        "deletion_request_skipped",
+                        extra={
+                            "wax_id": str(request.wax_id),
+                            "request_id": str(request.id),
+                            "reason": "already_claimed_or_terminal",
+                        },
+                    )
+                    return DeletionOutcome(
+                        request_id=request.id,
+                        accepted=False,
+                        reason="already claimed by another worker "
+                        "or in a terminal state",
+                        propagation_log=log,
+                        status=DeletionRequestStatus.PENDING,
+                    )
+                # Propagate inside the same transaction. If this raises,
+                # the transaction (including the claim) rolls back.
+                self._propagate(claimed, now, log)
                 log["completed_at"] = now.isoformat()
                 # The history row is retained by default policy. We
                 # record this honestly in the propagation log so an
                 # operator (or a student) can see exactly what happened.
                 if (
-                    request.object_type is ObjectType.HISTORY
+                    claimed.object_type is ObjectType.HISTORY
                     and not self.retention_policy.get("allow_history_deletion", False)
                 ):
                     log["history_row"] = "retained_by_default_policy"
                 completed = replace(
-                    request,
+                    claimed,
                     status=DeletionRequestStatus.COMPLETED,
                     completed_at=now,
                     propagation_log=log,
                 )
                 self.storage.update_deletion_request(completed)
         except Exception as exc:
-            # The transaction rolled back; the in_progress marker is also
-            # rolled back, so the request is back to PENDING. An operator
-            # (or a retry) can pick it up. The exception is re-raised
-            # after logging so the caller can decide what to do.
+            # The transaction rolled back, INCLUDING the claim. The
+            # request is back to PENDING — the next worker run will
+            # retry it. There is no stuck IN_PROGRESS state. Re-raise
+            # so the caller (worker) sees the failure and can apply
+            # its own retry policy.
             logger.exception(
                 "deletion_propagation_failed",
                 extra={

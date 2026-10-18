@@ -2264,6 +2264,28 @@ class PostgresStorage:
             )
         return tuple(self._deletion_request(r) for r in rows)
 
+    def list_wax_ids_with_pending_deletion_requests(
+        self, limit: int
+    ) -> tuple[WaxId, ...]:
+        """Distinct wax_ids that have at least one PENDING deletion request.
+
+        Uses the ``waxprep_wax_ids_with_pending_deletions`` SECURITY
+        DEFINER function to bypass RLS — the worker (app role, no
+        current_wax_id set) cannot read deletion_requests directly
+        because RLS enforces ``wax_id = current_setting(...)``. The
+        function returns only the wax_id column; no sensitive content
+        crosses the isolation boundary.
+        """
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT wax_id FROM waxprep_wax_ids_with_pending_deletions(%s)",
+                (limit,),
+            )
+            rows: list[Row] = cur.fetchall()
+        if self._txn_depth == 0:
+            self._conn.commit()
+        return tuple(WaxId(r["wax_id"]) for r in rows)
+
     def update_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
         changed = self._write(
             request.wax_id,
@@ -2297,6 +2319,41 @@ class PostgresStorage:
             )
         )
         return request
+
+    def claim_deletion_request(
+        self,
+        wax_id: WaxId,
+        request_id: UUID,
+        *,
+        now: datetime,
+        propagation_log: dict[str, Any],
+    ) -> DeletionRequest | None:
+        """Atomic conditional UPDATE: PENDING → IN_PROGRESS.
+
+        Uses ``UPDATE ... WHERE status = 'pending' RETURNING *`` so
+        that only one of N racing workers can win the claim — the
+        others get 0 rows and return None. The claim participates in
+        the caller's transaction (set via ``transaction()``); if the
+        caller rolls back, the claim is undone, which is exactly what
+        we want when propagation fails (no stuck in_progress state).
+        """
+        _ = now  # requested_at is preserved; we do not overwrite it.
+        rows = self._read(
+            wax_id,
+            "UPDATE deletion_requests SET status = 'in_progress', "
+            "propagation_log = %s::jsonb "
+            "WHERE wax_id = %s AND id = %s AND status = 'pending' "
+            "RETURNING id, wax_id, object_type, object_id, scope, reason, "
+            "status, requested_at, completed_at, propagation_log",
+            (
+                json.dumps(propagation_log),
+                wax_id,
+                request_id,
+            ),
+        )
+        if not rows:
+            return None
+        return self._deletion_request(rows[0])
 
 
 __all__ = ["PostgresStorage"]

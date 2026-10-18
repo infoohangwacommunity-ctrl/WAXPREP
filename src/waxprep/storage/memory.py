@@ -6,6 +6,7 @@ import contextlib
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from waxprep.domain.identifiers import WaxId
@@ -18,6 +19,7 @@ from waxprep.domain.models import (
     AuthorKind,
     ChannelIdentity,
     DeletionRequest,
+    DeletionRequestStatus,
     DerivationJob,
     EmbeddingRecord,
     Event,
@@ -1231,6 +1233,23 @@ class InMemoryStorage:
         rows.sort(key=lambda r: r.requested_at, reverse=True)
         return tuple(rows[:limit])
 
+    def list_wax_ids_with_pending_deletion_requests(
+        self, limit: int
+    ) -> tuple[WaxId, ...]:
+        """Return up to ``limit`` wax_ids that have at least one PENDING
+        deletion request. Order is insertion-order for determinism."""
+        out: list[WaxId] = []
+        seen: set[WaxId] = set()
+        for (w, _), r in self._deletion_requests.items():
+            if w in seen:
+                continue
+            if r.status is DeletionRequestStatus.PENDING:
+                out.append(w)
+                seen.add(w)
+            if len(out) >= limit:
+                break
+        return tuple(out)
+
     def update_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
         key = (request.wax_id, request.id)
         if key not in self._deletion_requests:
@@ -1254,6 +1273,39 @@ class InMemoryStorage:
         )
         self._deletion_requests[key] = request
         return request
+
+    def claim_deletion_request(
+        self,
+        wax_id: WaxId,
+        request_id: UUID,
+        *,
+        now: datetime,
+        propagation_log: dict[str, Any],
+    ) -> DeletionRequest | None:
+        """Atomically transition PENDING → IN_PROGRESS. Returns the
+        claimed request or None if another worker already claimed it.
+
+        In the in-memory storage this is a read-check-write because the
+        storage's transaction context serialises access within one
+        process. For Postgres the same logic is a conditional
+        UPDATE ... WHERE status='pending' RETURNING *.
+        """
+        del now  # timestamp is in the propagation_log; the row's
+        # requested_at is preserved.
+        key = (wax_id, request_id)
+        current = self._deletion_requests.get(key)
+        if current is None:
+            return None
+        if current.status is not DeletionRequestStatus.PENDING:
+            # Already claimed by another worker, or already terminal.
+            return None
+        claimed = replace(
+            current,
+            status=DeletionRequestStatus.IN_PROGRESS,
+            propagation_log=dict(propagation_log),
+        )
+        self._deletion_requests[key] = claimed
+        return claimed
 
 
 __all__ = ["InMemoryStorage"]

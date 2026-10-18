@@ -90,3 +90,30 @@ DROP POLICY IF EXISTS deletion_requests_isolation ON deletion_requests;
 CREATE POLICY deletion_requests_isolation ON deletion_requests
     USING (wax_id = current_setting('app.current_wax_id', true)::uuid)
     WITH CHECK (wax_id = current_setting('app.current_wax_id', true)::uuid);
+
+-- 5. SECURITY DEFINER function that lets the worker list wax_ids with
+-- pending deletion requests across all students. RLS on
+-- deletion_requests enforces student isolation for ordinary queries;
+-- the worker (app role, no current_wax_id set) cannot read any rows
+-- directly. This function bypasses RLS via SECURITY DEFINER so the
+-- worker can find students whose requests need processing. It returns
+-- only the wax_id column — no sensitive content.
+CREATE OR REPLACE FUNCTION waxprep_wax_ids_with_pending_deletions(
+    p_limit INTEGER
+) RETURNS TABLE (wax_id UUID)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT d.wax_id
+    FROM public.deletion_requests AS d
+    WHERE d.status = 'pending'
+    GROUP BY d.wax_id
+    ORDER BY MIN(d.requested_at)
+    LIMIT p_limit
+$$;
+
+REVOKE ALL ON FUNCTION waxprep_wax_ids_with_pending_deletions(INTEGER)
+    FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION waxprep_wax_ids_with_pending_deletions(INTEGER)
+    TO waxprep_app;

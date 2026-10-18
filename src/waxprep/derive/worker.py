@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from waxprep.clock import Clock
+from waxprep.context.deletion import DeletionService
 from waxprep.derive.artifacts import ArtifactUnderstandingService
 from waxprep.domain.models import DerivationJob, EmbeddingRecord, new_id
 from waxprep.embeddings.protocol import EmbeddingProvider
@@ -60,6 +61,13 @@ class WorkerReport:
     retrying: int = 0
     failed: int = 0
     skipped: int = 0
+    # Deletion workflow: number of pending deletion requests the worker
+    # processed in this run. Distinct from jobs_done because deletion
+    # requests are not derivation_jobs — they live in their own table
+    # and are claimed via a separate concurrency-safe primitive.
+    deletions_processed: int = 0
+    deletions_skipped: int = 0
+    deletions_failed: int = 0
 
 
 class DerivationWorker:
@@ -75,6 +83,7 @@ class DerivationWorker:
         artifacts: ArtifactUnderstandingService | None = None,
         turn_processor: object
         | None = None,  # TurnServiceCiFirst; typed loose to avoid cycle
+        deletion_service: DeletionService | None = None,
         max_attempts: int = 5,
         retry_base_seconds: float = 60.0,
     ) -> None:
@@ -84,6 +93,7 @@ class DerivationWorker:
         self._embedder = embedder
         self._artifacts = artifacts
         self._turn_processor = turn_processor
+        self._deletion_service = deletion_service
         self._max_attempts = max_attempts
         self._retry_base = retry_base_seconds
 
@@ -153,7 +163,80 @@ class DerivationWorker:
                     continue
                 self._storage.mark_job_done(wax_id, job.id, now)
                 done += 1
-        return WorkerReport(done, retrying, failed, skipped)
+
+        # Process pending deletion requests (Blueprint Part IV §16-17).
+        # This is wired into the worker so the running application
+        # actually advances the deletion workflow — without this, a
+        # REQUEST_DELETION proposal creates a pending row that nobody
+        # picks up. The DeletionService does the claim atomically inside
+        # its own transaction, so multiple workers can run safely.
+        deletions_processed = deletions_skipped = deletions_failed = 0
+        if self._deletion_service is not None:
+            (
+                deletions_processed,
+                deletions_skipped,
+                deletions_failed,
+            ) = self._process_deletion_requests(now)
+
+        return WorkerReport(
+            done=done,
+            retrying=retrying,
+            failed=failed,
+            skipped=skipped,
+            deletions_processed=deletions_processed,
+            deletions_skipped=deletions_skipped,
+            deletions_failed=deletions_failed,
+        )
+
+    def _process_deletion_requests(self, now: object) -> tuple[int, int, int]:
+        """Drain pending deletion requests across all students.
+
+        Returns (processed, skipped, failed). ``processed`` counts
+        requests that completed (including rejected); ``skipped`` counts
+        requests that another worker had already claimed; ``failed``
+        counts requests whose propagation raised — the request stays
+        PENDING and the next run will retry it.
+        """
+        # ``now`` was typed as object to avoid a circular import with
+        # the Clock; the DeletionService only forwards it to storage.
+        assert self._deletion_service is not None
+        processed = skipped = failed = 0
+        # Iterate students with pending requests. The storage layer
+        # exposes pending requests per wax_id so we can drive the
+        # workflow forward student-by-student. If a student has no
+        # pending requests, list_deletion_requests returns ().
+        # Walk every student that has any deletion_request — we filter
+        # to status='pending' inside the loop. (A more efficient
+        # implementation would expose list_wax_ids_with_pending_deletions;
+        # for now we iterate the existing list_deletion_requests API.)
+        # NOTE: list_deletion_requests requires a wax_id; for the worker
+        # we need a different access path. We expose this through the
+        # storage layer's existing method by iterating students that
+        # appear in the events table with kind='deletion_request_created'.
+        # That is too indirect; instead, we add a small helper that
+        # lists wax_ids with pending requests.
+        for wax_id in self._storage.list_wax_ids_with_pending_deletion_requests(
+            limit=200
+        ):
+            for request in self._storage.list_deletion_requests(
+                wax_id, status="pending", limit=50
+            ):
+                try:
+                    outcome = self._deletion_service.execute(request, now=now)  # type: ignore[arg-type]
+                except Exception:
+                    # The DeletionService already logged the failure.
+                    # The request stayed PENDING (the claim rolled back),
+                    # so the next worker run will retry. Count it as
+                    # failed for the report.
+                    failed += 1
+                    continue
+                if outcome.status.value == "pending":
+                    # Skipped — another worker already claimed it, or
+                    # it was already in a terminal state.
+                    skipped += 1
+                else:
+                    processed += 1
+        return processed, skipped, failed
 
     async def _index_tokens(self, job: DerivationJob) -> None:
         found = describe_object(

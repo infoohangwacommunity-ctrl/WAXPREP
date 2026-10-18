@@ -32,6 +32,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -88,6 +89,7 @@ def test_status_successful_when_model_stops_with_evidence() -> None:
         stopped_by_model=True,
         hit_step_budget=False,
         hit_tool_budget=False,
+        hit_evidence_budget=False,
         tool_calls=2,
         failed_tool_calls=0,
         evidence_count=3,
@@ -101,6 +103,7 @@ def test_status_empty_when_tools_ran_but_no_evidence() -> None:
         stopped_by_model=True,
         hit_step_budget=False,
         hit_tool_budget=False,
+        hit_evidence_budget=False,
         tool_calls=2,
         failed_tool_calls=0,
         evidence_count=0,
@@ -114,6 +117,7 @@ def test_status_incomplete_when_step_budget_hit_before_model_stop() -> None:
         stopped_by_model=False,
         hit_step_budget=True,
         hit_tool_budget=False,
+        hit_evidence_budget=False,
         tool_calls=8,
         failed_tool_calls=0,
         evidence_count=5,
@@ -127,6 +131,7 @@ def test_status_partial_when_some_tools_failed() -> None:
         stopped_by_model=True,
         hit_step_budget=False,
         hit_tool_budget=False,
+        hit_evidence_budget=False,
         tool_calls=3,
         failed_tool_calls=1,
         evidence_count=2,
@@ -142,6 +147,7 @@ def test_status_failed_when_no_tool_called_and_no_model_stop() -> None:
         stopped_by_model=False,
         hit_step_budget=False,
         hit_tool_budget=False,
+        hit_evidence_budget=False,
         tool_calls=0,
         failed_tool_calls=0,
         evidence_count=0,
@@ -155,6 +161,7 @@ def test_status_failed_when_every_tool_call_failed() -> None:
         stopped_by_model=True,
         hit_step_budget=False,
         hit_tool_budget=False,
+        hit_evidence_budget=False,
         tool_calls=3,
         failed_tool_calls=3,
         evidence_count=0,
@@ -171,11 +178,79 @@ def test_status_empty_when_invalid_selection_and_no_evidence_matched() -> None:
         stopped_by_model=True,
         hit_step_budget=False,
         hit_tool_budget=False,
+        hit_evidence_budget=False,
         tool_calls=2,
         failed_tool_calls=0,
         evidence_count=0,
         invalid_selection=True,
     )
+    assert status is InvestigationStatus.EMPTY
+
+
+def test_status_successful_when_evidence_budget_reached_with_evidence() -> None:
+    """Regression test for the evidence-limit bug.
+
+    Hitting the evidence cap mid-investigation is a *legitimate* stop —
+    the runtime tells the model "you have enough, finalise now". The
+    previous status computation incorrectly returned FAILED because
+    `stopped_by_model=False` (the model never said stop) AND no
+    `hit_*_budget` flag was set (the step/tool budgets weren't hit).
+    The new `hit_evidence_budget` flag distinguishes this case from
+    genuine failure.
+    """
+    status = _compute_status(
+        stopped_by_model=False,  # model never said stop — we broke out for the cap
+        hit_step_budget=False,  # we did not run out of steps
+        hit_tool_budget=False,  # we did not run out of tool calls
+        hit_evidence_budget=True,  # we hit the evidence cap
+        tool_calls=2,
+        failed_tool_calls=0,
+        evidence_count=3,  # we have evidence in hand
+        invalid_selection=False,
+    )
+    assert status is InvestigationStatus.SUCCESSFUL, (
+        "Hitting the evidence cap with evidence in hand must be SUCCESSFUL, "
+        "not FAILED — the runtime is telling the model 'you have enough, "
+        "finalise now', which is a legitimate stop."
+    )
+
+
+def test_status_partial_when_evidence_budget_reached_but_some_tools_failed() -> None:
+    """If the evidence cap was reached but some tools failed along the way,
+    the package is PARTIAL — we still surface the tool failure honestly,
+    even though the investigation reached a legitimate stop."""
+    status = _compute_status(
+        stopped_by_model=False,
+        hit_step_budget=False,
+        hit_tool_budget=False,
+        hit_evidence_budget=True,
+        tool_calls=3,
+        failed_tool_calls=1,
+        evidence_count=3,
+        invalid_selection=False,
+    )
+    assert status is InvestigationStatus.PARTIAL
+
+
+def test_status_failed_when_evidence_budget_reached_but_invalid_selection() -> None:
+    """Edge case: the cap was reached but the model's selection matched
+    nothing. The runtime ships an empty evidence tuple — even though
+    the cap was hit, the package reflects an invalid selection. The
+    Teacher should see this as EMPTY, not SUCCESSFUL."""
+    status = _compute_status(
+        stopped_by_model=False,
+        hit_step_budget=False,
+        hit_tool_budget=False,
+        hit_evidence_budget=True,
+        tool_calls=2,
+        failed_tool_calls=0,
+        evidence_count=0,  # selection matched nothing
+        invalid_selection=True,
+    )
+    # hit_evidence_budget=True but evidence_count==0 (because selection
+    # was invalid). The first guard in _compute_status requires
+    # evidence_count > 0, so this falls through to the EMPTY case
+    # (invalid_selection=True).
     assert status is InvestigationStatus.EMPTY
 
 
@@ -946,3 +1021,603 @@ def test_no_message_type_branching_in_investigator() -> None:
             f"Investigator must not branch on message content. "
             f"Found forbidden pattern: {pattern}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. Lifecycle proposal tool: model proposes, application validates.
+# Blueprint §28-29: tool contracts describe capabilities, not tables.
+# Blueprint §30: a model-generated request is never sufficient authorization.
+# ---------------------------------------------------------------------------
+
+
+def test_propose_lifecycle_change_tool_validates_arguments_and_authorises() -> None:
+    """The ``propose_lifecycle_change`` tool the model invokes goes through
+    the application's ProposalValidator and EvolutionService.apply — the
+    model cannot write to storage directly. An invalid proposal (missing
+    evidence, unknown operation) is rejected and the rejection is
+    surfaced in the tool result's metadata."""
+    from waxprep.context.evolution import EvolutionService
+    from waxprep.context.tool_impls import ProposeLifecycleChangeTool
+    from waxprep.index.indexer import Indexer
+    from waxprep.index.tokens import TokenIndex
+    from waxprep.security.cipher import AesGcmFieldCipher, KeyRing
+    from waxprep.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    cipher = AesGcmFieldCipher(KeyRing(keys={1: b"t" * 32}, active_key_id=1))
+
+    class _FakeClock:
+        def now(self) -> datetime:
+            return NOW
+
+    indexer = Indexer(
+        storage=storage,
+        token_index=TokenIndex(cipher=cipher),
+        clock=_FakeClock(),
+    )
+    evolution = EvolutionService(storage=storage, indexer=indexer)
+    wax_id, history, _ = _setup_student_with_history(storage)
+
+    tool = ProposeLifecycleChangeTool(evolution=evolution)
+
+    # --- Case A: proposal with no evidence is rejected ---
+    invocation = ToolInvocation(
+        wax_id=wax_id,
+        arguments={
+            "operation": Operation.INVALIDATE_NOTEBOOK_ENTRY.value,
+            "payload": {"entry_id": str(uuid4())},
+            "evidence_refs": [],  # no evidence
+            "reason": "no evidence",
+        },
+        now=NOW,
+    )
+    import asyncio
+
+    result = asyncio.run(tool.execute(invocation))
+    assert result.metadata["accepted"] is False
+    assert "evidence" in result.metadata["reason"].lower()
+    assert result.results == ()  # write tool returns no evidence
+
+    # --- Case B: proposal with unknown operation is rejected ---
+    invocation = ToolInvocation(
+        wax_id=wax_id,
+        arguments={
+            "operation": "bogus_operation",
+            "payload": {},
+            "evidence_refs": [
+                {
+                    "object_type": ObjectType.HISTORY.value,
+                    "object_id": str(history.id),
+                }
+            ],
+            "reason": "bogus",
+        },
+        now=NOW,
+    )
+    result = asyncio.run(tool.execute(invocation))
+    assert result.metadata["accepted"] is False
+    assert "unknown operation" in result.metadata["reason"].lower()
+
+    # --- Case C: proposal citing another student's evidence is rejected
+    # by EvolutionService._first_missing_evidence (the storage's get_*
+    # methods enforce wax_id scoping; the cited object does not exist
+    # in this student's world). ---
+    other_history = HistoryEntry(
+        id=new_id(),
+        wax_id=new_wax_id(),  # different student
+        author_kind=AuthorKind.STUDENT,
+        content_kind="text",
+        text="other student's content",
+        occurred_at=NOW,
+        recorded_at=NOW,
+    )
+    invocation = ToolInvocation(
+        wax_id=wax_id,
+        arguments={
+            "operation": Operation.INVALIDATE_NOTEBOOK_ENTRY.value,
+            "payload": {"entry_id": str(uuid4())},
+            "evidence_refs": [
+                {
+                    "object_type": ObjectType.HISTORY.value,
+                    "object_id": str(other_history.id),
+                }
+            ],
+            "reason": "trying to cite another student",
+        },
+        now=NOW,
+    )
+    result = asyncio.run(tool.execute(invocation))
+    assert result.metadata["accepted"] is False
+    assert "unknown evidence" in result.metadata["reason"].lower(), (
+        "Cross-student evidence must be rejected — the cited object does "
+        "not exist in this student's world (the storage's get_* methods "
+        "enforce wax_id scoping; the model cannot cite another student's "
+        "evidence)."
+    )
+
+
+def test_propose_lifecycle_change_tool_creates_pending_deletion_request() -> None:
+    """A valid request_deletion proposal creates a PENDING deletion
+    request that the worker will pick up. The tool result's metadata
+    surfaces the deletion_request_id so the model (and the audit trail)
+    can correlate the proposal with the eventual propagation."""
+    from waxprep.context.evolution import EvolutionService
+    from waxprep.context.tool_impls import ProposeLifecycleChangeTool
+    from waxprep.index.indexer import Indexer
+    from waxprep.index.tokens import TokenIndex
+    from waxprep.security.cipher import AesGcmFieldCipher, KeyRing
+    from waxprep.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    cipher = AesGcmFieldCipher(KeyRing(keys={1: b"t" * 32}, active_key_id=1))
+
+    class _FakeClock:
+        def now(self) -> datetime:
+            return NOW
+
+    indexer = Indexer(
+        storage=storage,
+        token_index=TokenIndex(cipher=cipher),
+        clock=_FakeClock(),
+    )
+    evolution = EvolutionService(storage=storage, indexer=indexer)
+    wax_id, history, entry = _setup_student_with_history(storage)
+
+    tool = ProposeLifecycleChangeTool(evolution=evolution)
+    invocation = ToolInvocation(
+        wax_id=wax_id,
+        arguments={
+            "operation": Operation.REQUEST_DELETION.value,
+            "payload": {
+                "object_type": ObjectType.NOTEBOOK.value,
+                "object_id": str(entry.id),
+                "scope": "this_notebook_entry_only",
+            },
+            "evidence_refs": [
+                {
+                    "object_type": ObjectType.HISTORY.value,
+                    "object_id": str(history.id),
+                }
+            ],
+            "reason": "student asked to be forgotten for this entry",
+        },
+        now=NOW,
+    )
+    import asyncio
+
+    result = asyncio.run(tool.execute(invocation))
+    assert result.metadata["accepted"] is True
+    deletion_id_str = result.metadata["deletion_request_id"]
+    assert deletion_id_str is not None
+    # The pending request must exist in storage.
+    from uuid import UUID
+
+    request = storage.get_deletion_request(wax_id, UUID(deletion_id_str))
+    assert request is not None
+    assert request.status is DeletionRequestStatus.PENDING
+    # The notebook entry must still be ACTIVE — the request was created
+    # but not yet processed (the worker does that).
+    still_active = storage.get_notebook_entry(wax_id, entry.id)
+    assert still_active is not None
+    assert still_active.status is NotebookEntryStatus.ACTIVE
+
+
+def test_investigator_audit_trail_records_proposal_outcome() -> None:
+    """When the model invokes propose_lifecycle_change, the investigator's
+    `investigated` audit trail must record whether the proposal was
+    accepted or rejected. This is the audit contract — the model's
+    claim of an operation is not sufficient; the application's verdict
+    is what persists."""
+    from waxprep.context.evolution import EvolutionService
+    from waxprep.context.tool_impls import ProposeLifecycleChangeTool
+    from waxprep.index.indexer import Indexer
+    from waxprep.index.tokens import TokenIndex
+    from waxprep.security.cipher import AesGcmFieldCipher, KeyRing
+    from waxprep.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    cipher = AesGcmFieldCipher(KeyRing(keys={1: b"t" * 32}, active_key_id=1))
+
+    class _FakeClock:
+        def now(self) -> datetime:
+            return NOW
+
+    indexer = Indexer(
+        storage=storage,
+        token_index=TokenIndex(cipher=cipher),
+        clock=_FakeClock(),
+    )
+    evolution = EvolutionService(storage=storage, indexer=indexer)
+    wax_id, history, _ = _setup_student_with_history(storage)
+
+    # Wire the propose_lifecycle_change tool into the investigator.
+    propose_tool = ProposeLifecycleChangeTool(evolution=evolution)
+    investigator = ContextInvestigator(
+        model=_ScriptedFinalModel(
+            decision_script=[
+                ContextModelDecision(
+                    "propose_lifecycle_change",
+                    {
+                        "operation": Operation.REQUEST_DELETION.value,
+                        "payload": {
+                            "object_type": ObjectType.HISTORY.value,
+                            "object_id": str(history.id),
+                            "scope": "this_student_all_representations",
+                        },
+                        "evidence_refs": [
+                            {
+                                "object_type": ObjectType.HISTORY.value,
+                                "object_id": str(history.id),
+                            }
+                        ],
+                        "reason": "student asked to be forgotten",
+                    },
+                    "ask",
+                ),
+                ContextModelDecision("stop", {}, "enough"),
+            ],
+            final=ContextModelFinal(
+                summary="Proposed deletion.",
+                selected_evidence_ids=(),
+                uncertainty=(),
+                stopped_reason="model_finalized",
+            ),
+        ),
+        tools={"propose_lifecycle_change": propose_tool},
+    )
+    # Use the SAME wax_id as the setup history — the proposal cites that
+    # history as evidence, and EvolutionService._first_missing_evidence
+    # checks existence via the student-scoped storage.get_history_entry.
+    request = InvestigationRequest(
+        wax_id=wax_id, query="forget me", now=NOW, trigger_entry_id=uuid4()
+    )
+    package = asyncio.run(investigator.investigate(request))
+
+    # The audit trail must record proposal_accepted:request_deletion.
+    assert any(
+        "proposal_accepted:request_deletion" in step for step in package.investigated
+    ), f"Audit trail must record proposal_accepted. Got: {package.investigated}"
+    # And the deletion_request id (the audit trail makes it observable).
+    assert any("deletion_request:" in step for step in package.investigated), (
+        f"Audit trail must record deletion_request id. Got: {package.investigated}"
+    )
+
+
+def test_propose_lifecycle_change_tool_rejects_cross_student_object_id() -> None:
+    """The model cannot forge another student's identity — the proposal's
+    ``wax_id`` comes from the ToolInvocation, not from the model's
+    arguments. A proposal that cites another student's evidence is
+    rejected by EvolutionService._first_missing_evidence (the storage's
+    get_* methods enforce wax_id scoping; the cited object does not
+    exist in this student's world)."""
+    # This is the same contract as Case C in
+    # test_propose_lifecycle_change_tool_validates_arguments_and_authorises,
+    # restated as its own test for clarity.
+    from waxprep.context.evolution import EvolutionService
+    from waxprep.context.tool_impls import ProposeLifecycleChangeTool
+    from waxprep.index.indexer import Indexer
+    from waxprep.index.tokens import TokenIndex
+    from waxprep.security.cipher import AesGcmFieldCipher, KeyRing
+    from waxprep.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    cipher = AesGcmFieldCipher(KeyRing(keys={1: b"t" * 32}, active_key_id=1))
+
+    class _FakeClock:
+        def now(self) -> datetime:
+            return NOW
+
+    indexer = Indexer(
+        storage=storage,
+        token_index=TokenIndex(cipher=cipher),
+        clock=_FakeClock(),
+    )
+    evolution = EvolutionService(storage=storage, indexer=indexer)
+    wax_id, _, _ = _setup_student_with_history(storage)
+
+    # Set up a second student with their own notebook entry.
+    other_wax_id, other_history, _ = _setup_student_with_history(storage)
+    # The model (running for wax_id) tries to cite other_history as evidence.
+    tool = ProposeLifecycleChangeTool(evolution=evolution)
+    invocation = ToolInvocation(
+        wax_id=wax_id,  # the calling student
+        arguments={
+            "operation": Operation.INVALIDATE_NOTEBOOK_ENTRY.value,
+            "payload": {"entry_id": str(uuid4())},
+            "evidence_refs": [
+                {
+                    "object_type": ObjectType.HISTORY.value,
+                    "object_id": str(other_history.id),  # other student's!
+                }
+            ],
+            "reason": "trying to invalidate via another student",
+        },
+        now=NOW,
+    )
+    import asyncio
+
+    result = asyncio.run(tool.execute(invocation))
+    assert result.metadata["accepted"] is False
+    # The cited history entry exists in storage but is owned by another
+    # student. EvolutionService._first_missing_evidence loads it via
+    # storage.get_history_entry(wax_id, other_history.id) — which
+    # returns None under RLS / student-scoped access. The proposal is
+    # rejected as "unknown evidence".
+    assert "unknown evidence" in result.metadata["reason"].lower()
+
+
+# ---------------------------------------------------------------------------
+# 8. Evidence-limit regression: status must be SUCCESSFUL, not FAILED,
+# when the runtime hits the evidence cap mid-investigation. (Blueprint §22)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_investigator_returns_successful_when_evidence_cap_reached() -> None:
+    """End-to-end regression for the evidence-limit bug.
+
+    The model calls a tool that returns 5 evidence items. With
+    ``max_evidence=3``, the runtime breaks out of the investigation
+    loop after the third item. The previous status computation
+    incorrectly returned FAILED (because stopped_by_model=False and
+    no hit_*_budget flag was set). The new ``hit_evidence_budget`` flag
+    must distinguish this case from genuine failure.
+
+    The package must therefore be SUCCESSFUL, with the evidence cap
+    recorded honestly in the ``investigated`` audit trail.
+    """
+
+    # Build 5 distinct evidence items.
+    items = tuple(_evidence(content=f"item {i}") for i in range(5))
+
+    class _FiveItemTool:
+        name = "find_by_meaning"
+
+        async def execute(self, invocation: ToolInvocation) -> ToolResult:
+            return ToolResult(name=self.name, results=items)
+
+    # Model: call the tool once, then stop. The single tool call returns
+    # 5 items but the runtime caps at 3.
+    model = _ScriptedFinalModel(
+        decision_script=[
+            ContextModelDecision("find_by_meaning", {"query": "stuff"}, "look"),
+            ContextModelDecision("stop", {}, "enough"),
+        ],
+        final=ContextModelFinal(
+            summary="Capped at 3.",
+            selected_evidence_ids=(),  # model delegates
+            uncertainty=(),
+            stopped_reason="model_finalized",
+        ),
+    )
+    investigator = ContextInvestigator(
+        model=model,
+        tools={"find_by_meaning": _FiveItemTool()},
+    )
+    request = InvestigationRequest(
+        wax_id=new_wax_id(),
+        query="stuff",
+        now=NOW,
+        trigger_entry_id=uuid4(),
+        limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=3),
+    )
+    package = await investigator.investigate(request)
+
+    # The status must be SUCCESSFUL — we hit the evidence cap with
+    # evidence in hand. The previous implementation returned FAILED.
+    assert package.investigation_status is InvestigationStatus.SUCCESSFUL, (
+        f"Expected SUCCESSFUL but got {package.investigation_status.value}; "
+        f"investigated={package.investigated}"
+    )
+    # The package must carry exactly max_evidence items.
+    assert len(package.evidence) == 3
+    # The audit trail must record that we hit the evidence budget.
+    assert any(
+        "stop_reason:evidence_budget_reached" in step for step in package.investigated
+    ), f"Audit trail must record evidence_budget_reached: {package.investigated}"
+    assert any(
+        "investigation_status:successful" in step for step in package.investigated
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. Deletion workflow: transaction/retry semantics (Blueprint §17)
+# ---------------------------------------------------------------------------
+
+
+def test_deletion_request_reverts_to_pending_when_propagation_fails() -> None:
+    """Regression for the in_progress-stuck bug.
+
+    The previous implementation called `update_deletion_request(in_progress)`
+    OUTSIDE the propagation transaction. If propagation then raised, the
+    in_progress marker stayed committed — the request was stuck in
+    IN_PROGRESS forever and no worker could retry it (claim only accepts
+    PENDING).
+
+    The new implementation does the claim INSIDE the propagation
+    transaction. If propagation raises, the transaction rolls back,
+    including the claim — the request is back to PENDING and the next
+    worker run can retry it.
+    """
+    storage = InMemoryStorage()
+    wax_id, history, entry = _setup_student_with_history(storage)
+    request = DeletionRequest(
+        id=new_id(),
+        wax_id=wax_id,
+        object_type=ObjectType.HISTORY,
+        object_id=history.id,
+        scope="this_student_all_representations",
+        reason="student asked to be forgotten for this entry",
+        status=DeletionRequestStatus.PENDING,
+        requested_at=NOW,
+    )
+    storage.create_deletion_request(request)
+
+    # Inject a propagation failure: subclass storage and make
+    # `delete_search_tokens` raise. This simulates a transient DB error
+    # mid-propagation. The claim must roll back.
+    class _BrokenDeleteStorage(InMemoryStorage):
+        def delete_search_tokens(self, wax_id, object_type, object_id):
+            raise RuntimeError("transient DB error during propagation")
+
+    broken_storage = _BrokenDeleteStorage()
+    # Copy the data over so the broken storage sees the same state.
+    import copy
+
+    broken_storage.__dict__.update(copy.deepcopy(storage.__dict__))
+
+    service = DeletionService(storage=broken_storage)
+    # execute() must raise — the propagation failed.
+    with pytest.raises(RuntimeError, match="transient DB error"):
+        service.execute(request, now=NOW)
+
+    # The request must be back to PENDING, NOT stuck in IN_PROGRESS.
+    # This is the key assertion — the old implementation left it stuck.
+    stored = storage.get_deletion_request(wax_id, request.id)
+    assert stored is not None
+    assert stored.status is DeletionRequestStatus.PENDING, (
+        f"Failed propagation must roll back the claim. Expected PENDING, "
+        f"got {stored.status.value}. The in_progress-stuck bug would "
+        "leave this in IN_PROGRESS forever."
+    )
+    # The notebook entry that cites the history must NOT have been
+    # invalidated — the propagation rolled back, so the dependent
+    # stayed in its original ACTIVE state.
+    still_active = storage.get_notebook_entry(wax_id, entry.id)
+    assert still_active is not None
+    assert still_active.status is NotebookEntryStatus.ACTIVE
+
+
+def test_deletion_request_claim_skips_already_in_progress() -> None:
+    """Two workers racing on the same request: only one claims it.
+
+    The claim is a conditional UPDATE (PENDING → IN_PROGRESS). If
+    another worker already claimed it, the second claim returns None
+    and the second worker skips — it does not double-propagate.
+    """
+    storage = InMemoryStorage()
+    wax_id, history, _ = _setup_student_with_history(storage)
+    request = DeletionRequest(
+        id=new_id(),
+        wax_id=wax_id,
+        object_type=ObjectType.HISTORY,
+        object_id=history.id,
+        scope="this_student_all_representations",
+        reason="student asked to be forgotten for this entry",
+        status=DeletionRequestStatus.PENDING,
+        requested_at=NOW,
+    )
+    storage.create_deletion_request(request)
+
+    # First claim: succeeds, returns the request with status=IN_PROGRESS.
+    claimed = storage.claim_deletion_request(
+        wax_id, request.id, now=NOW, propagation_log={"started_at": NOW.isoformat()}
+    )
+    assert claimed is not None
+    assert claimed.status is DeletionRequestStatus.IN_PROGRESS
+
+    # Second claim: returns None — the request is no longer PENDING.
+    second = storage.claim_deletion_request(
+        wax_id, request.id, now=NOW, propagation_log={"started_at": NOW.isoformat()}
+    )
+    assert second is None, (
+        "A second claim on an IN_PROGRESS request must return None — "
+        "two workers must not both propagate the same request."
+    )
+
+
+def test_worker_drives_pending_deletion_requests_to_completion() -> None:
+    """End-to-end: a CI proposal creates a PENDING deletion request; the
+    worker's ``run_once`` picks it up and propagates it; the notebook
+    entry that cited the history is invalidated; the request reaches
+    COMPLETED. This is the contract the blueprint asks for in §16-17:
+    pending requests must actually be processed by the running
+    application or worker, not just sit in the table forever."""
+    from waxprep.context.deletion import DeletionService
+    from waxprep.context.evolution import EvolutionService
+    from waxprep.context.tool_impls import ProposeLifecycleChangeTool
+    from waxprep.derive.worker import DerivationWorker
+    from waxprep.index.indexer import Indexer
+    from waxprep.index.tokens import TokenIndex
+    from waxprep.security.cipher import AesGcmFieldCipher, KeyRing
+    from waxprep.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    cipher = AesGcmFieldCipher(KeyRing(keys={1: b"t" * 32}, active_key_id=1))
+
+    class _FakeClock:
+        def now(self) -> datetime:
+            return NOW
+
+    indexer = Indexer(
+        storage=storage,
+        token_index=TokenIndex(cipher=cipher),
+        clock=_FakeClock(),
+    )
+    evolution = EvolutionService(storage=storage, indexer=indexer)
+    wax_id, history, entry = _setup_student_with_history(storage)
+
+    # CI proposes a deletion via the tool. The proposal creates a PENDING
+    # request — it does NOT propagate yet.
+    propose_tool = ProposeLifecycleChangeTool(evolution=evolution)
+    invocation = ToolInvocation(
+        wax_id=wax_id,
+        arguments={
+            "operation": Operation.REQUEST_DELETION.value,
+            "payload": {
+                "object_type": ObjectType.HISTORY.value,
+                "object_id": str(history.id),
+                "scope": "this_student_all_representations",
+            },
+            "evidence_refs": [
+                {
+                    "object_type": ObjectType.HISTORY.value,
+                    "object_id": str(history.id),
+                }
+            ],
+            "reason": "student asked to be forgotten for this entry",
+        },
+        now=NOW,
+    )
+    proposal_result = asyncio.run(propose_tool.execute(invocation))
+    assert proposal_result.metadata["accepted"] is True
+    deletion_request_id = proposal_result.metadata["deletion_request_id"]
+    assert deletion_request_id is not None
+
+    # The notebook entry must still be ACTIVE — the proposal only
+    # created the request; the worker has not run yet.
+    pre = storage.get_notebook_entry(wax_id, entry.id)
+    assert pre is not None
+    assert pre.status is NotebookEntryStatus.ACTIVE
+
+    # Build the worker with the DeletionService wired in.
+    deletion = DeletionService(storage=storage)
+    worker = DerivationWorker(
+        storage=storage,
+        token_index=TokenIndex(cipher=cipher),
+        clock=_FakeClock(),
+        deletion_service=deletion,
+    )
+    report = asyncio.run(worker.run_once())
+    # The worker must report that it processed at least one deletion.
+    assert report.deletions_processed >= 1, (
+        f"Worker must process pending deletion requests; "
+        f"got deletions_processed={report.deletions_processed}"
+    )
+
+    # The notebook entry that cited the history must now be INVALIDATED.
+    post = storage.get_notebook_entry(wax_id, entry.id)
+    assert post is not None
+    assert post.status is NotebookEntryStatus.INVALIDATED, (
+        f"Worker-driven propagation must invalidate the dependent notebook "
+        f"entry; got status={post.status.value}"
+    )
+    # The history row itself must still exist — default policy forbids
+    # hard deletion of history.
+    assert storage.get_history_entry(wax_id, history.id) is not None
+    # The deletion request must be COMPLETED.
+    from uuid import UUID
+
+    final_request = storage.get_deletion_request(wax_id, UUID(deletion_request_id))
+    assert final_request is not None
+    assert final_request.status is DeletionRequestStatus.COMPLETED

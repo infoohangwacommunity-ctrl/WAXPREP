@@ -57,6 +57,12 @@ class SchedulerReport:
     jobs_failed: int
     jobs_skipped: int
     duration_seconds: float
+    # Deletion workflow: counts from the worker's deletion-request
+    # drain. Distinct from jobs_* because deletion requests live in
+    # their own table and are claimed via a separate primitive.
+    deletions_processed: int = 0
+    deletions_skipped: int = 0
+    deletions_failed: int = 0
 
 
 def build_worker_services(
@@ -107,6 +113,9 @@ async def run_once(services: WaxPrepServices) -> SchedulerReport:
 
     Safe to run concurrently across multiple processes — PostgreSQL's
     FOR UPDATE SKIP LOCKED guarantees no two workers claim the same job.
+    Deletion requests are claimed atomically via a conditional UPDATE
+    inside the deletion service's transaction, so two workers cannot
+    double-propagate the same request either.
     """
     start = time.time()
     worker = services.worker
@@ -119,6 +128,9 @@ async def run_once(services: WaxPrepServices) -> SchedulerReport:
         jobs_failed=report.failed,
         jobs_skipped=report.skipped,
         duration_seconds=time.time() - start,
+        deletions_processed=report.deletions_processed,
+        deletions_skipped=report.deletions_skipped,
+        deletions_failed=report.deletions_failed,
     )
 
 
@@ -145,11 +157,16 @@ def run_interval(
     while max_iterations is None or iteration < max_iterations:
         report = run_once_sync(services)
         logger.info(
-            "scheduler run: done=%d retrying=%d failed=%d skipped=%d (%.2fs)",
+            "scheduler run: done=%d retrying=%d failed=%d skipped=%d "
+            "deletions_processed=%d deletions_skipped=%d deletions_failed=%d "
+            "(%.2fs)",
             report.jobs_done,
             report.jobs_retrying,
             report.jobs_failed,
             report.jobs_skipped,
+            report.deletions_processed,
+            report.deletions_skipped,
+            report.deletions_failed,
             report.duration_seconds,
         )
         iteration += 1
@@ -191,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"done={report.jobs_done} retrying={report.jobs_retrying} "
                 f"failed={report.jobs_failed} skipped={report.jobs_skipped} "
+                f"deletions_processed={report.deletions_processed} "
+                f"deletions_skipped={report.deletions_skipped} "
+                f"deletions_failed={report.deletions_failed} "
                 f"({report.duration_seconds:.2f}s)"
             )
             return 0
