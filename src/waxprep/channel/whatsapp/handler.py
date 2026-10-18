@@ -244,9 +244,7 @@ class WhatsAppInboundHandler:
             CONTENT_KIND_INTERACTIVE_LIST,
         ):
             button_id = str(
-                msg.structured.get("button_id")
-                or msg.structured.get("row_id")
-                or ""
+                msg.structured.get("button_id") or msg.structured.get("row_id") or ""
             )
             if button_id:
                 offer = self._storage.find_interactive_offer_by_button_id(

@@ -163,9 +163,7 @@ class ModelTeacherCiFirst:
         body, _, trailer = raw.partition(_CHOICES_MARKER)
         body = body.rstrip()
         titles = [
-            line.strip()[:20]
-            for line in trailer.strip().splitlines()
-            if line.strip()
+            line.strip()[:20] for line in trailer.strip().splitlines() if line.strip()
         ][:3]
         if not titles or not body:
             return raw.replace(_CHOICES_MARKER, "").strip() or raw, None
