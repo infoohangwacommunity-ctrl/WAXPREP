@@ -57,6 +57,7 @@ from waxprep.domain.models import (
     AuthorKind,
     DerivationJob,
     HistoryEntry,
+    InvestigationRecord,
     OutboundDelivery,
     OutboundStatus,
     new_id,
@@ -219,6 +220,22 @@ class TurnServiceCiFirst:
             ci_request
         )
 
+        # Persist the investigation audit row. In CI-first mode this is
+        # the *only* audit trail for what CI did and what package it
+        # produced. The audit row carries the closed-vocabulary
+        # investigation_status and the invalid_selection flag so an
+        # operator can distinguish a successful investigation from one
+        # that hit a budget, had tools fail, or returned an invalid
+        # evidence selection. The audit row is best-effort: a failure to
+        # write it must not crash the turn (the student still gets an
+        # answer), but it is logged loudly.
+        self._record_investigation_audit(
+            wax_id=wax_id,
+            student_entry=student_entry,
+            package=context_package,
+            now=now,
+        )
+
         # 4. Teacher receives student message + ContextPackage, produces final response.
         logger.info(
             "ci_investigation_complete",
@@ -234,6 +251,8 @@ class TurnServiceCiFirst:
                 "uncertainty_count": len(context_package.uncertainty)
                 if context_package and context_package.uncertainty
                 else 0,
+                "investigation_status": context_package.investigation_status.value,
+                "invalid_selection": context_package.invalid_selection,
             },
         )
         teacher_input = TeacherInputCiFirst(
@@ -277,9 +296,7 @@ class TurnServiceCiFirst:
         with self._storage.transaction():
             # Idempotent: a concurrent recovery path may have already saved
             # the tutor reply for this student entry.
-            existing_tutor = self._storage.find_tutor_reply_to(
-                wax_id, student_entry.id
-            )
+            existing_tutor = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
             if existing_tutor is not None:
                 tutor_entry = existing_tutor
             else:
@@ -383,6 +400,63 @@ class TurnServiceCiFirst:
                 "the teacher's final reply contains no usable text"
             )
         return reply_text
+
+    def _record_investigation_audit(
+        self,
+        *,
+        wax_id: WaxId,
+        student_entry: HistoryEntry,
+        package: ContextPackage,
+        now: datetime,
+    ) -> None:
+        """Persist one Context Intelligence audit row in CI-first mode.
+
+        The audit row records the trigger entry, the input text, the
+        investigation status, the package's contents, and any
+        invalid-selection flag. It is best-effort: a failure to write the
+        audit row must not prevent the student from getting an answer.
+        The failure is logged so an operator can investigate.
+
+        The row carries no plaintext student content beyond the input
+        text the student themselves produced (``package.query``) — the
+        evidence ids are references, not content. The summary and
+        uncertainty are CI's own synthesis and are useful for
+        debugging. The encryption-at-rest applied by the storage layer
+        covers any sensitive fields.
+        """
+        try:
+            self._storage.record_investigation(
+                InvestigationRecord(
+                    id=new_id(),
+                    wax_id=wax_id,
+                    trigger_entry_id=student_entry.id,
+                    input_text=package.query,
+                    result={
+                        "investigation_status": package.investigation_status.value,
+                        "summary": package.summary,
+                        "evidence_ids": [str(e.id) for e in package.evidence],
+                        "evidence_types": [
+                            e.evidence_type.value for e in package.evidence
+                        ],
+                        "uncertainty": list(package.uncertainty),
+                        "investigated": list(package.investigated),
+                        "stopped_reason": package.stopped_reason,
+                        "invalid_selection": package.invalid_selection,
+                        "context_model": self._context_model_name,
+                    },
+                    model=self._context_model_name,
+                    created_at=now,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "could not record CI investigation audit",
+                extra={
+                    "wax_id": str(wax_id),
+                    "student_entry_id": str(student_entry.id),
+                    "investigation_status": package.investigation_status.value,
+                },
+            )
 
 
 __all__ = ["TurnResultCiFirst", "TurnServiceCiFirst"]

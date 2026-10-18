@@ -57,13 +57,46 @@ INDEXED_OBJECT_TYPES: frozenset[ObjectType] = frozenset(
 
 
 class NotebookEntryStatus(StrEnum):
+    """Lifecycle state of a notebook entry.
+
+    Supersession and invalidation are *different operations*:
+    - ``SUPERSEDED``: a newer entry replaced this one. The old one stays for audit.
+    - ``INVALIDATED``: this entry is no longer trustworthy. It stays for audit
+      but is excluded from ordinary retrieval. Nothing has replaced it (yet).
+    """
+
     ACTIVE = "active"
     SUPERSEDED = "superseded"
+    INVALIDATED = "invalidated"
 
 
 class SummaryStatus(StrEnum):
+    """Lifecycle state of a summary.
+
+    Mirrors ``NotebookEntryStatus``: supersession records a replacement,
+    invalidation records "no longer trustworthy" without a replacement.
+    """
+
     ACTIVE = "active"
     SUPERSEDED = "superseded"
+    INVALIDATED = "invalidated"
+
+
+class DeletionRequestStatus(StrEnum):
+    """Lifecycle state of a deletion request.
+
+    Deletion is *not* supersession. It routes through a separate workflow
+    that respects retention policy and propagates through every dependent
+    representation (notebook rows, summaries, edges, tokens, embeddings,
+    caches). A request sits in ``pending`` until the workflow picks it up;
+    ``completed`` means the propagation finished; ``rejected`` means
+    retention policy forbade it.
+    """
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
 
 
 class JobStatus(StrEnum):
@@ -331,6 +364,38 @@ class InvestigationRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class DeletionRequest:
+    """A request to delete a stored object, owned by a separate workflow.
+
+    The request is created by Context Intelligence (or any upstream
+    component) when a student asks for something to be deleted. It is *not*
+    a deletion itself — the actual retention-aware deletion happens in a
+    separate workflow that picks up the request, validates scope against
+    retention policy, and propagates the deletion through every dependent
+    representation (notebook rows, summaries, edges, search tokens,
+    embeddings, caches). The proposal exists to make the request auditable
+    and recoverable; the workflow exists to enforce policy.
+
+    History is never deleted by this mechanism — it is append-only. If
+    a retention policy requires history to be removed, that is a separate,
+    explicit operation that this workflow may or may not invoke.
+    """
+
+    id: UUID
+    wax_id: WaxId
+    object_type: ObjectType
+    object_id: UUID
+    scope: str
+    reason: str | None
+    status: DeletionRequestStatus
+    requested_at: datetime
+    completed_at: datetime | None = None
+    propagation_log: dict[str, Any] = field(
+        default_factory=lambda: cast(dict[str, Any], {})
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class Workspace:
     """Durable educational storage area belonging to one WAX ID."""
 
@@ -409,6 +474,8 @@ __all__ = [
     "Attachment",
     "AuthorKind",
     "ChannelIdentity",
+    "DeletionRequest",
+    "DeletionRequestStatus",
     "DerivationJob",
     "EmbeddingRecord",
     "Event",

@@ -16,10 +16,20 @@ from waxprep.domain.identifiers import WaxId
 
 
 class KnowledgeNodeStatus(StrEnum):
+    """Lifecycle state of a knowledge node.
+
+    Adds ``INVALIDATED`` to the existing vocabulary. Invalidation is
+    distinct from supersession (a new node replaced it) and from deletion
+    (the node must no longer be retained): an invalidated node is no
+    longer trustworthy, stays reachable for audit, and is excluded from
+    ordinary retrieval.
+    """
+
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     DORMANT = "dormant"
     DELETED = "deleted"
+    INVALIDATED = "invalidated"
 
 
 @dataclass(frozen=True, slots=True)

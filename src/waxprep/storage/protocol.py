@@ -21,6 +21,7 @@ from waxprep.domain.models import (
     ArtifactVersion,
     Attachment,
     ChannelIdentity,
+    DeletionRequest,
     DerivationJob,
     EmbeddingRecord,
     Event,
@@ -203,6 +204,28 @@ class Storage(Protocol):
 
     def put_embedding(self, record: EmbeddingRecord) -> None: ...
 
+    def delete_search_tokens(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> int:
+        """Drop all search-token rows for one object.
+
+        Used by invalidation and deletion propagation. Returns the number
+        of token rows dropped. Tokens are an index — removing them changes
+        findability, not the underlying record.
+        """
+        ...
+
+    def delete_embeddings(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> int:
+        """Drop all embedding rows for one object.
+
+        Used by invalidation and deletion propagation. Returns the number
+        of embedding rows dropped. Embeddings are an index — removing them
+        changes findability by meaning, not the underlying record.
+        """
+        ...
+
     def list_embeddings(
         self,
         wax_id: WaxId,
@@ -253,6 +276,18 @@ class Storage(Protocol):
         self, wax_id: WaxId, old_id: UUID, new_id: UUID, now: datetime
     ) -> NotebookEntry: ...
 
+    def invalidate_notebook_entry(
+        self, wax_id: WaxId, entry_id: UUID, *, now: datetime, reason: str
+    ) -> NotebookEntry:
+        """Mark a notebook entry as no longer trustworthy.
+
+        Distinct from supersession: nothing replaces it. The entry stays
+        for audit; ordinary retrieval should exclude it. The caller is
+        responsible for also dropping the entry from search tokens and
+        embeddings (see ``delete_search_tokens`` and ``delete_embeddings``).
+        """
+        ...
+
     # --- summaries --------------------------------------------------------
     def add_summary(self, summary: Summary) -> Summary: ...
 
@@ -265,6 +300,17 @@ class Storage(Protocol):
     def supersede_summary(
         self, wax_id: WaxId, summary_id: UUID, now: datetime
     ) -> Summary: ...
+
+    def invalidate_summary(
+        self, wax_id: WaxId, summary_id: UUID, *, now: datetime, reason: str
+    ) -> Summary:
+        """Mark a summary as no longer trustworthy.
+
+        Distinct from supersession: nothing replaces it. The summary stays
+        for audit; ordinary retrieval should exclude it. Caller must also
+        drop the summary from search tokens and embeddings.
+        """
+        ...
 
     # --- provenance ---------------------------------------------------------
     def add_provenance_links(self, links: tuple[ProvenanceLink, ...]) -> None: ...
@@ -289,6 +335,17 @@ class Storage(Protocol):
     def list_edges(
         self, wax_id: WaxId, node_id: UUID, *, direction: str, limit: int
     ) -> tuple[KnowledgeEdge, ...]: ...
+
+    def invalidate_node(
+        self, wax_id: WaxId, node_id: UUID, *, now: datetime, reason: str
+    ) -> KnowledgeNode:
+        """Mark a knowledge node as no longer trustworthy.
+
+        Distinct from supersession: nothing replaces it. The node stays
+        for audit; ordinary retrieval should exclude it. Caller must also
+        drop the node from search tokens and embeddings.
+        """
+        ...
 
     # --- workspace and artifacts ------------------------------------------------
     def get_or_create_workspace(self, wax_id: WaxId, now: datetime) -> Workspace: ...
@@ -428,6 +485,30 @@ class Storage(Protocol):
     def append_event(self, event: Event) -> Event: ...
 
     def list_events(self, wax_id: WaxId) -> tuple[Event, ...]: ...
+
+    # --- deletion requests (Blueprint Part IV §16-17) -------------------------------
+    # Deletion is *not* supersession. It routes through a separate workflow
+    # that respects retention policy and propagates through every dependent
+    # representation. These methods let the workflow pick up requests, mark
+    # progress, and record the propagation log. Retention policy is enforced
+    # downstream — the storage layer only persists the request and the log
+    # of what was propagated.
+    def create_deletion_request(self, request: DeletionRequest) -> DeletionRequest: ...
+
+    def get_deletion_request(
+        self, wax_id: WaxId, request_id: UUID
+    ) -> DeletionRequest | None: ...
+
+    def list_deletion_requests(
+        self, wax_id: WaxId, *, status: str | None = None, limit: int = 50
+    ) -> tuple[DeletionRequest, ...]: ...
+
+    def update_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
+        """Atomically update the status, completed_at, and propagation_log
+        of a deletion request. Caller must supply the full new state;
+        optimistic concurrency is the caller's responsibility (the storage
+        layer writes what it is given)."""
+        ...
 
 
 __all__ = ["Storage", "TokenMatch", "TokenStats"]

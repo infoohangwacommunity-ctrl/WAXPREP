@@ -21,6 +21,8 @@ from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     ArtifactReference,
     AuthorKind,
+    DeletionRequest,
+    DeletionRequestStatus,
     NotebookEntry,
     ObjectType,
     ProvenanceLink,
@@ -62,6 +64,15 @@ def _uuid(value: object) -> UUID | None:
 
 @dataclass(frozen=True, slots=True)
 class EvolutionResult:
+    """Result of applying one CI proposal.
+
+    The fields cover the existing create/supersede/attach/link operations
+    and the new lifecycle operations (Blueprint Part IV). The
+    ``invalidated_ids`` list captures the full propagation set when an
+    invalidation cascades through derived dependents; the
+    ``deletion_request_id`` is set when a deletion request is created.
+    """
+
     accepted: bool
     reason: str
     proposal: Proposal
@@ -71,6 +82,11 @@ class EvolutionResult:
     created_notebook_entry_id: UUID | None = None
     created_summary_id: UUID | None = None
     links_added: int = 0
+    # Blueprint Part IV lifecycle:
+    invalidated_ids: tuple[tuple[ObjectType, UUID], ...] = ()
+    tokens_dropped: int = 0
+    embeddings_dropped: int = 0
+    deletion_request_id: UUID | None = None
 
 
 @dataclass
@@ -97,6 +113,12 @@ class EvolutionService:
             Operation.SUPERSEDE_NOTEBOOK_ENTRY.value: self._supersede_notebook_entry,
             Operation.SUPERSEDE_SUMMARY.value: self._supersede_summary,
             Operation.LINK_ARTIFACT.value: self._link_artifact,
+            # Blueprint Part IV lifecycle operations:
+            Operation.INVALIDATE_NOTEBOOK_ENTRY.value: self._invalidate_notebook,
+            Operation.INVALIDATE_NODE.value: self._invalidate_node_handler,
+            Operation.INVALIDATE_SUMMARY.value: self._invalidate_summary_handler,
+            Operation.REBUILD_INDEX.value: self._rebuild_index_handler,
+            Operation.REQUEST_DELETION.value: self._request_deletion_handler,
         }
         # Spec section 9: derived-object + provenance + index writes
         # must be atomic. A process crash between the derived-object save
@@ -446,3 +468,299 @@ class EvolutionService:
             )
         )
         return EvolutionResult(True, "artifact linked", proposal)
+
+    # --- lifecycle operations (Blueprint Part IV §13-17) -------------------------
+    # Invalidation, rebuilding, and deletion requests. Supersession is
+    # already handled by the existing handlers above; these are the *new*
+    # vocabulary the blueprint requires.
+    def _invalidate_notebook(
+        self, proposal: Proposal, now: datetime
+    ) -> EvolutionResult:
+        entry_id = _uuid(proposal.payload["entry_id"])
+        if entry_id is None:
+            return EvolutionResult(False, "invalid entry_id", proposal)
+        old = self.storage.get_notebook_entry(proposal.wax_id, entry_id)
+        if old is None:
+            return EvolutionResult(False, "unknown notebook entry", proposal)
+        # Mark the entry invalid. The status enum now distinguishes
+        # invalidation (no longer trustworthy) from supersession (replaced).
+        self.storage.invalidate_notebook_entry(
+            proposal.wax_id,
+            entry_id,
+            now=now,
+            reason=proposal.reason or "invalidated by CI proposal",
+        )
+        # Drop the entry from the search indexes so retrieval no longer
+        # surfaces it. The entry itself stays for audit.
+        tokens_dropped = self.storage.delete_search_tokens(
+            proposal.wax_id, ObjectType.NOTEBOOK, entry_id
+        )
+        embeddings_dropped = self.storage.delete_embeddings(
+            proposal.wax_id, ObjectType.NOTEBOOK, entry_id
+        )
+        # Propagate to derived dependents — anything that cites this entry
+        # as evidence is no longer trustworthy either. The cascade is
+        # bounded by provenance depth (see _MAX_PROVENANCE_DEPTH).
+        invalidated = self._propagate_invalidation(
+            proposal.wax_id, ObjectType.NOTEBOOK, entry_id, now
+        )
+        return EvolutionResult(
+            True,
+            "notebook entry invalidated; search indexes dropped; dependents propagated",
+            proposal,
+            superseded_id=entry_id,
+            invalidated_ids=((ObjectType.NOTEBOOK, entry_id), *invalidated),
+            tokens_dropped=tokens_dropped,
+            embeddings_dropped=embeddings_dropped,
+        )
+
+    def _invalidate_node_handler(
+        self, proposal: Proposal, now: datetime
+    ) -> EvolutionResult:
+        node_id = _uuid(proposal.payload["node_id"])
+        if node_id is None:
+            return EvolutionResult(False, "invalid node_id", proposal)
+        if self.storage.get_node(proposal.wax_id, node_id) is None:
+            return EvolutionResult(False, "unknown knowledge node", proposal)
+        self.storage.invalidate_node(
+            proposal.wax_id,
+            node_id,
+            now=now,
+            reason=proposal.reason or "invalidated by CI proposal",
+        )
+        tokens_dropped = self.storage.delete_search_tokens(
+            proposal.wax_id, ObjectType.KNOWLEDGE_NODE, node_id
+        )
+        embeddings_dropped = self.storage.delete_embeddings(
+            proposal.wax_id, ObjectType.KNOWLEDGE_NODE, node_id
+        )
+        invalidated = self._propagate_invalidation(
+            proposal.wax_id, ObjectType.KNOWLEDGE_NODE, node_id, now
+        )
+        return EvolutionResult(
+            True,
+            "knowledge node invalidated; search indexes dropped; dependents propagated",
+            proposal,
+            invalidated_ids=(
+                (ObjectType.KNOWLEDGE_NODE, node_id),
+                *invalidated,
+            ),
+            tokens_dropped=tokens_dropped,
+            embeddings_dropped=embeddings_dropped,
+        )
+
+    def _invalidate_summary_handler(
+        self, proposal: Proposal, now: datetime
+    ) -> EvolutionResult:
+        summary_id = _uuid(proposal.payload["summary_id"])
+        if summary_id is None:
+            return EvolutionResult(False, "invalid summary_id", proposal)
+        if self.storage.get_summary(proposal.wax_id, summary_id) is None:
+            return EvolutionResult(False, "unknown summary", proposal)
+        self.storage.invalidate_summary(
+            proposal.wax_id,
+            summary_id,
+            now=now,
+            reason=proposal.reason or "invalidated by CI proposal",
+        )
+        tokens_dropped = self.storage.delete_search_tokens(
+            proposal.wax_id, ObjectType.SUMMARY, summary_id
+        )
+        embeddings_dropped = self.storage.delete_embeddings(
+            proposal.wax_id, ObjectType.SUMMARY, summary_id
+        )
+        invalidated = self._propagate_invalidation(
+            proposal.wax_id, ObjectType.SUMMARY, summary_id, now
+        )
+        return EvolutionResult(
+            True,
+            "summary invalidated; search indexes dropped; dependents propagated",
+            proposal,
+            invalidated_ids=((ObjectType.SUMMARY, summary_id), *invalidated),
+            tokens_dropped=tokens_dropped,
+            embeddings_dropped=embeddings_dropped,
+        )
+
+    def _propagate_invalidation(
+        self,
+        wax_id: WaxId,
+        derived_type: ObjectType,
+        derived_id: UUID,
+        now: datetime,
+        *,
+        _seen: set[tuple[ObjectType, UUID]] | None = None,
+        _depth: int = 0,
+    ) -> tuple[tuple[ObjectType, UUID], ...]:
+        """Find every derived object that cites the target as evidence and
+        invalidate it too. Bounded by depth and cycle-protected via _seen.
+
+        This is the propagation the blueprint requires: invalidation must
+        not leave dependents pointing at a no-longer-trustworthy source
+        as if it were still trustworthy.
+        """
+        if _depth > _MAX_PROVENANCE_DEPTH:
+            return ()
+        seen = _seen or set()
+        key = (derived_type, derived_id)
+        if key in seen:
+            return ()
+        seen.add(key)
+        # ``list_derived_from`` returns provenance links whose source is
+        # (derived_type, derived_id). Each such link's (derived_type,
+        # derived_id) is something that cites our target as evidence —
+        # a dependent.
+        links = self.storage.list_derived_from(wax_id, derived_type, derived_id)
+        out: list[tuple[ObjectType, UUID]] = []
+        for link in links:
+            dep_key = (link.derived_type, link.derived_id)
+            if dep_key in seen:
+                continue
+            # Invalidate the dependent in the same transaction.
+            self._invalidate_one(wax_id, link.derived_type, link.derived_id, now)
+            self.storage.delete_search_tokens(
+                wax_id, link.derived_type, link.derived_id
+            )
+            self.storage.delete_embeddings(wax_id, link.derived_type, link.derived_id)
+            out.append(dep_key)
+            # Recurse — the dependent may itself be cited by something else.
+            out.extend(
+                self._propagate_invalidation(
+                    wax_id,
+                    link.derived_type,
+                    link.derived_id,
+                    now,
+                    _seen=seen,
+                    _depth=_depth + 1,
+                )
+            )
+        return tuple(out)
+
+    def _invalidate_one(
+        self,
+        wax_id: WaxId,
+        object_type: ObjectType,
+        object_id: UUID,
+        now: datetime,
+    ) -> None:
+        """Mark a single object invalidated regardless of type. No-op on
+        unknown objects (so a missing dependent does not abort propagation)."""
+        if object_type is ObjectType.NOTEBOOK:
+            entry = self.storage.get_notebook_entry(wax_id, object_id)
+            if entry is not None and entry.status.value == "active":
+                self.storage.invalidate_notebook_entry(
+                    wax_id,
+                    object_id,
+                    now=now,
+                    reason="dependent of an invalidated object",
+                )
+        elif object_type is ObjectType.KNOWLEDGE_NODE:
+            node = self.storage.get_node(wax_id, object_id)
+            if node is not None and node.status is KnowledgeNodeStatus.ACTIVE:
+                self.storage.invalidate_node(
+                    wax_id,
+                    object_id,
+                    now=now,
+                    reason="dependent of an invalidated object",
+                )
+        elif object_type is ObjectType.SUMMARY:
+            summary = self.storage.get_summary(wax_id, object_id)
+            if summary is not None and summary.status.value == "active":
+                self.storage.invalidate_summary(
+                    wax_id,
+                    object_id,
+                    now=now,
+                    reason="dependent of an invalidated object",
+                )
+        # Other object types (history, artifact_version, artifact_content,
+        # knowledge_edge) are not invalidated here. History is append-only;
+        # edges are governed by their source/target nodes; artifact content
+        # is governed by its artifact version.
+
+    def _rebuild_index_handler(
+        self, proposal: Proposal, now: datetime
+    ) -> EvolutionResult:
+        """Re-index one stored object.
+
+        Used when an index row was lost, a token hash changed because of
+        a key rotation, or an embedding model was upgraded. History is
+        untouched. The source text is re-read from storage and the
+        indexer regenerates tokens/embeddings.
+        """
+        try:
+            obj_type = ObjectType(str(proposal.payload["object_type"]))
+        except ValueError:
+            return EvolutionResult(False, "unknown object_type", proposal)
+        obj_id = _uuid(proposal.payload["object_id"])
+        if obj_id is None:
+            return EvolutionResult(False, "invalid object_id", proposal)
+        # Load the object's text so we can re-plan tokens.
+        evidence = hydrate(self.storage, proposal.wax_id, obj_type, obj_id, "rebuild")
+        if evidence is None:
+            return EvolutionResult(
+                False, f"unknown object {obj_type.value}:{obj_id}", proposal
+            )
+        # Drop the old index rows first — re-indexing is idempotent only
+        # if we remove what was there.
+        tokens_dropped = self.storage.delete_search_tokens(
+            proposal.wax_id, obj_type, obj_id
+        )
+        embeddings_dropped = self.storage.delete_embeddings(
+            proposal.wax_id, obj_type, obj_id
+        )
+        # Re-write the token index. Embeddings are regenerated by the
+        # background worker (it picks up the embedding job below).
+        self.indexer.index(
+            proposal.wax_id,
+            obj_type,
+            obj_id,
+            evidence.content,
+            evidence.created_at,
+        )
+        # If the embedder is configured, queue a fresh embedding job.
+        # The job is picked up by the background worker; this method
+        # never blocks on a model call.
+        self.indexer.enqueue(proposal.wax_id, "embed", obj_type, obj_id)
+        return EvolutionResult(
+            True,
+            "index rebuilt; tokens and embedding job refreshed",
+            proposal,
+            tokens_dropped=tokens_dropped,
+            embeddings_dropped=embeddings_dropped,
+        )
+
+    def _request_deletion_handler(
+        self, proposal: Proposal, now: datetime
+    ) -> EvolutionResult:
+        """Create a deletion request for the workflow to pick up.
+
+        This is *not* a deletion. It records that CI (or another upstream
+        component) believes something should be deleted; the actual
+        retention-aware deletion happens in a separate workflow.
+        """
+        try:
+            obj_type = ObjectType(str(proposal.payload["object_type"]))
+        except ValueError:
+            return EvolutionResult(False, "unknown object_type", proposal)
+        obj_id = _uuid(proposal.payload["object_id"])
+        if obj_id is None:
+            return EvolutionResult(False, "invalid object_id", proposal)
+        scope = str(proposal.payload.get("scope", "")).strip()
+        if not scope:
+            return EvolutionResult(False, "request_deletion requires scope", proposal)
+        request = DeletionRequest(
+            id=new_id(),
+            wax_id=proposal.wax_id,
+            object_type=obj_type,
+            object_id=obj_id,
+            scope=scope,
+            reason=proposal.reason or None,
+            status=DeletionRequestStatus.PENDING,
+            requested_at=now,
+        )
+        self.storage.create_deletion_request(request)
+        return EvolutionResult(
+            True,
+            "deletion request created; propagation deferred to the workflow",
+            proposal,
+            deletion_request_id=request.id,
+        )

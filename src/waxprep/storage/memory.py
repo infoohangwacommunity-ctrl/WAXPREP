@@ -17,6 +17,7 @@ from waxprep.domain.models import (
     Attachment,
     AuthorKind,
     ChannelIdentity,
+    DeletionRequest,
     DerivationJob,
     EmbeddingRecord,
     Event,
@@ -38,7 +39,7 @@ from waxprep.domain.models import (
     Workspace,
     new_id,
 )
-from waxprep.knowledge.models import KnowledgeEdge, KnowledgeNode
+from waxprep.knowledge.models import KnowledgeEdge, KnowledgeNode, KnowledgeNodeStatus
 from waxprep.storage.protocol import TokenMatch, TokenStats
 
 Key = tuple[WaxId, UUID]
@@ -92,6 +93,11 @@ class InMemoryStorage:
         self._events: dict[WaxId, list[Event]] = {}
         self._outbound: dict[Key, OutboundDelivery] = {}
         self._interactive_offers: dict[Key, InteractiveOffer] = {}
+        # Blueprint Part IV §16-17: deletion requests are auditable and
+        # propagated separately from supersession. The in-memory store
+        # holds the request rows; the propagation log is a JSON dict on
+        # each request.
+        self._deletion_requests: dict[Key, DeletionRequest] = {}
 
     # --- identity -----------------------------------------------------
     def create_student(self, student: Student) -> Student:
@@ -388,6 +394,49 @@ class InMemoryStorage:
         key = (record.wax_id, record.object_type, record.object_id, record.model)
         self._embeddings[key] = record
 
+    def delete_search_tokens(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> int:
+        """Drop all search-token rows for one object.
+
+        Used by invalidation and deletion propagation. Returns the number
+        of token rows dropped. Tokens are an index — removing them changes
+        findability, not the underlying record.
+        """
+        rows = self._tokens.get(wax_id, [])
+        kept: list[TokenMatch] = []
+        dropped = 0
+        for row in rows:
+            if row.object_type is object_type and row.object_id == object_id:
+                dropped += 1
+                continue
+            kept.append(row)
+        if dropped:
+            self._tokens[wax_id] = kept
+        return dropped
+
+    def delete_embeddings(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> int:
+        """Drop all embedding rows for one object.
+
+        Used by invalidation and deletion propagation. Returns the number
+        of embedding rows dropped. Embeddings are an index — removing them
+        changes findability by meaning, not the underlying record.
+        """
+        # Embeddings are keyed by (wax_id, object_type, object_id, model).
+        # Drop every row for this (wax_id, object_type, object_id) regardless
+        # of which model produced it — different models can have multiple
+        # embedding rows for the same source object.
+        keys_to_drop = [
+            (w, ot, oid, model)
+            for (w, ot, oid, model) in self._embeddings
+            if w == wax_id and ot is object_type and oid == object_id
+        ]
+        for key in keys_to_drop:
+            del self._embeddings[key]
+        return len(keys_to_drop)
+
     def list_embeddings(
         self,
         wax_id: WaxId,
@@ -487,6 +536,50 @@ class InMemoryStorage:
         self._entries[(wax_id, old_id)] = updated
         return updated
 
+    def invalidate_notebook_entry(
+        self, wax_id: WaxId, entry_id: UUID, *, now: datetime, reason: str
+    ) -> NotebookEntry:
+        """Mark a notebook entry as no longer trustworthy (not superseded).
+
+        Distinct from supersession: nothing replaces it. The entry stays
+        for audit; ordinary retrieval should exclude it. Caller is
+        responsible for also dropping the entry's search tokens and
+        embeddings (see ``delete_search_tokens`` and ``delete_embeddings``).
+        """
+        old = self._entries.get((wax_id, entry_id))
+        if old is None:
+            raise ValueError("unknown notebook entry")
+        # Preserve superseded_by_id if it was already superseded —
+        # invalidation is a separate fact about the entry's trustworthiness,
+        # not a replacement of its supersession relationship.
+        updated = replace(
+            old,
+            status=NotebookEntryStatus.INVALIDATED,
+            updated_at=now,
+        )
+        # Record an Event so the audit trail captures the invalidation
+        # even after the entry row is later archived. The free-form
+        # ``reason`` text is NOT stored in event metadata — it can be
+        # student-derived and the operational-only contract forbids it.
+        # The reason lives on the proposal/audit trail of the caller.
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=wax_id,
+                kind="notebook_entry_invalidated",
+                object_type=ObjectType.NOTEBOOK.value,
+                object_id=entry_id,
+                created_at=now,
+                metadata={"status": NotebookEntryStatus.INVALIDATED.value},
+            )
+        )
+        # ``reason`` is preserved on the caller's proposal record; we
+        # drop it here to avoid putting potentially-student-derived text
+        # into operational event metadata.
+        _ = reason
+        self._entries[(wax_id, entry_id)] = updated
+        return updated
+
     # --- summaries ---------------------------------------------------------------
     def add_summary(self, summary: Summary) -> Summary:
         if summary.wax_id not in self._students:
@@ -516,6 +609,37 @@ class InMemoryStorage:
         if old is None:
             raise ValueError("unknown summary")
         updated = replace(old, status=SummaryStatus.SUPERSEDED)
+        self._summaries[(wax_id, summary_id)] = updated
+        return updated
+
+    def invalidate_summary(
+        self, wax_id: WaxId, summary_id: UUID, *, now: datetime, reason: str
+    ) -> Summary:
+        """Mark a summary as no longer trustworthy (not superseded).
+
+        The free-form ``reason`` text is not stored in event metadata
+        (it can be student-derived). It lives on the caller's proposal
+        audit trail.
+        """
+        old = self._summaries.get((wax_id, summary_id))
+        if old is None:
+            raise ValueError("unknown summary")
+        updated = replace(
+            old,
+            status=SummaryStatus.INVALIDATED,
+        )
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=wax_id,
+                kind="summary_invalidated",
+                object_type=ObjectType.SUMMARY.value,
+                object_id=summary_id,
+                created_at=now,
+                metadata={"status": SummaryStatus.INVALIDATED.value},
+            )
+        )
+        _ = reason
         self._summaries[(wax_id, summary_id)] = updated
         return updated
 
@@ -626,6 +750,40 @@ class InMemoryStorage:
             ):
                 rows.append(edge)
         return tuple(rows[:limit])
+
+    def invalidate_node(
+        self, wax_id: WaxId, node_id: UUID, *, now: datetime, reason: str
+    ) -> KnowledgeNode:
+        """Mark a knowledge node as no longer trustworthy (not superseded).
+
+        Distinct from supersession: nothing replaces it. The node stays
+        for audit; ordinary retrieval should exclude it. Caller is
+        responsible for also dropping the node's search tokens and
+        embeddings. ``reason`` is not stored in event metadata — it
+        lives on the caller's proposal audit trail.
+        """
+        old = self._nodes.get((wax_id, node_id))
+        if old is None:
+            raise ValueError("unknown knowledge node")
+        updated = replace(
+            old,
+            status=KnowledgeNodeStatus.INVALIDATED,
+            updated_at=now,
+        )
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=wax_id,
+                kind="knowledge_node_invalidated",
+                object_type=ObjectType.KNOWLEDGE_NODE.value,
+                object_id=node_id,
+                created_at=now,
+                metadata={"status": KnowledgeNodeStatus.INVALIDATED.value},
+            )
+        )
+        _ = reason
+        self._nodes[(wax_id, node_id)] = updated
+        return updated
 
     # --- workspace and artifacts ----------------------------------------------------------
     def get_or_create_workspace(self, wax_id: WaxId, now: datetime) -> Workspace:
@@ -1027,6 +1185,75 @@ class InMemoryStorage:
 
     def list_events(self, wax_id: WaxId) -> tuple[Event, ...]:
         return tuple(self._events.get(wax_id, []))
+
+    # --- deletion requests (Blueprint Part IV §16-17) ---------------------------------------------
+    def create_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
+        key = (request.wax_id, request.id)
+        if key in self._deletion_requests:
+            raise ValueError("deletion request already exists")
+        if request.wax_id not in self._students:
+            raise ValueError("unknown student")
+        self._deletion_requests[key] = request
+        # Record an event so the audit trail has the request even after
+        # the request row is removed by retention. The sensitive
+        # ``scope`` and ``reason`` text is NOT stored in event metadata
+        # — it lives on the deletion_requests row itself, encrypted at
+        # rest by the storage layer where applicable.
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=request.wax_id,
+                kind="deletion_request_created",
+                object_type=request.object_type.value,
+                object_id=request.object_id,
+                created_at=request.requested_at,
+                metadata={
+                    "status": request.status.value,
+                    "request_id": str(request.id),
+                },
+            )
+        )
+        return request
+
+    def get_deletion_request(
+        self, wax_id: WaxId, request_id: UUID
+    ) -> DeletionRequest | None:
+        return self._deletion_requests.get((wax_id, request_id))
+
+    def list_deletion_requests(
+        self, wax_id: WaxId, *, status: str | None = None, limit: int = 50
+    ) -> tuple[DeletionRequest, ...]:
+        rows = [
+            r
+            for (w, _), r in self._deletion_requests.items()
+            if w == wax_id and (status is None or r.status.value == status)
+        ]
+        rows.sort(key=lambda r: r.requested_at, reverse=True)
+        return tuple(rows[:limit])
+
+    def update_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
+        key = (request.wax_id, request.id)
+        if key not in self._deletion_requests:
+            raise ValueError("unknown deletion request")
+        # Record the transition as an event so the audit trail captures
+        # the workflow's progress without re-reading the request row.
+        # Sensitive text stays on the request row.
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=request.wax_id,
+                kind="deletion_request_updated",
+                object_type=request.object_type.value,
+                object_id=request.object_id,
+                created_at=request.completed_at or request.requested_at,
+                metadata={
+                    "status": request.status.value,
+                    "request_id": str(request.id),
+                },
+            )
+        )
+        self._deletion_requests[key] = request
+        return request
 
 
 __all__ = ["InMemoryStorage"]

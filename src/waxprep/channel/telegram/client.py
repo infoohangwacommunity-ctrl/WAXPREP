@@ -94,7 +94,11 @@ class TelegramClient:
                     error_detail=desc,
                 )
             result = data.get("result") or {}
-            mid = str(result.get("message_id")) if result.get("message_id") is not None else None
+            mid = (
+                str(result.get("message_id"))
+                if result.get("message_id") is not None
+                else None
+            )
             return OutboundResult(
                 success=True,
                 provider_message_id=mid,
@@ -128,7 +132,9 @@ class TelegramClient:
         except Exception:
             logger.debug("telegram typing failed", exc_info=True)
 
-    async def set_webhook(self, url: str, *, secret_token: str | None = None) -> dict[str, Any]:
+    async def set_webhook(
+        self, url: str, *, secret_token: str | None = None
+    ) -> dict[str, Any]:
         client = await self._http()
         body: dict[str, Any] = {
             "url": url,

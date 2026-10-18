@@ -28,6 +28,8 @@ from waxprep.domain.models import (
     Attachment,
     AuthorKind,
     ChannelIdentity,
+    DeletionRequest,
+    DeletionRequestStatus,
     DerivationJob,
     EmbeddingRecord,
     Event,
@@ -222,7 +224,9 @@ class PostgresStorage:
         )
         return identity
 
-    def list_channel_identities_for_wax(self, wax_id: WaxId) -> tuple[ChannelIdentity, ...]:
+    def list_channel_identities_for_wax(
+        self, wax_id: WaxId
+    ) -> tuple[ChannelIdentity, ...]:
         rows = self._read(
             wax_id,
             "SELECT id, wax_id, channel, external_id, created_at "
@@ -755,6 +759,42 @@ class PostgresStorage:
             ),
         )
 
+    def delete_search_tokens(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> int:
+        """Drop all search-token rows for one object (invalidation/deletion).
+
+        Returns the number of rows dropped. Tokens are an index — removing
+        them changes findability, not the underlying record. Encrypted text
+        is never decrypted here.
+        """
+        set_current_wax_id(self._conn, wax_id)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM search_tokens WHERE wax_id = %s "
+                "AND object_type = %s AND object_id = %s",
+                (wax_id, object_type.value, object_id),
+            )
+            # rowcount is the number of rows deleted by the statement.
+            return int(cur.rowcount or 0)
+
+    def delete_embeddings(
+        self, wax_id: WaxId, object_type: ObjectType, object_id: UUID
+    ) -> int:
+        """Drop all embedding rows for one object (invalidation/deletion).
+
+        Returns the number of rows dropped. The encrypted vector blobs are
+        removed entirely — no plaintext is read or written here.
+        """
+        set_current_wax_id(self._conn, wax_id)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM search_embeddings WHERE wax_id = %s "
+                "AND object_type = %s AND object_id = %s",
+                (wax_id, object_type.value, object_id),
+            )
+            return int(cur.rowcount or 0)
+
     def list_embeddings(
         self,
         wax_id: WaxId,
@@ -962,6 +1002,41 @@ class PostgresStorage:
             raise ValueError("unknown notebook entry")
         return updated
 
+    def invalidate_notebook_entry(
+        self, wax_id: WaxId, entry_id: UUID, *, now: datetime, reason: str
+    ) -> NotebookEntry:
+        """Mark a notebook entry as invalidated (not superseded).
+
+        The entry stays for audit; ordinary retrieval should exclude it.
+        Caller is responsible for also dropping the entry's search tokens
+        and embeddings. The invalidation is recorded as an Event so the
+        audit trail captures the transition even if the entry row is later
+        archived by retention policy. The free-form ``reason`` is not
+        stored in event metadata (it can be student-derived).
+        """
+        changed = self._write(
+            wax_id,
+            "UPDATE notebook_entries SET status = 'invalidated', "
+            "updated_at = %s WHERE wax_id = %s AND id = %s",
+            (now, wax_id, entry_id),
+        )
+        updated = self.get_notebook_entry(wax_id, entry_id)
+        if not changed or updated is None:
+            raise ValueError("unknown notebook entry")
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=wax_id,
+                kind="notebook_entry_invalidated",
+                object_type=ObjectType.NOTEBOOK.value,
+                object_id=entry_id,
+                created_at=now,
+                metadata={"status": NotebookEntryStatus.INVALIDATED.value},
+            )
+        )
+        _ = reason
+        return updated
+
     # --- summaries -----------------------------------------------------------------------------
     def _summary(self, row: Row) -> Summary:
         wax_id = WaxId(row["wax_id"])
@@ -1027,6 +1102,33 @@ class PostgresStorage:
         updated = self.get_summary(wax_id, summary_id)
         if not changed or updated is None:
             raise ValueError("unknown summary")
+        return updated
+
+    def invalidate_summary(
+        self, wax_id: WaxId, summary_id: UUID, *, now: datetime, reason: str
+    ) -> Summary:
+        """Mark a summary as invalidated (not superseded). The free-form
+        ``reason`` is not stored in event metadata."""
+        changed = self._write(
+            wax_id,
+            "UPDATE summaries SET status = 'invalidated' WHERE wax_id = %s AND id = %s",
+            (wax_id, summary_id),
+        )
+        updated = self.get_summary(wax_id, summary_id)
+        if not changed or updated is None:
+            raise ValueError("unknown summary")
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=wax_id,
+                kind="summary_invalidated",
+                object_type=ObjectType.SUMMARY.value,
+                object_id=summary_id,
+                created_at=now,
+                metadata={"status": SummaryStatus.INVALIDATED.value},
+            )
+        )
+        _ = reason
         return updated
 
     # --- provenance ------------------------------------------------------------------------------
@@ -1290,6 +1392,34 @@ class PostgresStorage:
                 (wax_id, node_id, limit),
             )
         return tuple(self._edge(r) for r in rows)
+
+    def invalidate_node(
+        self, wax_id: WaxId, node_id: UUID, *, now: datetime, reason: str
+    ) -> KnowledgeNode:
+        """Mark a knowledge node as invalidated (not superseded). The free-form
+        ``reason`` is not stored in event metadata."""
+        changed = self._write(
+            wax_id,
+            "UPDATE knowledge_nodes SET status = 'invalidated', updated_at = %s "
+            "WHERE wax_id = %s AND id = %s",
+            (now, wax_id, node_id),
+        )
+        updated = self.get_node(wax_id, node_id)
+        if not changed or updated is None:
+            raise ValueError("unknown knowledge node")
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=wax_id,
+                kind="knowledge_node_invalidated",
+                object_type=ObjectType.KNOWLEDGE_NODE.value,
+                object_id=node_id,
+                created_at=now,
+                metadata={"status": KnowledgeNodeStatus.INVALIDATED.value},
+            )
+        )
+        _ = reason
+        return updated
 
     # --- workspace and artifacts -----------------------------------------------------------------------
     def get_or_create_workspace(self, wax_id: WaxId, now: datetime) -> Workspace:
@@ -2042,6 +2172,131 @@ class PostgresStorage:
                 )
             )
         return tuple(out)
+
+    # --- deletion requests (Blueprint Part IV §16-17) -------------------------------
+    def _deletion_request(self, row: Row) -> DeletionRequest:
+        propagation_log = row.get("propagation_log") or {}
+        if isinstance(propagation_log, str):
+            propagation_log = json.loads(propagation_log)
+        return DeletionRequest(
+            id=row["id"],
+            wax_id=WaxId(row["wax_id"]),
+            object_type=ObjectType(row["object_type"]),
+            object_id=row["object_id"],
+            scope=row["scope"],
+            reason=row.get("reason"),
+            status=DeletionRequestStatus(row["status"]),
+            requested_at=row["requested_at"],
+            completed_at=row.get("completed_at"),
+            propagation_log=dict(propagation_log or {}),
+        )
+
+    def create_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
+        self._write(
+            request.wax_id,
+            "INSERT INTO deletion_requests (id, wax_id, object_type, object_id, "
+            "scope, reason, status, requested_at, completed_at, propagation_log) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+            (
+                request.id,
+                request.wax_id,
+                request.object_type.value,
+                request.object_id,
+                request.scope,
+                request.reason,
+                request.status.value,
+                request.requested_at,
+                request.completed_at,
+                json.dumps(request.propagation_log),
+            ),
+        )
+        # Record the request creation as an Event so the audit trail has
+        # it even after the request row is removed by retention. The
+        # sensitive ``scope`` and ``reason`` text lives on the request
+        # row itself, encrypted at rest where applicable. The event
+        # carries only operational metadata.
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=request.wax_id,
+                kind="deletion_request_created",
+                object_type=request.object_type.value,
+                object_id=request.object_id,
+                created_at=request.requested_at,
+                metadata={
+                    "status": request.status.value,
+                    "request_id": str(request.id),
+                },
+            )
+        )
+        return request
+
+    def get_deletion_request(
+        self, wax_id: WaxId, request_id: UUID
+    ) -> DeletionRequest | None:
+        rows = self._read(
+            wax_id,
+            "SELECT id, wax_id, object_type, object_id, scope, reason, status, "
+            "requested_at, completed_at, propagation_log FROM deletion_requests "
+            "WHERE wax_id = %s AND id = %s",
+            (wax_id, request_id),
+        )
+        return self._deletion_request(rows[0]) if rows else None
+
+    def list_deletion_requests(
+        self, wax_id: WaxId, *, status: str | None = None, limit: int = 50
+    ) -> tuple[DeletionRequest, ...]:
+        if status is None:
+            rows = self._read(
+                wax_id,
+                "SELECT id, wax_id, object_type, object_id, scope, reason, status, "
+                "requested_at, completed_at, propagation_log FROM deletion_requests "
+                "WHERE wax_id = %s ORDER BY requested_at DESC LIMIT %s",
+                (wax_id, limit),
+            )
+        else:
+            rows = self._read(
+                wax_id,
+                "SELECT id, wax_id, object_type, object_id, scope, reason, status, "
+                "requested_at, completed_at, propagation_log FROM deletion_requests "
+                "WHERE wax_id = %s AND status = %s ORDER BY requested_at DESC LIMIT %s",
+                (wax_id, status, limit),
+            )
+        return tuple(self._deletion_request(r) for r in rows)
+
+    def update_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
+        changed = self._write(
+            request.wax_id,
+            "UPDATE deletion_requests SET scope = %s, reason = %s, status = %s, "
+            "completed_at = %s, propagation_log = %s::jsonb "
+            "WHERE wax_id = %s AND id = %s",
+            (
+                request.scope,
+                request.reason,
+                request.status.value,
+                request.completed_at,
+                json.dumps(request.propagation_log),
+                request.wax_id,
+                request.id,
+            ),
+        )
+        if not changed:
+            raise ValueError("unknown deletion request")
+        self.append_event(
+            Event(
+                id=new_id(),
+                wax_id=request.wax_id,
+                kind="deletion_request_updated",
+                object_type=request.object_type.value,
+                object_id=request.object_id,
+                created_at=request.completed_at or request.requested_at,
+                metadata={
+                    "status": request.status.value,
+                    "request_id": str(request.id),
+                },
+            )
+        )
+        return request
 
 
 __all__ = ["PostgresStorage"]

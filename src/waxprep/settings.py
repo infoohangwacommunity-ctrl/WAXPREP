@@ -95,9 +95,7 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
                 + ", ".join(missing)
             )
     if settings.telegram_enabled and not settings.telegram_bot_token:
-        raise ValueError(
-            "Telegram is enabled but TELEGRAM_BOT_TOKEN is missing"
-        )
+        raise ValueError("Telegram is enabled but TELEGRAM_BOT_TOKEN is missing")
     if settings.voice_provider not in (None, "gemini", "grok"):
         raise ValueError(
             f"WAXPREP_VOICE_PROVIDER must be 'gemini', 'grok', or unset; "

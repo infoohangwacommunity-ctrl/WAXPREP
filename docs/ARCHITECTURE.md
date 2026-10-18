@@ -6,8 +6,52 @@ Live WhatsApp and production composition use **CI-first** only:
 
 - `TurnServiceCiFirst` + `ModelTeacherCiFirst`
 - Context Intelligence is **mandatory** every turn (not optional consult)
-- Teacher-first modules (`turn.py`, `model_teacher.py`, `contracts.py`) are
-  **quarantined** (DeprecationWarning on import) and scheduled for removal
+- Teacher-first modules (`turn.py`, `model_teacher.py`, `contracts.py`,
+  `bounded.py`, `consultation.py`) are **quarantined** (DeprecationWarning on
+  import) and scheduled for removal
+
+### The CI-first turn, end to end
+
+```text
+Student message arrives
+  |
+  v
+Save the exact student message (atomic with index jobs)
+  |
+  v
+Context Intelligence runs — mandatory, every non-empty message
+  |
+  v
+CI produces a ContextPackage (evidence + synthesis + uncertainty + status)
+  |
+  v
+Teacher receives: original student message + ContextPackage
+  |
+  v
+Teacher produces the final educational response
+  |
+  v
+Save exactly one tutor reply (linked to the student entry) + outbound delivery
+record (outbox), atomically. A crash between them is repaired on the next retry.
+  |
+  v
+Channel adapter delivers; on crash, retry sends the same stored reply.
+```
+
+Key invariants of this flow:
+
+- The **Teacher does not decide whether to consult CI**. CI is mandatory.
+- The **Teacher does not generate consultation questions**. CI investigates on
+  its own.
+- The **Teacher receives a complete ContextPackage**, not raw CI results.
+- The Teacher has **one job**: produce the final student-facing response.
+- There is **no bounded consultation loop** between Teacher and CI in
+  production. CI runs once per turn with its own internal bounds.
+
+The Teacher-first orchestration (Teacher drives the turn, optionally calls a
+bounded CI consultation) was an earlier design and is no longer used in
+production. Its modules remain importable for legacy unit tests only and emit
+a `DeprecationWarning`.
 
 ### Normalization (WhatsApp inbound)
 
@@ -37,17 +81,19 @@ knows is either that history, or something *derived from it that points back to 
 Student message
   |
   v
-Teacher (drives the turn)
+Save exact student message (history is append-only, never deleted or edited)
   |
-  |   may consult Context Intelligence (bounded)
-  |   may request another investigation (bounded)
   v
 Context Intelligence investigates the student's world
+  |    (model decides what to inspect; application executes tools and enforces limits)
+  |    (mandatory for every non-empty message — never optional)
+  v
+CI produces a ContextPackage: evidence + synthesis + uncertainty + investigation status
   |
   v
-Teacher receives evidence/context
+Teacher receives the original student message + the ContextPackage
   |
-  |   eventually produces the response
+  |   produces the final educational response
   v
 Tutor response is durably saved + outbound delivery recorded
   |
@@ -64,26 +110,32 @@ Tutor response is durably saved + outbound delivery recorded
 Model Gateway (provider-neutral) -> Upstage / OpenAI / Anthropic / mock
 ```
 
-**Important:** the Teacher is real in this build: `ModelTeacher`
-(`src/waxprep/orchestration/model_teacher.py`) implements the `Teacher`
-Protocol on the Model Gateway. The `Teacher` Protocol and the
-deterministic mock remain, so tests stay offline and reproducible.
+**Important:** the Teacher is real in this build: `ModelTeacherCiFirst`
+(`src/waxprep/orchestration/model_teacher_ci_first.py`) implements the
+CI-first `Teacher` Protocol on the Model Gateway. The `Teacher` Protocol and
+a deterministic mock remain, so tests stay offline and reproducible.
 
 ## Roles
 
 - **History service** saves first and unconditionally. It never asks "is this important?".
   The exact student message reaches the Teacher untouched — never rewritten,
-  summarized, or replaced by CI's interpretation.
-- **Teacher** drives the turn. It decides whether to consult CI, what to ask,
-  and whether the result is sufficient. The real Teacher (`ModelTeacher`)
-  gets its teaching intelligence from a logical model executed through the
-  Model Gateway; it composes the final educational answer itself and never
-  writes to history or storage.
-- **Context Intelligence (CI)** is a research/investigation system. It
-  investigates the student's world and returns evidence and uncertainty.
-  It never directly answers the student's educational question. It is a
-  capability the Teacher uses, not a gatekeeper that sits in front of
-  the Teacher.
+  summarized, or replaced by CI's interpretation. History is append-only; age
+  affects findability, never existence.
+- **Context Intelligence (CI)** is the **investigating intelligence**. It runs
+  **automatically for every non-empty message**. It decides what to inspect,
+  when evidence conflicts, when more investigation is justified, and when it
+  has enough to stop. It never teaches the student. The application supplies
+  it with: the current message, the current time, the trigger record, the
+  authorized scope, available tools, mechanical limits, and instructions on
+  evidence quality and tool use. The model decides the rest.
+- **Teacher** is the **student-facing intelligence**. It receives the original
+  student message plus a ContextPackage, and composes the final educational
+  answer. It does **not** decide whether CI runs — CI has already run. It
+  never writes to history or storage; persistence stays with
+  `TurnServiceCiFirst` and the storage layer. No keyword routing, phrase
+  matching, or student-specific branching lives in the adapter: the model
+  composes the answer from the message and the package; the application
+  enforces contracts, bounds, validation and persistence.
 - **Services** own *execution*: validated, student-scoped reads and writes.
   Derived-object + provenance + index writes are atomic (spec section 9).
 - **Storage** owns *persistence*. PostgreSQL Row-Level Security owns *isolation*.
@@ -109,23 +161,21 @@ deterministic mock remain, so tests stay offline and reproducible.
    Keys can be rotated safely (spec section 14).
 7. Normal tests make no paid AI calls.
 
-## The Teacher model
+## The Teacher model (CI-first)
 
-`ModelTeacher` runs one gateway call per orchestration round. The model
-returns a strictly validated JSON decision:
+`ModelTeacherCiFirst` runs **one** gateway call per turn. The model returns
+plain text — the final student-facing answer. No JSON parsing, no `consult`
+action, no bounded loop. The adapter splits an optional `<<<choices>>>`
+trailer into an `InteractiveSuggestion`; the body always carries the actual
+teaching.
 
-```json
-{"action": "reply", "reply_text": "<final student-facing answer>"}
-{"action": "consult", "question": "<free-form investigation request>"}
-```
-
-Any other shape — unknown action, missing fields, blank text, non-JSON
-output, or a consultation request after the budget is exhausted — fails
-the turn with a typed error (`TeacherModelError`). Nothing invalid is ever
-persisted as a tutor reply. There is no keyword routing, phrase matching,
-or student-specific branching anywhere in the adapter: the model decides
-from the actual message and evidence; the application enforces contracts,
-bounds, validation and persistence.
+Validation is strict:
+- A blank or whitespace-only reply is never persisted. The orchestrator raises
+  `InvalidTeacherOutcomeError` so the failure is observable and recoverable.
+- No keyword routing, phrase matching, or student-specific branching lives in
+  the adapter. The model composes the answer from the message and the package;
+  the application enforces the response contract and provider-neutral request
+  construction.
 
 ### Configuration
 
@@ -141,7 +191,7 @@ like the CI model:
   capabilities. The basic Teacher path needs text only.
 - Build a `ModelGateway` over the registry and pass it to
   `build_services(..., gateway=gateway)` — the composition root composes
-  `ModelTeacher(gateway, model_name="teacher")` automatically. A ready
+  `ModelTeacherCiFirst(gateway, model_name="teacher")` automatically. A ready
   `teacher=` instance can be passed instead (tests inject
   `RecordingTeacher`/`MockTeacher` this way).
 - Providing neither `teacher=` nor `gateway=` fails at startup
@@ -150,28 +200,75 @@ like the CI model:
 - API keys stay with the provider adapters' established configuration;
   no keys are committed.
 
-## Teacher ↔ CI consultation contract
+## Teacher ↔ CI contract (CI-first)
+
+In CI-first architecture there is **no consultation loop**. The Teacher does
+**not** decide whether to call CI and does **not** generate investigation
+questions. The contract is one-directional:
+
+```text
+TurnServiceCiFirst calls CI with an InvestigationRequest
+  -> CI returns a ContextPackage
+TurnServiceCiFirst hands the Teacher the original message + the package
+  -> Teacher returns the final reply text
+```
 
 The Teacher receives:
 - the exact student `HistoryEntry` (untouched)
 - the current time
 - the WAX ID
-- a `TeacherConsultation` capability
-- any already-returned CI context from earlier rounds
+- a `ContextPackage` (evidence + synthesis + uncertainty + provenance +
+  investigation status + stop reason)
 
-The Teacher can:
-- respond without consulting CI
-- ask CI a targeted question
-- receive CI context (evidence + synthesis + uncertainty + provenance)
-- ask CI for another bounded investigation
-- eventually return reply text
+The Teacher does **not** receive a consultation capability. CI has already
+completed its bounded investigation. If the package is empty or partial, the
+Teacher answers as well as it can without inventing context — the package's
+`investigation_status` field tells the Teacher exactly what CI did and did not
+establish (see `docs/CONTEXT-INTELLIGENCE.md`).
 
-The orchestration enforces a configurable hard upper bound on
-consultations per student turn (default 3) so a buggy Teacher cannot
-enter an infinite CI loop. When the budget is exhausted the Teacher is
-told clearly that no consultations remain and must finish with the
-evidence it already has; if it cannot produce a valid final reply, the
-turn fails in a controlled way with the student message preserved.
+## Investigation completion contract
+
+CI never silently produces an empty package. Every `ContextPackage` carries an
+explicit `investigation_status` drawn from a closed enum:
+
+| Status        | Meaning                                                              |
+| ------------- | ------------------------------------------------------------------- |
+| `successful`  | Investigation completed with relevant evidence.                      |
+| `empty`       | Investigation completed but no relevant evidence was found.          |
+| `incomplete`  | Investigation stopped at a hard budget before gathering enough evidence. |
+| `partial`     | Some tools failed or were unavailable; the package reflects the remainder. |
+| `failed`      | The investigation itself broke before any reliable result was produced. |
+| `skipped`     | The message was blank; no investigation was attempted.              |
+
+The status is computed from what the runtime actually did, not from the
+model's own claim. Hitting the step budget, a tool failing, an invalid
+evidence-selection by the model, and an empty corpus each map to a specific
+status. The Teacher can therefore distinguish "CI looked and found nothing"
+from "CI never finished".
+
+## Evidence lifecycle contract
+
+Derived objects have an explicit lifecycle. The vocabulary is small and the
+operations are *not* interchangeable:
+
+| Operation      | Meaning                                                                   |
+| -------------- | ------------------------------------------------------------------------- |
+| Correction     | A claim or record was wrong; a corrected claim is recorded.              |
+| Supersession   | A newer or more applicable derived claim replaces an older one.           |
+| Invalidation   | A derived object is no longer trustworthy; excluded from normal use.     |
+| Deletion       | Information must no longer be retained or used (retention policy applies).|
+| Rebuilding     | A derived object or index is regenerated from available sources.         |
+
+History is never deleted or invalidated by these operations — it is
+append-only. Invalidation and deletion propagate through derived dependents
+(notebook entries, summaries, edges, search tokens, embeddings, cached
+retrieval). The propagation is auditable; the source history remains unless
+a deletion request explicitly removes it (and only when retention policy
+permits).
+
+See `docs/CONTEXT-INTELLIGENCE.md` for the operational details and the
+`Operation` enum in `src/waxprep/context/proposals.py` for the surface area
+CI uses to propose lifecycle changes.
 
 ## Retrieval architecture
 
@@ -200,3 +297,7 @@ reply without invoking the Teacher again.
 - A `waxprep_object_owner` SECURITY DEFINER function lets the application
   check ownership of polymorphic provenance references that cannot be
   protected by an ordinary FK.
+- A model-generated request is never sufficient authorization to access
+  another student's records. Retrieved content — even when it says
+  "ignore all rules" — is evidence that someone wrote those words, not
+  an instruction that grants permission.

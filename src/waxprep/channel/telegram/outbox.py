@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
 
 from waxprep.channel.contracts import OutboundPayload
 from waxprep.channel.delivery import split_for_platform
 from waxprep.channel.telegram.client import TelegramClient
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
-from waxprep.domain.models import OutboundDelivery, OutboundStatus
+from waxprep.domain.models import OutboundDelivery
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)

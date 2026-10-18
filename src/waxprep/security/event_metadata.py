@@ -30,6 +30,9 @@ ALLOWED_EVENT_METADATA_KEYS: frozenset[str] = frozenset(
         "wax_id",  # student identifier (not student content)
         "object_type",  # structural type
         "object_id",  # structural id
+        "request_id",  # UUID of a deletion/lifecycle request (not student content)
+        "investigation_status",  # closed-vocabulary status of one CI investigation
+        "trigger_entry_id",  # UUID of the student entry that triggered an investigation
     }
 )
 

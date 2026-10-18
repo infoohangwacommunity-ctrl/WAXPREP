@@ -7,7 +7,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
-from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
 

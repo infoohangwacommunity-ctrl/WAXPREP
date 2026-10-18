@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from waxprep.channel.contracts import CONTENT_KIND_TEXT, CONTENT_KIND_UNKNOWN, NormalizedInbound
+from waxprep.channel.contracts import (
+    CONTENT_KIND_TEXT,
+    CONTENT_KIND_UNKNOWN,
+    NormalizedInbound,
+)
 
 
 def normalize_telegram_update(payload: dict[str, Any]) -> list[NormalizedInbound]:
