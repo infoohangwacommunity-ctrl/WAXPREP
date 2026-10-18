@@ -46,8 +46,15 @@ class RecordingTeacher:
     consult_question: str | None = None
     seen_inputs: list[TeacherInputCiFirst] = field(default_factory=list)
 
-    async def teach(self, inp: TeacherInputCiFirst) -> TeacherOutcomeCiFirst:
+    async def teach(
+        self,
+        inp: TeacherInputCiFirst,
+        *,
+        on_text_delta: object | None = None,
+    ) -> TeacherOutcomeCiFirst:
         self.seen_inputs.append(inp)
+        if on_text_delta is not None and self.reply_text:
+            await on_text_delta(self.reply_text)  # type: ignore[operator]
         return TeacherOutcomeCiFirst(reply_text=self.reply_text)
 
 

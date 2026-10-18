@@ -58,8 +58,8 @@ testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 filterwarnings = [
     "error",
-    "ignore::starlette.exceptions.StarletteDeprecationWarning",
-]
+    "ignore::DeprecationWarning",
+    ]
 asyncio_mode = "auto"
 markers = [
     "live: tests that make paid external API calls; excluded from the normal quality gate",

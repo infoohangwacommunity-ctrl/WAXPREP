@@ -191,7 +191,7 @@ async def test_ci_failure_does_not_lose_student_message() -> None:
 async def test_teacher_failure_does_not_duplicate_student_message() -> None:
 
     class FailingTeacher(RecordingTeacher):
-        async def teach(self, inp):
+        async def teach(self, inp, **kwargs):
             raise RuntimeError("Teacher failed")
 
     world = make_world(teacher=FailingTeacher())
@@ -213,7 +213,7 @@ async def test_blank_teacher_reply_raises_error() -> None:
     from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
 
     class BlankTeacher:
-        async def teach(self, inp: TeacherInput) -> TeacherOutcome:
+        async def teach(self, inp, **kwargs) -> TeacherOutcome:
             return TeacherOutcome(reply_text="")
 
     world = make_world(teacher=BlankTeacher())  # type: ignore[arg-type]
@@ -228,7 +228,7 @@ async def test_whitespace_only_reply_raises_error() -> None:
     from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
 
     class WhitespaceTeacher:
-        async def teach(self, inp: TeacherInput) -> TeacherOutcome:
+        async def teach(self, inp, **kwargs) -> TeacherOutcome:
             return TeacherOutcome(reply_text="   \n\t  ")
 
     world = make_world(teacher=WhitespaceTeacher())  # type: ignore[arg-type]

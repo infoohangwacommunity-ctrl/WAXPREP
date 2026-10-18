@@ -65,16 +65,22 @@ class MockTeacher:
     consultations_requested: list[str] = field(default_factory=list)
 
     async def teach(
-        self, inp: TeacherInput | TeacherInputCiFirst
+        self,
+        inp: TeacherInput | TeacherInputCiFirst,
+        *,
+        on_text_delta: object | None = None,
     ) -> TeacherOutcome | TeacherOutcomeCiFirst:
         self.seen_inputs.append(inp)
         # Handle CI-first input (has context_package, no consultation)
         if hasattr(inp, "context_package"):
-            return TeacherOutcomeCiFirst(
-                reply_text=self.script.instructions[0][1]
+            reply = (
+                self.script.instructions[0][1]
                 if self.script.instructions
                 else "I understand."
             )
+            if on_text_delta is not None and reply:
+                await on_text_delta(reply)  # type: ignore[operator]
+            return TeacherOutcomeCiFirst(reply_text=reply)
         # Handle old Teacher-first input (has consultation, round_number, etc.)
         old_inp = cast(TeacherInput, inp)
         index = old_inp.round_number

@@ -95,17 +95,22 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
         from waxprep.channel.whatsapp.routes import build_whatsapp_router
 
+        client = build_whatsapp_client(settings)
+
         def resolve_sender(sender: str):
             identity = active_storage.get_channel_identity("whatsapp", sender)
             return identity.wax_id if identity is not None else None
 
         async def accept_inbound(msg: NormalizedInbound) -> InboundResult | None:
+            # Pass the WhatsApp client so live turns can progressive-deliver
+            # complete message chunks while the Teacher streams.
             handler = WhatsAppInboundHandler(
                 storage=active_storage,
                 history=services.history,
                 turn_service=services.turns,
                 clock=clock,
                 config=WhatsAppInboundConfig(),
+                whatsapp_client=client,
             )
             return await handler.handle_message(msg)
 
@@ -117,7 +122,6 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         )
         app.include_router(router)
 
-        client = build_whatsapp_client(settings)
         _outbox = WhatsAppOutbox(
             storage=active_storage,
             client=client,

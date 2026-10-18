@@ -28,7 +28,7 @@ class _CrashingTeacher(RecordingTeacher):
         super().__init__()
         self.calls = 0
 
-    async def teach(self, inp: TeacherInput) -> TeacherOutcome:
+    async def teach(self, inp, **kwargs) -> TeacherOutcome:
         self.calls += 1
         self.seen_inputs.append(inp)
         if self.calls == 1:
@@ -79,7 +79,7 @@ class _TeacherCrashesAfterReply(RecordingTeacher):
         super().__init__(reply_text="Tutor's first reply")
         self.calls = 0
 
-    async def teach(self, inp: TeacherInput) -> TeacherOutcome:
+    async def teach(self, inp, **kwargs) -> TeacherOutcome:
         self.calls += 1
         self.seen_inputs.append(inp)
         return TeacherOutcome(reply_text=self.reply_text)

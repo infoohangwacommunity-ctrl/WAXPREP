@@ -27,7 +27,7 @@ class _TrackingTeacher(RecordingTeacher):
         self.reply_text = reply
         self.teach_calls = 0
 
-    async def teach(self, inp: TeacherInput) -> TeacherOutcome:
+    async def teach(self, inp, **kwargs) -> TeacherOutcome:
         self.teach_calls += 1
         self.seen_inputs.append(inp)
         return TeacherOutcome(reply_text=self.reply_text)

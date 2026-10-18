@@ -30,6 +30,7 @@ Key differences from Teacher-first:
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -40,6 +41,10 @@ from waxprep.domain.models import HistoryEntry
 
 # Default logical model name for CI-first Teacher
 DEFAULT_TEACHER_MODEL_NAME = "teacher"
+
+# Optional sink for progressive delivery of text deltas while the model streams.
+# Infrastructure only — never educational branching.
+TextDeltaSink = Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +93,12 @@ class Teacher(Protocol):
     - Does NOT decide whether CI is needed (CI is mandatory)
     """
 
-    async def teach(self, inp: TeacherInput) -> TeacherOutcome: ...
+    async def teach(
+        self,
+        inp: TeacherInput,
+        *,
+        on_text_delta: TextDeltaSink | None = None,
+    ) -> TeacherOutcome: ...
 
 
 __all__ = [
@@ -96,4 +106,5 @@ __all__ = [
     "Teacher",
     "TeacherInput",
     "TeacherOutcome",
+    "TextDeltaSink",
 ]

@@ -37,7 +37,11 @@ from waxprep.model_gateway.models import (
     ModelRole,
     StreamEventType,
 )
-from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
+from waxprep.orchestration.contracts_ci_first import (
+    TeacherInput,
+    TeacherOutcome,
+    TextDeltaSink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +123,21 @@ class ModelTeacherCiFirst:
         self._max_output_tokens = max_output_tokens
         self._timeout_seconds = timeout_seconds
 
-    async def teach(self, inp: TeacherInput) -> TeacherOutcome:
-        reply_text = await self._decide(inp)
+    async def teach(
+        self,
+        inp: TeacherInput,
+        *,
+        on_text_delta: TextDeltaSink | None = None,
+    ) -> TeacherOutcome:
+        reply_text = await self._decide(inp, on_text_delta=on_text_delta)
         return TeacherOutcome(reply_text=reply_text)
 
-    async def _decide(self, inp: TeacherInput) -> str | None:
+    async def _decide(
+        self,
+        inp: TeacherInput,
+        *,
+        on_text_delta: TextDeltaSink | None = None,
+    ) -> str | None:
         request = ModelRequest(
             wax_id=inp.wax_id,
             role=ModelRole.TEACHER,
@@ -156,12 +170,25 @@ class ModelTeacherCiFirst:
                         and event.text
                     ):
                         chunks.append(event.text)
+                        if on_text_delta is not None:
+                            try:
+                                await on_text_delta(event.text)
+                            except Exception:
+                                logger.debug(
+                                    "progressive text delta sink failed",
+                                    exc_info=True,
+                                )
                 if chunks:
                     return self._parse_reply("".join(chunks))
             except Exception:
                 # Transport or capability errors fall back to complete().
                 pass
         response: ModelResponse = await self._gateway.complete(request)
+        if on_text_delta is not None and response.text:
+            try:
+                await on_text_delta(response.text)
+            except Exception:
+                logger.debug("progressive text delta sink failed", exc_info=True)
         return self._parse_reply(response.text)
 
     @staticmethod

@@ -70,6 +70,9 @@ from waxprep.orchestration.contracts_ci_first import (
 from waxprep.orchestration.contracts_ci_first import (
     TeacherOutcome as TeacherOutcomeCiFirst,
 )
+from waxprep.orchestration.contracts_ci_first import (
+    TextDeltaSink,
+)
 from waxprep.orchestration.errors import InvalidTeacherOutcomeError
 from waxprep.storage.protocol import Storage
 
@@ -129,6 +132,7 @@ class TurnServiceCiFirst:
         channel_ref: str | None = None,
         thread_ref: str | None = None,
         occurred_at: datetime | None = None,
+        on_text_delta: TextDeltaSink | None = None,
     ) -> TurnResultCiFirst:
         """Process one student turn end-to-end with CI-first architecture.
 
@@ -141,7 +145,8 @@ class TurnServiceCiFirst:
            crashed before the reply was saved, resume teaching.
         3. Context Intelligence runs automatically (mandatory stage).
         4. Teacher receives student message + ContextPackage, produces
-           final response.
+           final response. Optional on_text_delta receives stream deltas
+           for progressive channel delivery (infrastructure only).
         5. Save exactly one tutor reply (linked to student entry).
         6. Create outbound delivery record (outbox).
         """
@@ -235,7 +240,10 @@ class TurnServiceCiFirst:
             context_package=context_package,
             now=now,
         )
-        outcome: TeacherOutcomeCiFirst = await self._teacher.teach(teacher_input)
+        outcome: TeacherOutcomeCiFirst = await self._teacher.teach(
+            teacher_input,
+            on_text_delta=on_text_delta,
+        )
 
         # Handle empty Teacher response explicitly.
         # A blank or None reply is a controlled failure, not a silent completion.

@@ -29,9 +29,8 @@ logical model registry. Pass either a ready ``Teacher`` or a
 ``ModelRole.TEACHER``) to ``build_services``. Tests keep injecting the
 deterministic ``MockTeacher`` / ``RecordingTeacher`` doubles.
 
-OLD ARCHITECTURE (deprecated):
-The old Teacher-first architecture is still available in turn.py and
-model_teacher.py but is deprecated. Use CI-first for all new development.
+Teacher-first modules (turn.py, model_teacher.py) are quarantined and
+emit DeprecationWarning on import. Production composition never uses them.
 """
 
 from __future__ import annotations

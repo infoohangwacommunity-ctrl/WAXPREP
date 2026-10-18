@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from waxprep.channel.contracts import NormalizedInbound
+from waxprep.channel.contracts import NormalizedInbound, OutboundPayload
+from waxprep.channel.whatsapp.progressive import ProgressiveWhatsAppDelivery
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
@@ -37,6 +39,9 @@ from waxprep.history.service import HistoryService
 from waxprep.index.indexer import JOB_PROCESS_TURN
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
 from waxprep.storage.protocol import Storage
+
+if TYPE_CHECKING:
+    from waxprep.channel.whatsapp.client import WhatsAppClient
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +103,17 @@ class WhatsAppInboundHandler:
         clock: Clock,
         *,
         config: WhatsAppInboundConfig | None = None,
+        whatsapp_client: WhatsAppClient | None = None,
     ) -> None:
         self._storage = storage
         self._history = history
         self._turn_service = turn_service
         self._clock = clock
         self._config = config or WhatsAppInboundConfig()
+        # When set, live turns stream complete WhatsApp message chunks while
+        # the Teacher generates (progressive delivery). Outbox remains the
+        # durable recovery path for the final authoritative text.
+        self._whatsapp_client = whatsapp_client
 
     def resolve_sender(self, sender: str) -> WaxId | None:
         """Resolve a WhatsApp phone number to a WAX ID.
@@ -276,7 +286,38 @@ class WhatsAppInboundHandler:
                 error=f"failed_to_save_message: {type(exc).__name__}",
             )
 
-        # Step 5: Process through CI-first turn service
+        # Step 5: Process through CI-first turn service.
+        # When a WhatsApp client is available, wire progressive delivery so
+        # the student receives complete message chunks while the model streams.
+        progressive: ProgressiveWhatsAppDelivery | None = None
+        on_text_delta = None
+        last_provider_message_id: str | None = None
+        if self._whatsapp_client is not None:
+            client = self._whatsapp_client
+            recipient = msg.provider_sender_id
+
+            async def _send_chunk(text: str) -> None:
+                nonlocal last_provider_message_id
+                result = await client.send_text(
+                    OutboundPayload(
+                        channel=self._config.channel,
+                        wax_id=wax_id,
+                        recipient_external_id=recipient,
+                        text=text,
+                    )
+                )
+                if result.success and result.provider_message_id:
+                    last_provider_message_id = result.provider_message_id
+
+            async def _send_typing() -> None:
+                await client.send_typing(recipient)
+
+            progressive = ProgressiveWhatsAppDelivery(
+                send_text=_send_chunk,
+                send_typing=_send_typing,
+            )
+            on_text_delta = progressive.on_delta
+
         try:
             turn_result: TurnResultCiFirst = (
                 await self._turn_service.handle_student_message(
@@ -286,8 +327,38 @@ class WhatsAppInboundHandler:
                     channel_ref=msg.provider_message_id,
                     thread_ref=msg.reply_to_provider_id,
                     occurred_at=msg.occurred_at,
+                    on_text_delta=on_text_delta,
                 )
             )
+
+            # Flush any remaining progressive buffer after the Teacher finishes.
+            if progressive is not None:
+                try:
+                    await progressive.finish()
+                except Exception:
+                    logger.debug(
+                        "progressive delivery finish failed",
+                        exc_info=True,
+                    )
+                # If we already delivered complete chunks live, mark the
+                # outbound record delivered so the outbox does not re-send
+                # the full text.
+                if (
+                    turn_result.outbound_delivery_id is not None
+                    and progressive.final_text.strip()
+                ):
+                    try:
+                        self._storage.mark_outbound_delivered(
+                            wax_id,
+                            turn_result.outbound_delivery_id,
+                            self._clock.now(),
+                            provider_message_id=last_provider_message_id,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "mark progressive outbound delivered failed",
+                            exc_info=True,
+                        )
 
             logger.info(
                 "turn processing completed",
@@ -299,6 +370,7 @@ class WhatsAppInboundHandler:
                     else None,
                     "duplicate": turn_result.duplicate,
                     "outbound_delivery_id": turn_result.outbound_delivery_id,
+                    "progressive": progressive is not None,
                 },
             )
 

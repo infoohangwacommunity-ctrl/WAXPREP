@@ -2,6 +2,16 @@
 
 from __future__ import annotations
 
+import warnings
+
+warnings.warn(
+    "waxprep.orchestration.model_teacher.ModelTeacher is deprecated; use "
+    "model_teacher_ci_first.ModelTeacherCiFirst. Teacher-first is quarantined.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+
 import json
 import logging
 import re
