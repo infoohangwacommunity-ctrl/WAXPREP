@@ -33,7 +33,7 @@ def test_create_find_consume_offer() -> None:
         wax_id=wax,
         tutor_entry_id=None,
         provider_outbound_message_id="wamid.OUT1",
-        buttons=({"id": button_id, "title": "Quiz me"},),
+        buttons=({"id": button_id, "title": "Try a problem"},),
         status=InteractiveOfferStatus.OPEN,
         created_at=now,
         updated_at=now,

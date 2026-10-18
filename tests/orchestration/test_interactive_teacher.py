@@ -29,7 +29,7 @@ class _InteractiveTeacher:
             interactive=InteractiveSuggestion(
                 body_text="Here is a short explanation of photosynthesis.",
                 buttons=(
-                    InteractiveButtonSpec(title="Quiz me"),
+                    InteractiveButtonSpec(title="Try a problem"),
                     InteractiveButtonSpec(title="Explain simpler"),
                 ),
             ),
@@ -58,7 +58,7 @@ def test_split_interactive_trailer() -> None:
     raw = (
         "Fractions are parts of a whole.\n\n"
         "<<<choices>>>\n"
-        "Quiz me\n"
+        "Try a problem\n"
         "Give example\n"
         "Explain simpler\n"
     )
@@ -68,7 +68,7 @@ def test_split_interactive_trailer() -> None:
     assert "<<<choices>>>" not in body
     assert interactive is not None
     assert len(interactive.buttons) == 3
-    assert interactive.buttons[0].title == "Quiz me"
+    assert interactive.buttons[0].title == "Try a problem"
 
 
 def test_split_interactive_absent() -> None:

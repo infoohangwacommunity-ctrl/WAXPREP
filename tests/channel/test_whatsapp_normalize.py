@@ -120,7 +120,7 @@ def test_normalize_button_reply() -> None:
                         "type": "button_reply",
                         "button_reply": {
                             "id": "opaque-uuid-1",
-                            "title": "Quiz me",
+                            "title": "Try a problem",
                         },
                     },
                     "context": {"id": "wamid.OUTBOUND1"},
@@ -130,7 +130,7 @@ def test_normalize_button_reply() -> None:
     )
     assert len(msgs) == 1
     assert msgs[0].content_kind == CONTENT_KIND_INTERACTIVE_BUTTON
-    assert msgs[0].text == "Quiz me"
+    assert msgs[0].text == "Try a problem"
     assert msgs[0].structured["button_id"] == "opaque-uuid-1"
     assert msgs[0].reply_to_provider_id == "wamid.OUTBOUND1"
 
