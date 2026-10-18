@@ -26,6 +26,7 @@ import logging
 from dataclasses import replace
 from datetime import datetime
 
+from waxprep.channel.contracts import InteractiveButtonSpec, InteractiveSuggestion
 from waxprep.context.evidence import format_for_model
 from waxprep.context.models import ContextPackage
 from waxprep.model_gateway.gateway import ModelGateway
@@ -37,7 +38,6 @@ from waxprep.model_gateway.models import (
     ModelRole,
     StreamEventType,
 )
-from waxprep.channel.contracts import InteractiveButtonSpec, InteractiveSuggestion
 from waxprep.orchestration.contracts_ci_first import (
     TeacherInput,
     TeacherOutcome,

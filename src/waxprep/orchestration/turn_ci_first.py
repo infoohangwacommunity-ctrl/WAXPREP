@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from waxprep.channel.contracts import InteractiveSuggestion
 from waxprep.clock import Clock
 from waxprep.context.investigator import ContextInvestigator
 from waxprep.context.models import (
@@ -52,7 +53,6 @@ from waxprep.context.models import (
     InvestigationRequest,
 )
 from waxprep.domain.identifiers import WaxId
-from waxprep.channel.contracts import InteractiveSuggestion
 from waxprep.domain.models import (
     AuthorKind,
     DerivationJob,
