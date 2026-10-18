@@ -1812,10 +1812,26 @@ class PostgresStorage:
     def list_due_outbound_deliveries(
         self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]:
+        # Outbox polls globally (wax_id=None). RLS is tenant-scoped, so a
+        # global scan briefly uses the connection owner (bypasses RLS), then
+        # restores the app role. Per-tenant calls stay under normal RLS.
         if wax_id is None:
-            raise ValueError(
-                "postgres backend requires wax_id for outbound due listing"
-            )
+            from waxprep.storage.session import APP_ROLE
+
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("RESET ROLE")
+                cur.execute(
+                    "SELECT * FROM outbound_deliveries "
+                    "WHERE status IN ('pending', 'in_progress') "
+                    "AND run_after <= %s "
+                    "ORDER BY run_after LIMIT %s",
+                    (now, limit),
+                )
+                rows = cur.fetchall()
+                cur.execute(f"SET ROLE {APP_ROLE}")
+            if self._txn_depth == 0:
+                self._conn.commit()
+            return tuple(self._outbound(r) for r in rows)
         rows = self._read(
             wax_id,
             "SELECT * FROM outbound_deliveries WHERE wax_id = %s "
