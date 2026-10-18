@@ -37,8 +37,8 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from tests.support import RecordingTeacher
 
+from support import RecordingTeacher
 from waxprep.context.deletion import DeletionService
 from waxprep.context.evolution import EvolutionService
 from waxprep.context.investigator import ContextInvestigator, _compute_status
