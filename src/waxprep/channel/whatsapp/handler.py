@@ -22,7 +22,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from waxprep.channel.contracts import NormalizedInbound, OutboundPayload
+from waxprep.channel.contracts import (
+    CONTENT_KIND_INTERACTIVE_BUTTON,
+    CONTENT_KIND_INTERACTIVE_LIST,
+    NormalizedInbound,
+    OutboundPayload,
+)
 from waxprep.channel.whatsapp.progressive import ProgressiveWhatsAppDelivery
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
@@ -228,6 +233,59 @@ class WhatsAppInboundHandler:
             # Previous attempt crashed before tutor reply was saved
             # We'll resume processing below
 
+        # Step 3b: One-shot interactive button/list consume.
+        # Meta does not disable old buttons; we reject stale clicks at channel layer.
+        if msg.content_kind in (
+            CONTENT_KIND_INTERACTIVE_BUTTON,
+            CONTENT_KIND_INTERACTIVE_LIST,
+        ):
+            button_id = str(
+                msg.structured.get("button_id")
+                or msg.structured.get("row_id")
+                or ""
+            )
+            if button_id:
+                offer = self._storage.find_interactive_offer_by_button_id(
+                    wax_id, button_id
+                )
+                if offer is None:
+                    logger.info(
+                        "stale or unknown interactive click rejected",
+                        extra={
+                            "wax_id": str(wax_id),
+                            "button_id": button_id,
+                        },
+                    )
+                    # Optional single polite line — do not run full teaching turn.
+                    return InboundResult(
+                        accepted=True,
+                        wax_id=wax_id,
+                        student_entry_id=None,
+                        outbound_delivery_id=None,
+                        needs_linking=False,
+                        error="interactive_offer_unavailable",
+                    )
+                consumed = self._storage.consume_interactive_offer(
+                    wax_id, offer.id, button_id, self._clock.now()
+                )
+                if consumed is None:
+                    logger.info(
+                        "interactive offer already consumed or expired",
+                        extra={
+                            "wax_id": str(wax_id),
+                            "offer_id": str(offer.id),
+                            "button_id": button_id,
+                        },
+                    )
+                    return InboundResult(
+                        accepted=True,
+                        wax_id=wax_id,
+                        student_entry_id=None,
+                        outbound_delivery_id=None,
+                        needs_linking=False,
+                        error="interactive_offer_consumed",
+                    )
+
         # Step 4: Durably save the student message
         # Use provider_message_id as channel_ref for idempotency
         try:
@@ -235,6 +293,7 @@ class WhatsAppInboundHandler:
                 wax_id,
                 AuthorKind.STUDENT,
                 msg.text or "",
+                content_kind=msg.content_kind or "text",
                 channel=self._config.channel,
                 channel_ref=msg.provider_message_id,
                 thread_ref=msg.reply_to_provider_id,

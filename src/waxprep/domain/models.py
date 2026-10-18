@@ -88,6 +88,19 @@ class OutboundStatus(StrEnum):
     FAILED = "failed"
 
 
+class InteractiveOfferStatus(StrEnum):
+    """One-shot interactive button/list offer lifecycle.
+
+    Meta does not auto-disable buttons after a click. Product rule:
+    first valid click consumes the offer; further clicks are rejected
+    at the channel layer without running a teaching turn on the stale id.
+    """
+
+    OPEN = "open"
+    CONSUMED = "consumed"
+    EXPIRED = "expired"
+
+
 class ArtifactStatus(StrEnum):
     """Lifecycle state of a durable workspace artifact."""
 
@@ -271,6 +284,27 @@ class OutboundDelivery:
 
 
 @dataclass(frozen=True, slots=True)
+class InteractiveOffer:
+    """Registry row for an issued interactive message (one-shot buttons/list).
+
+    Button ids are opaque (UUID or random). Never use semantic ids as
+    educational ontology. ``buttons`` is a list of {id, title} dicts.
+    """
+
+    id: UUID
+    wax_id: WaxId
+    tutor_entry_id: UUID | None
+    provider_outbound_message_id: str | None
+    buttons: tuple[dict[str, str], ...]
+    status: InteractiveOfferStatus
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime | None = None
+    consumed_button_id: str | None = None
+    consumed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactContent:
     """Text-like representation extracted from an artifact version."""
 
@@ -379,6 +413,8 @@ __all__ = [
     "EmbeddingRecord",
     "Event",
     "HistoryEntry",
+    "InteractiveOffer",
+    "InteractiveOfferStatus",
     "InvestigationRecord",
     "JobStatus",
     "Notebook",

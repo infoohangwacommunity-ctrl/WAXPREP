@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from waxprep.channel.contracts import InteractiveSuggestion
 from waxprep.context.models import ContextPackage
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import HistoryEntry
@@ -75,9 +76,13 @@ class TeacherOutcome:
     always produces the final reply in one round.
 
     If the Teacher has nothing to say, it returns reply_text=None.
+
+    ``interactive`` is optional presentation only. Body teaching must always
+    live in ``reply_text``; infrastructure never forces buttons.
     """
 
     reply_text: str | None
+    interactive: InteractiveSuggestion | None = None
 
 
 class Teacher(Protocol):

@@ -25,6 +25,7 @@ from waxprep.domain.models import (
     EmbeddingRecord,
     Event,
     HistoryEntry,
+    InteractiveOffer,
     InvestigationRecord,
     Notebook,
     NotebookEntry,
@@ -401,6 +402,23 @@ class Storage(Protocol):
         error: str,
         retry_at: datetime | None,
     ) -> None: ...
+
+    # --- interactive offers (one-shot buttons) --------------------------------------
+    def create_interactive_offer(self, offer: InteractiveOffer) -> InteractiveOffer: ...
+
+    def find_interactive_offer_by_button_id(
+        self, wax_id: WaxId, button_id: str
+    ) -> InteractiveOffer | None: ...
+
+    def consume_interactive_offer(
+        self,
+        wax_id: WaxId,
+        offer_id: UUID,
+        button_id: str,
+        now: datetime,
+    ) -> InteractiveOffer | None:
+        """Atomically mark offer consumed if still open. Returns None if not open."""
+        ...
 
     # --- audit ------------------------------------------------------------------------
     def record_investigation(

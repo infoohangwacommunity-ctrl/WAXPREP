@@ -125,6 +125,110 @@ class WhatsAppClient:
             if close:
                 await client.aclose()
 
+    async def send_interactive_buttons(
+        self,
+        *,
+        recipient_external_id: str,
+        body_text: str,
+        buttons: list[dict[str, str]],
+    ) -> OutboundResult:
+        """Send a reply-button interactive message (max 3 buttons).
+
+        Each button dict must have ``id`` and ``title``. Titles are truncated
+        to Meta's 20-char limit. On provider rejection (e.g. outside 24h
+        window), returns a permanent failure so the caller can fall back to
+        plain text.
+        """
+        if not buttons:
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=False,
+                error_code="no_buttons",
+                error_detail="interactive send requires at least one button",
+            )
+        action_buttons = []
+        for b in buttons[:3]:
+            title = (b.get("title") or "")[:20]
+            bid = b.get("id") or ""
+            if not bid or not title:
+                continue
+            action_buttons.append(
+                {"type": "reply", "reply": {"id": bid, "title": title}}
+            )
+        if not action_buttons:
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=False,
+                error_code="invalid_buttons",
+                error_detail="no valid button id/title pairs",
+            )
+        body: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "to": recipient_external_id,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text or ""},
+                "action": {"buttons": action_buttons},
+            },
+        }
+        close = False
+        client = self._client
+        if client is None:
+            client = httpx.AsyncClient(timeout=30.0)
+            close = True
+        try:
+            resp = await client.post(
+                f"{self._base}/{self._phone_number_id}/messages",
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json=body,
+            )
+            if resp.status_code == 429:
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=True,
+                    error_code="429",
+                    error_detail="provider rate limited; retry after backoff",
+                )
+            if resp.status_code >= 500:
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=True,
+                    error_code=str(resp.status_code),
+                    error_detail="provider_5xx",
+                )
+            if resp.status_code >= 400:
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=False,
+                    error_code=str(resp.status_code),
+                    error_detail=resp.text[:200],
+                )
+            data = resp.json()
+            messages = data.get("messages") or []
+            mid = messages[0].get("id") if messages else None
+            return OutboundResult(
+                success=True,
+                provider_message_id=mid,
+                temporary_failure=False,
+            )
+        except httpx.TimeoutException:
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=True,
+                error_code="timeout",
+                error_detail="request timed out; delivery outcome uncertain",
+            )
+        finally:
+            if close:
+                await client.aclose()
+
     async def send_typing(self, recipient_external_id: str) -> None:
         """Best-effort typing indicator via WhatsApp Cloud API.
 

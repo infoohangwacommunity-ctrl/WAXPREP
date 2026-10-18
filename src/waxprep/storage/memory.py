@@ -21,6 +21,8 @@ from waxprep.domain.models import (
     EmbeddingRecord,
     Event,
     HistoryEntry,
+    InteractiveOffer,
+    InteractiveOfferStatus,
     InvestigationRecord,
     JobStatus,
     Notebook,
@@ -89,6 +91,7 @@ class InMemoryStorage:
         self._investigations: list[InvestigationRecord] = []
         self._events: dict[WaxId, list[Event]] = {}
         self._outbound: dict[Key, OutboundDelivery] = {}
+        self._interactive_offers: dict[Key, InteractiveOffer] = {}
 
     # --- identity -----------------------------------------------------
     def create_student(self, student: Student) -> Student:
@@ -960,6 +963,53 @@ class InMemoryStorage:
             run_after=retry_at or old.run_after,
             updated_at=now,
         )
+
+    # --- interactive offers ---------------------------------------------------------
+    def create_interactive_offer(self, offer: InteractiveOffer) -> InteractiveOffer:
+        key = (offer.wax_id, offer.id)
+        if key in self._interactive_offers:
+            raise ValueError("interactive offer already exists")
+        self._interactive_offers[key] = offer
+        return offer
+
+    def find_interactive_offer_by_button_id(
+        self, wax_id: WaxId, button_id: str
+    ) -> InteractiveOffer | None:
+        for (wid, _), offer in self._interactive_offers.items():
+            if wid != wax_id:
+                continue
+            for btn in offer.buttons:
+                if btn.get("id") == button_id:
+                    return offer
+        return None
+
+    def consume_interactive_offer(
+        self,
+        wax_id: WaxId,
+        offer_id: UUID,
+        button_id: str,
+        now: datetime,
+    ) -> InteractiveOffer | None:
+        key = (wax_id, offer_id)
+        old = self._interactive_offers.get(key)
+        if old is None or old.status != InteractiveOfferStatus.OPEN:
+            return None
+        if old.expires_at is not None and old.expires_at <= now:
+            self._interactive_offers[key] = replace(
+                old,
+                status=InteractiveOfferStatus.EXPIRED,
+                updated_at=now,
+            )
+            return None
+        updated = replace(
+            old,
+            status=InteractiveOfferStatus.CONSUMED,
+            consumed_button_id=button_id,
+            consumed_at=now,
+            updated_at=now,
+        )
+        self._interactive_offers[key] = updated
+        return updated
 
     # --- audit --------------------------------------------------------------------------------------
     def record_investigation(self, record: InvestigationRecord) -> InvestigationRecord:

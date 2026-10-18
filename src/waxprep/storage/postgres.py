@@ -32,6 +32,8 @@ from waxprep.domain.models import (
     EmbeddingRecord,
     Event,
     HistoryEntry,
+    InteractiveOffer,
+    InteractiveOfferStatus,
     InvestigationRecord,
     JobStatus,
     Notebook,
@@ -1870,6 +1872,99 @@ class PostgresStorage:
                 wax_id,
                 delivery_id,
             ),
+        )
+
+    # --- interactive offers ---------------------------------------------------------
+    def create_interactive_offer(self, offer: InteractiveOffer) -> InteractiveOffer:
+        set_current_wax_id(self._conn, offer.wax_id)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO interactive_offers "
+                "(id, wax_id, tutor_entry_id, provider_outbound_message_id, "
+                "buttons, status, created_at, updated_at, expires_at, "
+                "consumed_button_id, consumed_at) "
+                "VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)",
+                (
+                    offer.id,
+                    offer.wax_id,
+                    offer.tutor_entry_id,
+                    offer.provider_outbound_message_id,
+                    json.dumps(list(offer.buttons)),
+                    offer.status.value,
+                    offer.created_at,
+                    offer.updated_at,
+                    offer.expires_at,
+                    offer.consumed_button_id,
+                    offer.consumed_at,
+                ),
+            )
+        self._conn.commit()
+        return offer
+
+    def find_interactive_offer_by_button_id(
+        self, wax_id: WaxId, button_id: str
+    ) -> InteractiveOffer | None:
+        # buttons is JSONB array of {id, title}; search with jsonb containment.
+        rows = self._read(
+            wax_id,
+            "SELECT * FROM interactive_offers "
+            "WHERE wax_id = %s AND buttons @> %s::jsonb "
+            "ORDER BY created_at DESC LIMIT 1",
+            (wax_id, json.dumps([{"id": button_id}])),
+        )
+        if not rows:
+            return None
+        return self._interactive_offer(rows[0])
+
+    def consume_interactive_offer(
+        self,
+        wax_id: WaxId,
+        offer_id: UUID,
+        button_id: str,
+        now: datetime,
+    ) -> InteractiveOffer | None:
+        set_current_wax_id(self._conn, wax_id)
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            # Expire if past expires_at while still open.
+            cur.execute(
+                "UPDATE interactive_offers SET status = 'expired', updated_at = %s "
+                "WHERE wax_id = %s AND id = %s AND status = 'open' "
+                "AND expires_at IS NOT NULL AND expires_at <= %s",
+                (now, wax_id, offer_id, now),
+            )
+            cur.execute(
+                "UPDATE interactive_offers SET status = 'consumed', "
+                "consumed_button_id = %s, consumed_at = %s, updated_at = %s "
+                "WHERE wax_id = %s AND id = %s AND status = 'open' "
+                "RETURNING *",
+                (button_id, now, now, wax_id, offer_id),
+            )
+            row = cur.fetchone()
+        self._conn.commit()
+        if row is None:
+            return None
+        return self._interactive_offer(row)
+
+    def _interactive_offer(self, row: Row) -> InteractiveOffer:
+        buttons_raw = row["buttons"]
+        if isinstance(buttons_raw, str):
+            buttons_raw = json.loads(buttons_raw)
+        buttons = tuple(
+            {"id": str(b.get("id", "")), "title": str(b.get("title", ""))}
+            for b in (buttons_raw or [])
+        )
+        return InteractiveOffer(
+            id=row["id"],
+            wax_id=WaxId(row["wax_id"]),
+            tutor_entry_id=row.get("tutor_entry_id"),
+            provider_outbound_message_id=row.get("provider_outbound_message_id"),
+            buttons=buttons,
+            status=InteractiveOfferStatus(row["status"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            expires_at=row.get("expires_at"),
+            consumed_button_id=row.get("consumed_button_id"),
+            consumed_at=row.get("consumed_at"),
         )
 
     def _outbound(self, row: Row) -> OutboundDelivery:
