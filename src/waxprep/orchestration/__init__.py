@@ -16,34 +16,6 @@ still import them. Do not use them in new code or production composition.
 
 from __future__ import annotations
 
-# CI-first architecture (current — only path used in production)
-from waxprep.orchestration.contracts_ci_first import (
-    DEFAULT_TEACHER_MODEL_NAME,
-)
-from waxprep.orchestration.contracts_ci_first import (
-    Teacher as TeacherCiFirst,
-)
-from waxprep.orchestration.contracts_ci_first import (
-    TeacherInput as TeacherInputCiFirst,
-)
-from waxprep.orchestration.contracts_ci_first import (
-    TeacherOutcome as TeacherOutcomeCiFirst,
-)
-from waxprep.orchestration.contracts_ci_first import (
-    TextDeltaSink,
-)
-from waxprep.orchestration.errors import (
-    InvalidTeacherOutcomeError,
-    OrchestrationError,
-    TeacherModelError,
-)
-from waxprep.orchestration.mock_teacher import MockTeacher, MockTeacherScript
-from waxprep.orchestration.model_teacher_ci_first import ModelTeacherCiFirst
-from waxprep.orchestration.turn_ci_first import (
-    TurnResultCiFirst,
-    TurnServiceCiFirst,
-)
-
 # Quarantined Teacher-first imports are deliberate and emit DeprecationWarning.
 from waxprep.orchestration.bounded import (  # noqa: E402
     BoundedConsultation,
@@ -57,8 +29,34 @@ from waxprep.orchestration.contracts import (  # noqa: E402
     TeacherInput,
     TeacherOutcome,
 )
+
+# CI-first architecture (current — only path used in production)
+from waxprep.orchestration.contracts_ci_first import (
+    DEFAULT_TEACHER_MODEL_NAME,
+    TextDeltaSink,
+)
+from waxprep.orchestration.contracts_ci_first import (
+    Teacher as TeacherCiFirst,
+)
+from waxprep.orchestration.contracts_ci_first import (
+    TeacherInput as TeacherInputCiFirst,
+)
+from waxprep.orchestration.contracts_ci_first import (
+    TeacherOutcome as TeacherOutcomeCiFirst,
+)
+from waxprep.orchestration.errors import (
+    InvalidTeacherOutcomeError,
+    OrchestrationError,
+    TeacherModelError,
+)
+from waxprep.orchestration.mock_teacher import MockTeacher, MockTeacherScript
 from waxprep.orchestration.model_teacher import ModelTeacher  # noqa: E402
+from waxprep.orchestration.model_teacher_ci_first import ModelTeacherCiFirst
 from waxprep.orchestration.turn import TurnResult, TurnService  # noqa: E402
+from waxprep.orchestration.turn_ci_first import (
+    TurnResultCiFirst,
+    TurnServiceCiFirst,
+)
 
 __all__ = [
     # CI-first (current)

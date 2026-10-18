@@ -210,7 +210,7 @@ async def test_teacher_failure_does_not_duplicate_student_message() -> None:
 @pytest.mark.asyncio
 async def test_blank_teacher_reply_raises_error() -> None:
     """Empty reply text should raise InvalidTeacherOutcomeError."""
-    from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
+    from waxprep.orchestration.contracts_ci_first import TeacherOutcome
 
     class BlankTeacher:
         async def teach(self, inp, **kwargs) -> TeacherOutcome:
@@ -225,7 +225,7 @@ async def test_blank_teacher_reply_raises_error() -> None:
 @pytest.mark.asyncio
 async def test_whitespace_only_reply_raises_error() -> None:
     """Whitespace-only reply text should raise InvalidTeacherOutcomeError."""
-    from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
+    from waxprep.orchestration.contracts_ci_first import TeacherOutcome
 
     class WhitespaceTeacher:
         async def teach(self, inp, **kwargs) -> TeacherOutcome:

@@ -16,7 +16,7 @@ import pytest
 
 from support import RecordingTeacher, add_student, make_world
 from waxprep.domain.models import OutboundStatus
-from waxprep.orchestration.contracts_ci_first import TeacherInput, TeacherOutcome
+from waxprep.orchestration.contracts_ci_first import TeacherOutcome
 
 
 class _TrackingTeacher(RecordingTeacher):

@@ -37,17 +37,8 @@ NEW ARCHITECTURE (use turn_ci_first.py):
 
 from __future__ import annotations
 
-import warnings
-
-warnings.warn(
-    "waxprep.orchestration.turn.TurnService is deprecated; use "
-    "turn_ci_first.TurnServiceCiFirst. Teacher-first is quarantined.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
-
 import logging
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -73,6 +64,13 @@ from waxprep.orchestration.contracts import (
 )
 from waxprep.orchestration.errors import InvalidTeacherOutcomeError
 from waxprep.storage.protocol import Storage
+
+warnings.warn(
+    "waxprep.orchestration.turn.TurnService is deprecated; use "
+    "turn_ci_first.TurnServiceCiFirst. Teacher-first is quarantined.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 logger = logging.getLogger(__name__)
 
