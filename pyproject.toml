@@ -59,6 +59,7 @@ pythonpath = ["src", "tests"]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
     ]
 asyncio_mode = "auto"
 markers = [
