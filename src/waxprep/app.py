@@ -98,8 +98,40 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         client = build_whatsapp_client(settings)
 
         def resolve_sender(sender: str):
+            """Map WhatsApp sender id to WAX id; auto-provision on first contact."""
             identity = active_storage.get_channel_identity("whatsapp", sender)
-            return identity.wax_id if identity is not None else None
+            if identity is not None:
+                return identity.wax_id
+            # First message from this number: create student + channel link.
+            from uuid import uuid4
+
+            from waxprep.domain.identifiers import new_wax_id
+            from waxprep.domain.models import ChannelIdentity, Student, StudentStatus
+
+            now = clock.now()
+            wax = new_wax_id()
+            active_storage.create_student(
+                Student(
+                    wax_id=wax,
+                    status=StudentStatus.ACTIVE,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            active_storage.create_channel_identity(
+                ChannelIdentity(
+                    id=uuid4(),
+                    wax_id=wax,
+                    channel="whatsapp",
+                    external_id=sender,
+                    created_at=now,
+                )
+            )
+            logger.info(
+                "provisioned whatsapp student",
+                extra={"wax_id": str(wax), "sender": sender},
+            )
+            return wax
 
         async def accept_inbound(msg: NormalizedInbound) -> InboundResult | None:
             # Pass the WhatsApp client so live turns can progressive-deliver
@@ -218,7 +250,7 @@ def build_gateway(settings: Any):
     )
     provider = UpstageResponsesProvider(api_key=api_key or "missing", base_url=base_url)
     registry.register_provider(provider)
-    endpoint = getattr(settings, "upstage_model", None) or "solar-mini4"
+    endpoint = getattr(settings, "upstage_model", None) or "solar-pro4"
     caps = provider.capabilities(endpoint)
     for name, role in (
         ("teacher", ModelRole.TEACHER),
