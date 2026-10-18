@@ -1,5 +1,33 @@
 # Wax Prep Architecture
 
+## Production path (CI-first)
+
+Live WhatsApp and production composition use **CI-first** only:
+
+- `TurnServiceCiFirst` + `ModelTeacherCiFirst`
+- Context Intelligence is **mandatory** every turn (not optional consult)
+- Teacher-first modules (`turn.py`, `model_teacher.py`, `contracts.py`) are
+  **quarantined** (DeprecationWarning on import) and scheduled for removal
+
+### Normalization (WhatsApp inbound)
+
+Every inbound type becomes one durable history candidate via
+`channel.whatsapp.normalize`: text, media, reaction, location, contacts,
+interactive button/list reply, and unknown (never dropped). Fields:
+`content_kind`, human-readable `text`, and `structured` type-specific JSON.
+
+### Interactive offers (one-shot)
+
+Teacher may optionally suggest up to 3 short reply buttons. Channel issues
+**opaque** button ids, stores `interactive_offers`, and **consumes** on first
+valid click. Stale clicks are rejected at the channel layer (Meta does not
+auto-disable buttons). Body teaching always lives in plain text.
+
+### Media derivation
+
+Attachments enqueue `JOB_INGEST_MEDIA` after durable save so the first tutor
+reply is never blocked on download/OCR/STT.
+
 ## The one idea
 
 A student's world is **one unified, timestamped history**. Everything Wax Prep

@@ -52,6 +52,7 @@ from waxprep.context.models import (
     InvestigationRequest,
 )
 from waxprep.domain.identifiers import WaxId
+from waxprep.channel.contracts import InteractiveSuggestion
 from waxprep.domain.models import (
     AuthorKind,
     DerivationJob,
@@ -88,6 +89,7 @@ class TurnResultCiFirst:
     context_package: ContextPackage | None
     duplicate: bool
     outbound_delivery_id: Any | None = None
+    interactive: InteractiveSuggestion | None = None
 
 
 class TurnServiceCiFirst:
@@ -308,6 +310,7 @@ class TurnServiceCiFirst:
             context_package=context_package,
             duplicate=not created,
             outbound_delivery_id=outbound_id,
+            interactive=outcome.interactive,
         )
 
     async def process_turn_job(self, job: DerivationJob) -> TurnResultCiFirst:

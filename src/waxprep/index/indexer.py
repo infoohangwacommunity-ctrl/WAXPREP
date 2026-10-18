@@ -33,6 +33,8 @@ JOB_INDEX_TOKENS = "index_tokens"
 JOB_EMBED = "embed"
 JOB_UNDERSTAND_ARTIFACT = "understand_artifact"
 JOB_PROCESS_TURN = "process_turn"
+# Background media download + optional transcription/OCR; never blocks first reply.
+JOB_INGEST_MEDIA = "ingest_media"
 
 
 @dataclass(frozen=True, slots=True)

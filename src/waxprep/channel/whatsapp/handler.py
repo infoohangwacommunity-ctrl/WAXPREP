@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from waxprep.channel.contracts import (
     CONTENT_KIND_INTERACTIVE_BUTTON,
     CONTENT_KIND_INTERACTIVE_LIST,
+    InteractiveSuggestion,
     NormalizedInbound,
     OutboundPayload,
 )
@@ -34,6 +36,8 @@ from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     AuthorKind,
     DerivationJob,
+    InteractiveOffer,
+    InteractiveOfferStatus,
     JobStatus,
     ObjectType,
     Student,
@@ -41,7 +45,7 @@ from waxprep.domain.models import (
     new_id,
 )
 from waxprep.history.service import HistoryService
-from waxprep.index.indexer import JOB_PROCESS_TURN
+from waxprep.index.indexer import JOB_INGEST_MEDIA, JOB_PROCESS_TURN
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
 from waxprep.storage.protocol import Storage
 
@@ -309,6 +313,31 @@ class WhatsAppInboundHandler:
                 },
             )
 
+            # Non-blocking media derivation: enqueue after durable save so the
+            # first tutor reply is never gated on download/OCR/STT.
+            if created and msg.attachments:
+                try:
+                    media_now = self._clock.now()
+                    self._storage.enqueue_job(
+                        DerivationJob(
+                            id=new_id(),
+                            wax_id=wax_id,
+                            kind=JOB_INGEST_MEDIA,
+                            object_type=ObjectType.HISTORY,
+                            object_id=student_entry.id,
+                            status=JobStatus.PENDING,
+                            attempts=0,
+                            run_after=media_now,
+                            created_at=media_now,
+                            updated_at=media_now,
+                        )
+                    )
+                except Exception:
+                    logger.debug(
+                        "failed to enqueue ingest_media job",
+                        exc_info=True,
+                    )
+
             if not created:
                 # Duplicate detected at history level
                 existing_reply = self._storage.find_tutor_reply_to(
@@ -419,6 +448,22 @@ class WhatsAppInboundHandler:
                             exc_info=True,
                         )
 
+            # Optional interactive presentation (AI-chosen). Opaque ids only.
+            if (
+                turn_result.interactive is not None
+                and self._whatsapp_client is not None
+                and not turn_result.duplicate
+            ):
+                await self._issue_interactive(
+                    wax_id=wax_id,
+                    recipient=msg.provider_sender_id,
+                    suggestion=turn_result.interactive,
+                    tutor_entry_id=turn_result.tutor_entry.id
+                    if turn_result.tutor_entry
+                    else None,
+                    outbound_delivery_id=turn_result.outbound_delivery_id,
+                )
+
             logger.info(
                 "turn processing completed",
                 extra={
@@ -430,6 +475,7 @@ class WhatsAppInboundHandler:
                     "duplicate": turn_result.duplicate,
                     "outbound_delivery_id": turn_result.outbound_delivery_id,
                     "progressive": progressive is not None,
+                    "interactive": turn_result.interactive is not None,
                 },
             )
 
@@ -488,6 +534,83 @@ class WhatsAppInboundHandler:
                 needs_linking=False,
                 error=f"processing_failed: {type(exc).__name__}",
             )
+
+    async def _issue_interactive(
+        self,
+        *,
+        wax_id: WaxId,
+        recipient: str,
+        suggestion: InteractiveSuggestion,
+        tutor_entry_id: UUID | None,
+        outbound_delivery_id: UUID | None,
+    ) -> None:
+        """Send optional reply buttons and register a one-shot offer.
+
+        Opaque button ids only. On WhatsApp rejection (e.g. outside 24h
+        window), fall back silently — body teaching was already delivered
+        via progressive or will be delivered by the outbox.
+        """
+        client = self._whatsapp_client
+        if client is None or not suggestion.buttons:
+            return
+        now = self._clock.now()
+        issued: list[dict[str, str]] = []
+        for btn in suggestion.buttons[:3]:
+            title = (btn.title or "").strip()[:20]
+            if not title:
+                continue
+            issued.append({"id": str(uuid4()), "title": title})
+        if not issued:
+            return
+        body = (suggestion.body_text or "").strip() or "Choose a next step:"
+        try:
+            result = await client.send_interactive_buttons(
+                recipient_external_id=recipient,
+                body_text=body[:1024],
+                buttons=issued,
+            )
+        except Exception:
+            logger.debug("interactive send raised", exc_info=True)
+            return
+        if not result.success:
+            logger.info(
+                "interactive send failed; body teaching remains available",
+                extra={
+                    "wax_id": str(wax_id),
+                    "error_code": result.error_code,
+                    "temporary": result.temporary_failure,
+                },
+            )
+            return
+        try:
+            self._storage.create_interactive_offer(
+                InteractiveOffer(
+                    id=new_id(),
+                    wax_id=wax_id,
+                    tutor_entry_id=tutor_entry_id,
+                    provider_outbound_message_id=result.provider_message_id,
+                    buttons=tuple(issued),
+                    status=InteractiveOfferStatus.OPEN,
+                    created_at=now,
+                    updated_at=now,
+                    expires_at=now + timedelta(hours=48),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "failed to register interactive offer after successful send",
+                extra={"wax_id": str(wax_id)},
+            )
+        if outbound_delivery_id is not None and result.provider_message_id:
+            try:
+                self._storage.mark_outbound_delivered(
+                    wax_id,
+                    outbound_delivery_id,
+                    now,
+                    provider_message_id=result.provider_message_id,
+                )
+            except Exception:
+                logger.debug("mark outbound after interactive failed", exc_info=True)
 
     def create_linking_response(self, sender: str) -> str:
         """Create a response for unlinked senders."""

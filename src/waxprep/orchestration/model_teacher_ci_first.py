@@ -37,11 +37,14 @@ from waxprep.model_gateway.models import (
     ModelRole,
     StreamEventType,
 )
+from waxprep.channel.contracts import InteractiveButtonSpec, InteractiveSuggestion
 from waxprep.orchestration.contracts_ci_first import (
     TeacherInput,
     TeacherOutcome,
     TextDeltaSink,
 )
+
+_CHOICES_MARKER = "<<<choices>>>"
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +97,25 @@ Rules:
 - Personalize naturally but do not be creepy. Use context appropriately,
   not by dumping everything you know about the student.
 - Always produce a final, complete student-facing answer in plain text.
+- You may offer at most three short next-step choices when that truly helps
+  the student (e.g. "Quiz me", "Explain simpler", "Give an example"). Never
+  rely on choices for the teaching itself — always teach in the body text.
+- Prefer short answers when recent student messages are short; prefer examples
+  when history shows examples help; match the student's language mix.
+- Never dump the full notebook. Never claim you remember something without
+  evidence. Admit uncertainty on facts.
 
 Response contract (strict):
-Return ONLY the final student-facing answer as plain text. No JSON, no
-markdown fences, no action keywords. Just the educational response.
+Return the final student-facing answer as plain text first.
+Optionally, if short choices help, end with exactly this trailer (nothing after):
+
+<<<choices>>>
+Choice one
+Choice two
+Choice three
+
+Each choice title must be at most 20 characters. Omit the trailer when plain
+teaching is enough. Never put critical teaching only inside choices.
 """.strip()
 
 
@@ -129,8 +147,30 @@ class ModelTeacherCiFirst:
         *,
         on_text_delta: TextDeltaSink | None = None,
     ) -> TeacherOutcome:
-        reply_text = await self._decide(inp, on_text_delta=on_text_delta)
-        return TeacherOutcome(reply_text=reply_text)
+        raw = await self._decide(inp, on_text_delta=on_text_delta)
+        reply_text, interactive = self._split_interactive(raw)
+        return TeacherOutcome(reply_text=reply_text, interactive=interactive)
+
+    @staticmethod
+    def _split_interactive(
+        raw: str | None,
+    ) -> tuple[str | None, InteractiveSuggestion | None]:
+        """Strip optional <<<choices>>> trailer into InteractiveSuggestion."""
+        if raw is None:
+            return None, None
+        if _CHOICES_MARKER not in raw:
+            return raw, None
+        body, _, trailer = raw.partition(_CHOICES_MARKER)
+        body = body.rstrip()
+        titles = [
+            line.strip()[:20]
+            for line in trailer.strip().splitlines()
+            if line.strip()
+        ][:3]
+        if not titles or not body:
+            return raw.replace(_CHOICES_MARKER, "").strip() or raw, None
+        buttons = tuple(InteractiveButtonSpec(title=t) for t in titles)
+        return body, InteractiveSuggestion(body_text=body, buttons=buttons)
 
     async def _decide(
         self,

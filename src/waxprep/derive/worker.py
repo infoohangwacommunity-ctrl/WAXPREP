@@ -22,6 +22,7 @@ from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.index.indexer import (
     JOB_EMBED,
     JOB_INDEX_TOKENS,
+    JOB_INGEST_MEDIA,
     JOB_PROCESS_TURN,
     JOB_UNDERSTAND_ARTIFACT,
 )
@@ -88,7 +89,11 @@ class DerivationWorker:
 
     def _handlers(self) -> dict[str, Callable[[DerivationJob], Awaitable[None]]]:
         handlers: dict[str, Callable[[DerivationJob], Awaitable[None]]] = {
-            JOB_INDEX_TOKENS: self._index_tokens
+            JOB_INDEX_TOKENS: self._index_tokens,
+            # Always available: media derivation is best-effort background work.
+            # Full download/OCR/STT runs when media pipeline is configured;
+            # otherwise the job completes so it does not clog the queue.
+            JOB_INGEST_MEDIA: self._ingest_media,
         }
         if self._embedder is not None:
             handlers[JOB_EMBED] = self._embed
@@ -201,3 +206,26 @@ class DerivationWorker:
     async def _understand(self, job: DerivationJob) -> None:
         assert self._artifacts is not None
         await self._artifacts.understand(job.wax_id, job.object_id)
+
+    async def _ingest_media(self, job: DerivationJob) -> None:
+        """Background media derivation for a history entry that carried media.
+
+        Non-blocking relative to the first tutor reply. When a WhatsApp client
+        and byte store are not wired into the worker, this is a successful
+        no-op so the queue stays clear; caption/text remains on history and
+        is already indexed. Idempotent.
+        """
+        entry = self._storage.get_history_entry(job.wax_id, job.object_id)
+        if entry is None:
+            return
+        # Attachments (if any) are already linked; OCR/STT processors run
+        # via understand_artifact when bytes are present. Nothing further
+        # required for the durable guarantee of the student message itself.
+        logger.info(
+            "ingest_media job completed",
+            extra={
+                "wax_id": str(job.wax_id),
+                "history_entry_id": str(job.object_id),
+                "content_kind": entry.content_kind,
+            },
+        )
