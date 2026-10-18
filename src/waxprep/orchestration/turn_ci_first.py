@@ -275,14 +275,31 @@ class TurnServiceCiFirst:
             },
         )
         with self._storage.transaction():
-            tutor_entry = self._history.record(
-                wax_id,
-                AuthorKind.TUTOR,
-                reply_text,
-                channel=channel,
-                thread_ref=thread_ref,
-                reply_to_id=student_entry.id,
+            # Idempotent: a concurrent recovery path may have already saved
+            # the tutor reply for this student entry.
+            existing_tutor = self._storage.find_tutor_reply_to(
+                wax_id, student_entry.id
             )
+            if existing_tutor is not None:
+                tutor_entry = existing_tutor
+            else:
+                try:
+                    tutor_entry = self._history.record(
+                        wax_id,
+                        AuthorKind.TUTOR,
+                        reply_text,
+                        channel=channel,
+                        thread_ref=thread_ref,
+                        reply_to_id=student_entry.id,
+                    )
+                except ValueError as exc:
+                    if "already exists" not in str(exc).lower():
+                        raise
+                    tutor_entry = self._storage.find_tutor_reply_to(
+                        wax_id, student_entry.id
+                    )
+                    if tutor_entry is None:
+                        raise
             outbound_id = None
             if channel is not None:
                 delivery = self._storage.create_outbound_delivery(
