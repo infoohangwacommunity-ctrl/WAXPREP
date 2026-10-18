@@ -31,7 +31,7 @@ _services: Storage | None = None
 _turn_service: Any = None
 _history: Any = None
 _clock: Any = None
-_outbox: WhatsAppOutbox | None = None
+_outboxes: list[Any] = []
 
 
 @app.get("/health", tags=["system"])
@@ -59,22 +59,14 @@ def health() -> dict[str, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     """Compose services, start workers, and shut down cleanly."""
-    global _services, _turn_service, _history, _clock, _outbox
+    global _services, _turn_service, _history, _clock, _outboxes
 
-    if os.environ.get("WAXPREP_WHATSAPP_ENABLED", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
+    settings = load_settings()
+    if not settings.whatsapp_enabled and not settings.telegram_enabled:
         yield
         return
 
     try:
-        settings = load_settings()
-        if not settings.whatsapp_enabled:
-            yield
-            return
-
         cipher = build_cipher()
         storage = services_storage(cipher)
         clock = SystemClock()
@@ -86,28 +78,21 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             teacher=None,
             gateway=build_gateway(settings),
         )
-        # Bind locals so nested callbacks see non-None Storage
-        active_storage: Storage = services.storage
+        active_storage = storage
         _services = active_storage
         _turn_service = services.turns
         _history = services.history
         _clock = clock
 
-        from waxprep.channel.whatsapp.routes import build_whatsapp_router
+        from uuid import uuid4
 
-        client = build_whatsapp_client(settings)
+        from waxprep.domain.identifiers import new_wax_id
+        from waxprep.domain.models import ChannelIdentity, Student, StudentStatus
 
-        def resolve_sender(sender: str):
-            """Map WhatsApp sender id to WAX id; auto-provision on first contact."""
-            identity = active_storage.get_channel_identity("whatsapp", sender)
+        def provision(channel: str, sender: str):
+            identity = active_storage.get_channel_identity(channel, sender)
             if identity is not None:
                 return identity.wax_id
-            # First message from this number: create student + channel link.
-            from uuid import uuid4
-
-            from waxprep.domain.identifiers import new_wax_id
-            from waxprep.domain.models import ChannelIdentity, Student, StudentStatus
-
             now = clock.now()
             wax = new_wax_id()
             active_storage.create_student(
@@ -122,47 +107,103 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 ChannelIdentity(
                     id=uuid4(),
                     wax_id=wax,
-                    channel="whatsapp",
+                    channel=channel,
                     external_id=sender,
                     created_at=now,
                 )
             )
             logger.info(
-                "provisioned whatsapp student",
-                extra={"wax_id": str(wax), "sender": sender},
+                "provisioned channel student",
+                extra={"wax_id": str(wax), "channel": channel, "sender": sender},
             )
             return wax
 
-        async def accept_inbound(msg: NormalizedInbound) -> InboundResult | None:
-            # Pass the WhatsApp client so live turns can progressive-deliver
-            # complete message chunks while the Teacher streams.
-            handler = WhatsAppInboundHandler(
-                storage=active_storage,
-                history=services.history,
-                turn_service=services.turns,
-                clock=clock,
-                config=WhatsAppInboundConfig(),
-                whatsapp_client=client,
+        if settings.whatsapp_enabled:
+            from waxprep.channel.whatsapp.routes import build_whatsapp_router
+
+            client = build_whatsapp_client(settings)
+
+            async def accept_wa(msg: NormalizedInbound) -> InboundResult | None:
+                handler = WhatsAppInboundHandler(
+                    storage=active_storage,
+                    history=services.history,
+                    turn_service=services.turns,
+                    clock=clock,
+                    config=WhatsAppInboundConfig(channel="whatsapp"),
+                    whatsapp_client=client,
+                )
+                return await handler.handle_message(msg)
+
+            app.include_router(
+                build_whatsapp_router(
+                    verify_token=settings.whatsapp_verify_token or "",
+                    app_secret=settings.whatsapp_app_secret or "",
+                    resolve_sender=lambda s: provision("whatsapp", s),
+                    accept_inbound=accept_wa,
+                )
             )
-            return await handler.handle_message(msg)
+            wa_outbox = WhatsAppOutbox(
+                storage=active_storage,
+                client=client,
+                clock=clock,
+                config=OutboxConfig(),
+            )
+            _outboxes.append(wa_outbox)
+            asyncio.create_task(wa_outbox.start())
+            logger.info("whatsapp channel mounted")
 
-        router = build_whatsapp_router(
-            verify_token=settings.whatsapp_verify_token or "",
-            app_secret=settings.whatsapp_app_secret or "",
-            resolve_sender=resolve_sender,
-            accept_inbound=accept_inbound,
-        )
-        app.include_router(router)
+        if settings.telegram_enabled:
+            from waxprep.channel.telegram.client import TelegramClient
+            from waxprep.channel.telegram.outbox import (
+                TelegramOutbox,
+                TelegramOutboxConfig,
+            )
+            from waxprep.channel.telegram.routes import build_telegram_router
 
-        _outbox = WhatsAppOutbox(
-            storage=active_storage,
-            client=client,
-            clock=clock,
-            config=OutboxConfig(),
-        )
-        asyncio.create_task(_outbox.start())
+            tg_client = TelegramClient(settings.telegram_bot_token or "")
 
-        # Background derivation worker (embeds, process_turn recovery, artifacts)
+            async def accept_tg(msg: NormalizedInbound) -> InboundResult | None:
+                handler = WhatsAppInboundHandler(
+                    storage=active_storage,
+                    history=services.history,
+                    turn_service=services.turns,
+                    clock=clock,
+                    config=WhatsAppInboundConfig(channel="telegram"),
+                    whatsapp_client=tg_client,  # duck-typed: send_text + send_typing
+                )
+                return await handler.handle_message(msg)
+
+            app.include_router(
+                build_telegram_router(
+                    secret_token=settings.telegram_webhook_secret,
+                    resolve_sender=lambda s: provision("telegram", s),
+                    accept_inbound=accept_tg,
+                )
+            )
+            tg_outbox = TelegramOutbox(
+                storage=active_storage,
+                client=tg_client,
+                clock=clock,
+                config=TelegramOutboxConfig(),
+            )
+            _outboxes.append(tg_outbox)
+            asyncio.create_task(tg_outbox.start())
+
+            # Register webhook with Telegram if public URL is known
+            base = (settings.public_base_url or "").rstrip("/")
+            if base:
+                webhook_url = f"{base}/channels/telegram/webhook"
+                try:
+                    info = await tg_client.set_webhook(
+                        webhook_url,
+                        secret_token=settings.telegram_webhook_secret,
+                    )
+                    logger.info("telegram webhook set", extra={"result": info})
+                except Exception:
+                    logger.exception("failed to set telegram webhook")
+
+            logger.info("telegram channel mounted")
+
         async def _worker_loop() -> None:
             while True:
                 try:
@@ -172,16 +213,16 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 await asyncio.sleep(2.0)
 
         asyncio.create_task(_worker_loop())
-        logger.info("whatsapp channel mounted; outbox and recovery worker started")
+        logger.info("waxprep channels ready")
     except Exception:
-        logger.exception("failed to compose whatsapp services")
+        logger.exception("failed to compose channel services")
     yield
 
-    if _outbox is not None:
+    for box in list(_outboxes):
         try:
-            await _outbox.stop()
+            await box.stop()
         except Exception:
-            logger.exception("error stopping outbox worker")
+            logger.exception("error stopping outbox")
 
 
 app.router.lifespan_context = lifespan

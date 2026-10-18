@@ -1,7 +1,7 @@
 """Application settings loaded from environment.
 
-Secrets never appear in logs. Missing required WhatsApp settings fail
-clearly when the WhatsApp channel is enabled.
+Secrets never appear in logs. Missing required channel settings fail
+clearly when that channel is enabled.
 """
 
 from __future__ import annotations
@@ -35,6 +35,9 @@ class Settings:
     whatsapp_app_secret: str | None = None
     whatsapp_verify_token: str | None = None
     whatsapp_api_version: str = "v21.0"
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_webhook_secret: str | None = None
     public_base_url: str | None = None
     media_limits: MediaLimits = MediaLimits()
     blob_root: str = ".waxprep-blobs"
@@ -51,6 +54,7 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         request_timeout_seconds=float(env.get("WAXPREP_MEDIA_TIMEOUT", "60")),
     )
     wa_enabled = env.get("WAXPREP_WHATSAPP_ENABLED", "").lower() in {"1", "true", "yes"}
+    tg_enabled = env.get("WAXPREP_TELEGRAM_ENABLED", "").lower() in {"1", "true", "yes"}
     settings = Settings(
         upstage_api_key=env.get("UPSTAGE_API_KEY")
         or env.get("WAXPREP_UPSTAGE_API_KEY"),
@@ -65,6 +69,11 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         whatsapp_app_secret=env.get("WHATSAPP_APP_SECRET"),
         whatsapp_verify_token=env.get("WHATSAPP_VERIFY_TOKEN"),
         whatsapp_api_version=env.get("WHATSAPP_API_VERSION", "v21.0"),
+        telegram_enabled=tg_enabled,
+        telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN")
+        or env.get("WAXPREP_TELEGRAM_BOT_TOKEN"),
+        telegram_webhook_secret=env.get("TELEGRAM_WEBHOOK_SECRET")
+        or env.get("WAXPREP_TELEGRAM_WEBHOOK_SECRET"),
         public_base_url=env.get("WAXPREP_PUBLIC_BASE_URL"),
         media_limits=limits,
         blob_root=env.get("WAXPREP_BLOB_ROOT", ".waxprep-blobs"),
@@ -85,6 +94,10 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
                 "WhatsApp is enabled but required settings are missing: "
                 + ", ".join(missing)
             )
+    if settings.telegram_enabled and not settings.telegram_bot_token:
+        raise ValueError(
+            "Telegram is enabled but TELEGRAM_BOT_TOKEN is missing"
+        )
     if settings.voice_provider not in (None, "gemini", "grok"):
         raise ValueError(
             f"WAXPREP_VOICE_PROVIDER must be 'gemini', 'grok', or unset; "

@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 # Infrastructure defaults — not educational policy.
-_CHUNK_SOFT_LIMIT = 900
+_CHUNK_SOFT_LIMIT = 4000
 _PARAGRAPH_SEP = "\n\n"
 
 

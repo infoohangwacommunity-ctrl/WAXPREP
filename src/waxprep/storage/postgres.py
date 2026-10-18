@@ -222,6 +222,24 @@ class PostgresStorage:
         )
         return identity
 
+    def list_channel_identities_for_wax(self, wax_id: WaxId) -> tuple[ChannelIdentity, ...]:
+        rows = self._read(
+            wax_id,
+            "SELECT id, wax_id, channel, external_id, created_at "
+            "FROM channel_identities WHERE wax_id = %s",
+            (wax_id,),
+        )
+        return tuple(
+            ChannelIdentity(
+                id=r["id"],
+                wax_id=WaxId(r["wax_id"]),
+                channel=r["channel"],
+                external_id=r["external_id"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        )
+
     def get_channel_identity(
         self, channel: str, external_id: str
     ) -> ChannelIdentity | None:

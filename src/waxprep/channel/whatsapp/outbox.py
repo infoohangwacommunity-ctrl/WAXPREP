@@ -36,39 +36,15 @@ from waxprep.storage.protocol import Storage
 logger = logging.getLogger(__name__)
 
 
-def split_text_for_delivery(text: str, soft_limit: int = 900) -> list[str]:
+def split_text_for_delivery(text: str, soft_limit: int | None = None) -> list[str]:
     """Split long tutor text into complete WhatsApp messages.
 
-    Infrastructure only: paragraph boundaries, then character soft limit.
-    Not an educational rule — short replies yield one chunk.
+    Prefer one bubble; only split at platform max with paragraph/sentence cuts.
+    soft_limit is ignored (kept for call-site compatibility).
     """
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= soft_limit:
-        return [text]
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= soft_limit:
-            chunks.append(remaining.strip())
-            break
-        window = remaining[:soft_limit]
-        # Prefer paragraph, then sentence, then space
-        cut = window.rfind("\n\n")
-        if cut < 40:
-            cut = window.rfind(". ")
-            if cut >= 40:
-                cut = cut + 1
-        if cut < 40:
-            cut = window.rfind(" ")
-        if cut < 40:
-            cut = soft_limit
-        piece = remaining[:cut].strip()
-        remaining = remaining[cut:].lstrip()
-        if piece:
-            chunks.append(piece)
-    return chunks or [text]
+    from waxprep.channel.delivery import split_for_platform
+
+    return split_for_platform(text, "whatsapp")
 
 
 @dataclass(frozen=True, slots=True)
