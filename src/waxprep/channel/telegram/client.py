@@ -132,6 +132,85 @@ class TelegramClient:
         except Exception:
             logger.debug("telegram typing failed", exc_info=True)
 
+    async def send_message_draft(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        draft_id: str,
+        thread_id: int | None = None,
+    ) -> OutboundResult:
+        """Send or update a native live-draft message (Telegram Bot API
+        ``sendMessageDraft``).
+
+        Blueprint §5: the same ``draft_id`` must be reused for updates
+        to the same response. A different ``draft_id`` creates a new
+        draft. The draft is temporary — it expires after ~30 seconds.
+        A permanent final message must be sent once generation finishes.
+
+        Verified: this method exists on the current Telegram Bot API
+        (tested 19 October 2026 against bot @Waxdavidesssaffbot).
+
+        The method returns an ``OutboundResult``; ``provider_message_id``
+        carries the draft's message ID if the API returns one.
+        """
+        client = await self._http()
+        body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "draft_id": draft_id,
+        }
+        if thread_id is not None:
+            body["message_thread_id"] = thread_id
+        try:
+            resp = await client.post(self._url("sendMessageDraft"), json=body)
+            if resp.status_code == 429:
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=True,
+                    error_code="429",
+                    error_detail="rate limited",
+                )
+            data = resp.json()
+            if not data.get("ok"):
+                desc = str(data.get("description") or resp.text)[:200]
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=resp.status_code >= 500,
+                    error_code=str(data.get("error_code") or resp.status_code),
+                    error_detail=desc,
+                )
+            result = data.get("result") or {}
+            mid = (
+                str(result.get("message_id"))
+                if result.get("message_id") is not None
+                else None
+            )
+            return OutboundResult(
+                success=True,
+                provider_message_id=mid,
+                temporary_failure=False,
+            )
+        except httpx.TimeoutException:
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=True,
+                error_code="timeout",
+                error_detail="telegram draft timeout",
+            )
+        except Exception as exc:
+            logger.exception("telegram send_message_draft failed")
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=True,
+                error_code="exception",
+                error_detail=type(exc).__name__,
+            )
+
     async def set_webhook(
         self, url: str, *, secret_token: str | None = None
     ) -> dict[str, Any]:

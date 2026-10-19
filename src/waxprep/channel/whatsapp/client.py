@@ -232,32 +232,20 @@ class WhatsAppClient:
     async def send_typing(self, recipient_external_id: str) -> None:
         """Best-effort typing indicator via WhatsApp Cloud API.
 
-        Uses the messages endpoint with messaging_product + status when
-        available. Failures are swallowed — typing is progressive UX only,
-        never educational logic.
+        Blueprint §6.4: the previous implementation sent a "read" status
+        with a fabricated ``message_id="typing-placeholder"`` and called it
+        a typing indicator. A read receipt and a typing signal are different
+        concepts. The fabricated placeholder has been removed.
+
+        WhatsApp Cloud API does not currently document a general-purpose
+        typing indicator for the Cloud API integration. If a supported
+        typing mechanism is identified and verified, it should be implemented
+        here and the capability reported via ``ChannelCapabilities``. Until
+        then, this method is a documented no-op — it does not fabricate a
+        request.
         """
-        if not recipient_external_id or not self._token:
-            return
-        close = False
-        client = self._client
-        if client is None:
-            client = httpx.AsyncClient(timeout=10.0)
-            close = True
-        try:
-            url = f"{self._base}/{self._phone_number_id}/messages"
-            # Meta Cloud API: mark typing via interactive presence is limited;
-            # sending a read receipt is the widely supported soft signal.
-            await client.post(
-                url,
-                headers=self._headers(),
-                json={
-                    "messaging_product": "whatsapp",
-                    "status": "read",
-                    "message_id": "typing-placeholder",
-                },
-            )
-        except Exception:
-            logger.debug("typing indicator request failed", exc_info=True)
-        finally:
-            if close:
-                await client.aclose()
+        # No-op: WhatsApp Cloud API does not support a verified typing
+        # indicator for this integration. Do not send a fabricated
+        # placeholder message_id. The capability is reported as
+        # unavailable via ChannelCapabilities.
+        return

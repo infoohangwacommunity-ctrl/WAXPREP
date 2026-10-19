@@ -426,13 +426,34 @@ class WhatsAppInboundHandler:
                         "progressive delivery finish failed",
                         exc_info=True,
                     )
-                # If we already delivered complete chunks live, mark the
-                # outbound record delivered so the outbox does not re-send
-                # the full text.
-                if (
-                    turn_result.outbound_delivery_id is not None
-                    and progressive.final_text.strip()
-                ):
+                # The default strategy is FINAL_ONLY (blueprint §6.1): one
+                # coherent final message. If no progressive chunks were sent,
+                # send the complete final text now via the channel client.
+                # If progressive chunks WERE sent, they are already delivered;
+                # do not duplicate the full answer.
+                final_text = progressive.final_text.strip()
+                if final_text and progressive.progressive_chunks_sent == 0:
+                    # FINAL_ONLY: send the complete answer as one message.
+                    try:
+                        result = await client.send_text(
+                            OutboundPayload(
+                                channel=self._config.channel,
+                                wax_id=wax_id,
+                                recipient_external_id=recipient,
+                                text=progressive.final_text,
+                            )
+                        )
+                        if result.success and result.provider_message_id:
+                            last_provider_message_id = result.provider_message_id
+                    except Exception:
+                        logger.debug(
+                            "final-only delivery failed",
+                            exc_info=True,
+                        )
+                # Mark the outbound record delivered so the outbox does
+                # not re-send the full text. The progressive delivery (or
+                # the final-only send above) IS the delivery.
+                if turn_result.outbound_delivery_id is not None and final_text:
                     try:
                         self._storage.mark_outbound_delivered(
                             wax_id,
