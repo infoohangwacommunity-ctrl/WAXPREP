@@ -39,12 +39,12 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from tests.evaluation.golden_conversations import (
+
+from evaluation.golden_conversations import (
     ALL_SCENARIOS,
     BASELINE_NOW,
     GoldenScenario,
 )
-
 from support import TEST_CIPHER
 from waxprep.context.evolution import EvolutionService
 from waxprep.context.investigator import ContextInvestigator
@@ -650,7 +650,7 @@ def test_evaluation_dataset_covers_all_m2_capabilities() -> None:
     """The golden dataset must cover every M2 capability family listed
     in the blueprint. A missing capability is a regression in the
     evaluation surface."""
-    from tests.evaluation.golden_conversations import capabilities_covered
+    from evaluation.golden_conversations import capabilities_covered
 
     expected_capabilities = {
         "interpretation",
@@ -677,7 +677,7 @@ def test_evaluation_dataset_covers_all_m2_capabilities() -> None:
 def test_evaluation_dataset_has_at_least_one_scenario_per_capability() -> None:
     """Each capability must have at least one scenario — a single
     scenario per family is the minimum; future work should add more."""
-    from tests.evaluation.golden_conversations import (
+    from evaluation.golden_conversations import (
         ALL_SCENARIOS,
         capabilities_covered,
     )
