@@ -45,8 +45,6 @@ def _apply_pending_migrations() -> None:
     except Exception:
         logger.exception("migration apply failed")
 
-
-
 app = FastAPI(title="Wax Prep", version=__version__)
 
 _services: Storage | None = None
