@@ -25,6 +25,28 @@ from waxprep.wiring import build_services
 
 logger = logging.getLogger(__name__)
 
+def _apply_pending_migrations() -> None:
+    """Run schema migrations against DATABASE_URL (idempotent)."""
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        logger.warning("DATABASE_URL unset; skipping migrations")
+        return
+    try:
+        import psycopg
+
+        from waxprep.migrations import apply_migrations
+
+        with psycopg.connect(database_url) as conn:
+            applied = apply_migrations(conn)
+            if applied:
+                logger.info("applied migrations: %s", ", ".join(applied))
+            else:
+                logger.info("migrations up to date")
+    except Exception:
+        logger.exception("migration apply failed")
+
+
+
 app = FastAPI(title="Wax Prep", version=__version__)
 
 _services: Storage | None = None
@@ -69,14 +91,26 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     global _services, _turn_service, _history, _clock, _outboxes
 
     settings = load_settings()
+
+    try:
+        # Always apply migrations when DATABASE_URL is present, even if no
+        # channel is enabled yet — keeps schema in sync with the code.
+        _apply_pending_migrations()
+    except Exception:
+        logger.exception("startup migration phase failed")
+
     if not settings.whatsapp_enabled and not settings.telegram_enabled:
+        # Still wire storage so /health can probe the database.
+        try:
+            cipher = build_cipher()
+            storage = services_storage(cipher)
+            _services = storage
+        except Exception:
+            logger.exception("storage composition without channels failed")
         yield
         return
 
     try:
-        # Apply any pending SQL migrations before opening the app connection.
-        # Production often lags the repo when new functions/tables are added.
-        _apply_pending_migrations()
         cipher = build_cipher()
         storage = services_storage(cipher)
         clock = SystemClock()
