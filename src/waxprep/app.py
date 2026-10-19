@@ -25,6 +25,7 @@ from waxprep.wiring import build_services
 
 logger = logging.getLogger(__name__)
 
+
 def _apply_pending_migrations() -> None:
     """Run schema migrations against DATABASE_URL (idempotent)."""
     database_url = os.environ.get("DATABASE_URL")
@@ -44,6 +45,7 @@ def _apply_pending_migrations() -> None:
                 logger.info("migrations up to date")
     except Exception:
         logger.exception("migration apply failed")
+
 
 app = FastAPI(title="Wax Prep", version=__version__)
 

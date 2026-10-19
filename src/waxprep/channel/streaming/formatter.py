@@ -98,6 +98,21 @@ def find_safe_boundary(text: str) -> int:
                 continue  # handled above
             ml = len(open_marker)
             if text[i : i + ml] == open_marker:
+                # For single-character markers (*, _, ~), check if this
+                # is a list item (marker followed by space) or a literal
+                # mathematical operator (space-marker-space). These are
+                # NOT formatting markers — skip them (blueprint §12.4).
+                if ml == 1 and open_marker == "*":
+                    next_char = text[i + 1] if i + 1 < len(text) else ""
+                    prev_char = text[i - 1] if i > 0 else ""
+                    if next_char == " " or (prev_char == " " and next_char in " \n"):
+                        # List item or math operator — not a marker.
+                        i += 1
+                        break
+                    # Also check for list items at start of line.
+                    if prev_char == "\n" and next_char == " ":
+                        i += 1
+                        break
                 # Check if this is a closing marker for an already-open one.
                 closed = False
                 for j, (om, _pos) in enumerate(open_markers):
