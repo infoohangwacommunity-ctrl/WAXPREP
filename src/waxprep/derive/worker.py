@@ -170,13 +170,35 @@ class DerivationWorker:
         # REQUEST_DELETION proposal creates a pending row that nobody
         # picks up. The DeletionService does the claim atomically inside
         # its own transaction, so multiple workers can run safely.
+        #
+        # Blueprint §19 (deferred deletion): the deletion workflow is
+        # explicitly deferred. The path here is ISOLATED so a failure
+        # in the deletion plumbing (a missing SECURITY DEFINER function,
+        # a schema drift, a corrupted request row, a transient DB error)
+        # can never abort the derivation-job loop above. Deletion
+        # failures are logged and counted; the worker continues.
         deletions_processed = deletions_skipped = deletions_failed = 0
         if self._deletion_service is not None:
-            (
-                deletions_processed,
-                deletions_skipped,
-                deletions_failed,
-            ) = self._process_deletion_requests(now)
+            try:
+                (
+                    deletions_processed,
+                    deletions_skipped,
+                    deletions_failed,
+                ) = self._process_deletion_requests(now)
+            except Exception:
+                # The per-request try/except inside
+                # _process_deletion_requests already handles individual
+                # request failures. This outer guard catches a failure
+                # in the enumeration itself (e.g. the SECURITY DEFINER
+                # function is missing on a fresh DB, or RLS denies
+                # access). The derivation jobs above have already been
+                # processed and counted; we must not let a deletion-path
+                # failure discard that work.
+                logger.exception(
+                    "deletion_request_enumeration_failed; "
+                    "derivation jobs already processed are unaffected"
+                )
+                deletions_failed = -1  # signal: enumeration itself broke
 
         return WorkerReport(
             done=done,
