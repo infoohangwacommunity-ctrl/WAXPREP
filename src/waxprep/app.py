@@ -48,6 +48,13 @@ def health() -> dict[str, str]:
     try:
         from waxprep.domain.identifiers import new_wax_id
 
+        # Clear a poisoned aborted transaction so health can recover.
+        try:
+            conn = getattr(_services, "_conn", None)
+            if conn is not None:
+                conn.rollback()
+        except Exception:
+            pass
         _services.get_student(new_wax_id())
     except Exception as exc:  # noqa: BLE001 — health must never crash
         logger.exception("health check failed: storage unreachable")
@@ -67,6 +74,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         return
 
     try:
+        # Apply any pending SQL migrations before opening the app connection.
+        # Production often lags the repo when new functions/tables are added.
+        _apply_pending_migrations()
         cipher = build_cipher()
         storage = services_storage(cipher)
         clock = SystemClock()

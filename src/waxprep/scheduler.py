@@ -85,6 +85,16 @@ def build_worker_services(
     url = database_url or os.environ.get("DATABASE_URL", "")
     if not url:
         raise ValueError("DATABASE_URL is required")
+    # Apply pending migrations on a short-lived connection first.
+    try:
+        from waxprep.migrations import apply_migrations
+
+        with psycopg.connect(url) as mig_conn:
+            applied = apply_migrations(mig_conn)
+            if applied:
+                logger.info("worker applied migrations: %s", ", ".join(applied))
+    except Exception:
+        logger.exception("worker migration apply failed")
     conn: psycopg.Connection[object] = psycopg.connect(url, autocommit=False)
 
     cipher_obj = cipher or load_cipher_from_env()

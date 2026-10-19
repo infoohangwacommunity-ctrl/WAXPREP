@@ -1966,6 +1966,14 @@ class PostgresStorage:
         if wax_id is None:
             from waxprep.storage.session import APP_ROLE
 
+            try:
+                if self._conn.info.transaction_status != 0:  # not IDLE
+                    self._conn.rollback()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
             with self._conn.cursor(row_factory=dict_row) as cur:
                 cur.execute("RESET ROLE")
                 cur.execute(

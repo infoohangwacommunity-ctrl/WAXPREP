@@ -14,8 +14,22 @@ class MigrationChecksumError(RuntimeError):
 
 
 def migrations_dir() -> Path:
-    """Return the repository migrations directory."""
-    return Path(__file__).resolve().parents[2] / "migrations"
+    """Return the repository migrations directory.
+
+    Tries several layouts: repo root (dev), /app/migrations (Railway/Docker),
+    and a path relative to the installed package.
+    """
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2] / "migrations",  # src/waxprep -> repo root
+        Path("/app/migrations"),
+        here.parents[1] / "migrations",  # fallback next to package
+        Path.cwd() / "migrations",
+    ]
+    for path in candidates:
+        if path.is_dir() and any(path.glob("*.sql")):
+            return path
+    return candidates[0]
 
 
 def _sha256_text(text: str) -> str:
