@@ -267,6 +267,10 @@ class PostgresStorage:
 
     # --- unified history ----------------------------------------------------------
     def _history(self, row: Row) -> HistoryEntry:
+        # Support dict rows (preferred) and plain tuples (defensive).
+        if not isinstance(row, dict):
+            cols = [c.strip() for c in HISTORY_COLUMNS.split(",")]
+            row = dict(zip(cols, row, strict=False))  # type: ignore[arg-type]
         wax_id = WaxId(row["wax_id"])
         blob = row["text_encrypted"]
         return HistoryEntry(
@@ -339,7 +343,7 @@ class PostgresStorage:
             if entry.text is not None
             else None
         )
-        with self._conn.cursor() as cur:
+        with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"INSERT INTO history_entries ({HISTORY_COLUMNS}) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "

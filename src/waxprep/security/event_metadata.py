@@ -33,6 +33,11 @@ ALLOWED_EVENT_METADATA_KEYS: frozenset[str] = frozenset(
         "request_id",  # UUID of a deletion/lifecycle request (not student content)
         "investigation_status",  # closed-vocabulary status of one CI investigation
         "trigger_entry_id",  # UUID of the student entry that triggered an investigation
+        # Operational quality signals (no student plaintext):
+        "evidence_count",  # integer count of CI evidence items
+        "invalid_selection",  # bool — CI selection contract failure
+        "notebook_proposal",  # "accepted" | "none" | "rejected"
+        "reply_chars",  # length of tutor reply (not the text)
     }
 )
 

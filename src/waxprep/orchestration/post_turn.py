@@ -64,14 +64,26 @@ class PostTurnReview:
                     object_id=record.tutor_entry_id,
                     created_at=now,
                     metadata={
-                        "student_entry_id": str(record.student_entry_id),
-                        "tutor_entry_id": str(record.tutor_entry_id),
-                        "investigation_status": record.investigation_status,
-                        "evidence_count": record.evidence_count,
-                        "invalid_selection": record.invalid_selection,
-                        "notebook_proposal_accepted": record.notebook_proposal_accepted,
-                        "reply_chars": record.reply_chars,
-                        "notes": list(record.notes)[:8],
+                        "source": "post_turn",
+                        "kind": "turn_quality",
+                        "status": (
+                            "notebook_updated"
+                            if record.notebook_proposal_accepted
+                            else "ok"
+                        ),
+                        "wax_id": str(record.wax_id),
+                        "object_type": "history",
+                        "object_id": str(record.tutor_entry_id),
+                        "trigger_entry_id": str(record.student_entry_id),
+                        "investigation_status": record.investigation_status[:80],
+                        "evidence_count": int(record.evidence_count),
+                        "invalid_selection": bool(record.invalid_selection),
+                        "notebook_proposal": (
+                            "accepted"
+                            if record.notebook_proposal_accepted
+                            else "none"
+                        ),
+                        "reply_chars": int(record.reply_chars),
                     },
                 )
             )

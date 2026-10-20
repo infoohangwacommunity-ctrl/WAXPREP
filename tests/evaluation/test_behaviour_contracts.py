@@ -119,4 +119,4 @@ def test_post_turn_quality_record_shape() -> None:
     events = storage.list_events(wax)
     assert len(events) == 1
     assert events[0].kind == "turn_quality"
-    assert events[0].metadata["reply_chars"] == 12
+    assert events[0].metadata.get("reply_chars") == 12
