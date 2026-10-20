@@ -68,8 +68,21 @@ class ContextInvestigator:
     )
 
     async def investigate(self, request: InvestigationRequest) -> ContextPackage:
-        query = request.query.strip()
-        if not query:
+        raw_query = request.query.strip()
+        query = raw_query
+        # Tell CI the durable id of the message already saved in history so
+        # it can cite that entry when proposing notebook updates — without
+        # inventing ids or hardcoding topics.
+        if raw_query and request.trigger_entry_id is not None:
+            query = (
+                f"{raw_query}\n\n"
+                f"[trigger_history_entry_id={request.trigger_entry_id}] "
+                "This is the already-saved history id for the current student "
+                "message. When proposing a notebook change about what the "
+                "student just said, cite object_type=history and this id in "
+                "evidence_refs after you have inspected relevant context."
+            )
+        if not raw_query:
             # A blank message is a deliberate SKIPPED, not a successful
             # investigation of nothing. The Teacher can branch on this.
             return ContextPackage(
@@ -238,6 +251,68 @@ class ContextInvestigator:
             # the step budget. This is distinct from the model saying
             # "stop" — it is a mechanical cap.
             hit_step_budget = True
+
+        # Optional notebook stewardship step: if CI never proposed a lifecycle
+        # change, give one more decision focused on whether a durable notebook
+        # update is justified. The model may still stop; we do not force a write.
+        if not any(x.startswith("proposal_accepted:") for x in investigated):
+            if tool_calls < limits.max_tool_calls and not hit_step_budget:
+                visible = format_for_model(
+                    evidence, request.now, limits.max_context_characters
+                )
+                steward_query = (
+                    query
+                    + "\n\n[stewardship] If this turn established durable "
+                    "understanding useful for future personalization, and you "
+                    "have evidence ids to cite, call propose_lifecycle_change. "
+                    "Otherwise stop. Do not invent evidence ids."
+                )
+                steward_req = ContextModelRequest(
+                    system_prompt=CONTEXT_INTELLIGENCE_SYSTEM_PROMPT,
+                    user_query=steward_query,
+                    evidence=visible,
+                    tools=context_tool_definitions(),
+                    max_output_tokens=limits.max_model_output_tokens,
+                    wax_id=request.wax_id,
+                    now=request.now,
+                )
+                decision = await self.model.decide(steward_req)
+                investigated.append(f"stewardship:{decision.action}: {decision.reason}")
+                if decision.action not in ("stop", "final") and decision.action in self.tools:
+                    tool = self.tools.get(decision.action)
+                    if tool is not None and tool_calls < limits.max_tool_calls:
+                        tool_calls += 1
+                        try:
+                            result = await tool.execute(
+                                ToolInvocation(
+                                    wax_id=request.wax_id,
+                                    arguments=decision.arguments or {},
+                                    now=request.now,
+                                    trigger_entry_id=request.trigger_entry_id,
+                                )
+                            )
+                        except Exception as exc:
+                            logger.exception("stewardship tool failed")
+                            failed_tool_calls += 1
+                            investigated.append(
+                                f"stewardship_tool_failed:{decision.action}:{type(exc).__name__}"
+                            )
+                        else:
+                            if result.metadata:
+                                accepted = result.metadata.get("accepted")
+                                operation = result.metadata.get("operation") or decision.action
+                                if accepted is True:
+                                    investigated.append(f"proposal_accepted:{operation}")
+                                elif accepted is False:
+                                    investigated.append(
+                                        f"proposal_rejected:{operation}:"
+                                        f"{str(result.metadata.get('reason', ''))[:80]}"
+                                    )
+                            for item in result.results:
+                                if item.id in seen_ids:
+                                    continue
+                                seen_ids.add(item.id)
+                                evidence.append(item)
 
         # Finalize with whatever evidence we have.
         visible = format_for_model(evidence, request.now, limits.max_context_characters)
