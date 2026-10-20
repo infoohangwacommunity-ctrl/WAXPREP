@@ -26,6 +26,8 @@ class Settings:
     upstage_api_key: str | None = None
     upstage_base_url: str = "https://api.upstage.ai/v1"
     upstage_document_model: str = "document-parse"
+    upstage_model: str = "solar-pro4"
+    reasoning_effort: str = "medium"
     voice_provider: str | None = None  # "gemini" | "grok" | None
     gemini_api_key: str | None = None
     xai_api_key: str | None = None
@@ -60,6 +62,12 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         or env.get("WAXPREP_UPSTAGE_API_KEY"),
         upstage_base_url=env.get("UPSTAGE_BASE_URL", "https://api.upstage.ai/v1"),
         upstage_document_model=env.get("UPSTAGE_DOCUMENT_MODEL", "document-parse"),
+        upstage_model=env.get("UPSTAGE_MODEL")
+        or env.get("WAXPREP_UPSTAGE_MODEL")
+        or "solar-pro4",
+        reasoning_effort=(
+            env.get("WAXPREP_REASONING_EFFORT") or env.get("REASONING_EFFORT") or "medium"
+        ).lower(),
         voice_provider=(env.get("WAXPREP_VOICE_PROVIDER") or None),
         gemini_api_key=env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY"),
         xai_api_key=env.get("XAI_API_KEY"),

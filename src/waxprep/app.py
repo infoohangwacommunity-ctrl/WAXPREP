@@ -317,7 +317,8 @@ def build_context_model(settings: Any = None):
             from waxprep.context.gateway_model import GatewayContextModel
 
             gateway = build_gateway(settings)
-            return GatewayContextModel(gateway)
+            effort = getattr(settings, "reasoning_effort", None) or "medium"
+            return GatewayContextModel(gateway, reasoning_effort=effort)
     except Exception:
         logger.exception("falling back to MockContextModel for CI")
     return MockContextModel()

@@ -47,6 +47,7 @@ from typing import Any
 from waxprep.channel.contracts import InteractiveSuggestion
 from waxprep.clock import Clock
 from waxprep.context.investigator import ContextInvestigator
+from waxprep.orchestration.post_turn import PostTurnQualityRecord, PostTurnReview
 from waxprep.context.models import (
     ContextPackage,
     InvestigationLimits,
@@ -319,24 +320,72 @@ class TurnServiceCiFirst:
                         raise
             outbound_id = None
             if channel is not None:
-                delivery = self._storage.create_outbound_delivery(
-                    OutboundDelivery(
-                        id=new_id(),
-                        wax_id=wax_id,
-                        tutor_entry_id=tutor_entry.id,
-                        channel=channel,
-                        channel_ref=channel_ref,
-                        provider_message_id=None,
-                        status=OutboundStatus.PENDING,
-                        attempts=0,
-                        last_error=None,
-                        delivered_at=None,
-                        run_after=now,
-                        created_at=now,
-                        updated_at=now,
-                    )
+                existing_out = self._storage.get_outbound_delivery_for_tutor(
+                    wax_id, tutor_entry.id, channel
                 )
-                outbound_id = delivery.id
+                if existing_out is not None:
+                    outbound_id = existing_out.id
+                else:
+                    try:
+                        delivery = self._storage.create_outbound_delivery(
+                            OutboundDelivery(
+                                id=new_id(),
+                                wax_id=wax_id,
+                                tutor_entry_id=tutor_entry.id,
+                                channel=channel,
+                                channel_ref=channel_ref,
+                                provider_message_id=None,
+                                status=OutboundStatus.PENDING,
+                                attempts=0,
+                                last_error=None,
+                                delivered_at=None,
+                                run_after=now,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+                        outbound_id = delivery.id
+                    except Exception:
+                        logger.exception(
+                            "outbound delivery create failed; continuing with reply saved"
+                        )
+                        repaired = self._storage.get_outbound_delivery_for_tutor(
+                            wax_id, tutor_entry.id, channel
+                        )
+                        outbound_id = repaired.id if repaired else None
+
+        # Post-response quality record (structured event, no plaintext body).
+        try:
+            investigated = list(context_package.investigated) if context_package else []
+            notebook_ok = any(
+                x.startswith("proposal_accepted:") for x in investigated
+            )
+            PostTurnReview(self._storage, enable_stewardship=False).record_quality(
+                PostTurnQualityRecord(
+                    wax_id=wax_id,
+                    student_entry_id=student_entry.id,
+                    tutor_entry_id=tutor_entry.id,
+                    investigation_status=(
+                        context_package.investigation_status.value
+                        if context_package
+                        else "unknown"
+                    ),
+                    evidence_count=(
+                        len(context_package.evidence) if context_package else 0
+                    ),
+                    invalid_selection=bool(
+                        context_package.invalid_selection if context_package else False
+                    ),
+                    notebook_proposal_accepted=notebook_ok,
+                    reply_chars=len(reply_text or ""),
+                    notes=tuple(
+                        x for x in investigated if x.startswith("proposal_")
+                    )[:6],
+                ),
+                now=now,
+            )
+        except Exception:
+            logger.exception("post-turn quality recording failed")
 
         return TurnResultCiFirst(
             student_entry=student_entry,

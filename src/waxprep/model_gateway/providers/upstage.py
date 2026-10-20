@@ -47,15 +47,17 @@ class UpstageResponsesProvider:
         self._client = client
 
     def capabilities(self, model: str) -> frozenset[ModelCapability]:
-        # Solar chat is text (+ tools). Do not claim image/file input for
-        # Responses-style multimodal; Document Parse is a separate path.
-        return frozenset(
-            {
-                ModelCapability.TEXT_INPUT,
-                ModelCapability.TOOL_CALLING,
-                ModelCapability.STREAMING,
-            }
-        )
+        # Solar chat is text (+ tools). Reasoning effort is supported on
+        # solar-pro* ids; Document Parse remains a separate path.
+        caps = {
+            ModelCapability.TEXT_INPUT,
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+        }
+        mid = (model or "").lower()
+        if "solar-pro" in mid or "solar_pro" in mid:
+            caps.add(ModelCapability.REASONING)
+        return frozenset(caps)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -95,6 +97,11 @@ class UpstageResponsesProvider:
                 }
                 for tool in request.tools
             ]
+            payload["tool_choice"] = "auto"
+        # Provider-neutral reasoning_effort maps to Upstage's parameter.
+        # Default is applied by callers (medium); omit when unset.
+        if request.reasoning_effort:
+            payload["reasoning_effort"] = request.reasoning_effort
         return payload
 
     def _parse_response(self, data: Any, request: ModelRequest) -> ModelResponse:
@@ -107,6 +114,11 @@ class UpstageResponsesProvider:
             finish = choice0.get("finish_reason")
             message = choice0.get("message") or {}
             text = str(message.get("content") or "")
+            # Never surface provider reasoning traces to students.
+            for key in ("reasoning", "reasoning_content"):
+                if key in message and message.get(key):
+                    # Keep final content only; reasoning stays in raw_metadata.
+                    pass
             for tc in message.get("tool_calls") or []:
                 fn = tc.get("function") or {}
                 raw_args = fn.get("arguments") or {}

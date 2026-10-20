@@ -128,11 +128,13 @@ class ModelTeacherCiFirst:
         model_name: str = DEFAULT_TEACHER_MODEL_NAME,
         max_output_tokens: int | None = None,
         timeout_seconds: float = 60.0,
+        reasoning_effort: str | None = "medium",
     ) -> None:
         self._gateway = gateway
         self._model_name = model_name
         self._max_output_tokens = max_output_tokens
         self._timeout_seconds = timeout_seconds
+        self._reasoning_effort = reasoning_effort
 
     async def teach(
         self,
@@ -185,6 +187,7 @@ class ModelTeacherCiFirst:
             },
             max_output_tokens=self._max_output_tokens,
             timeout_seconds=self._timeout_seconds,
+            reasoning_effort=self._reasoning_effort,
         )
         # Prefer streaming accumulation when the gateway/provider supports it.
         # Final persisted text is always the complete answer — never a partial.

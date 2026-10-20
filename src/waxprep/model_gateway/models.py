@@ -102,6 +102,7 @@ class ModelRequest:
     metadata: Mapping[str, str] = field(default_factory=_empty_str_map)
     max_output_tokens: int | None = None
     temperature: float | None = None
+    reasoning_effort: str | None = None
     stream: bool = False
     timeout_seconds: float = 60.0
 
@@ -112,6 +113,12 @@ class ModelRequest:
             raise ValueError("temperature must be between 0 and 2")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if self.reasoning_effort is not None:
+            allowed = {"low", "medium", "high", "xhigh", "max"}
+            if self.reasoning_effort not in allowed:
+                raise ValueError(
+                    f"reasoning_effort must be one of {sorted(allowed)}"
+                )
 
 
 @dataclass(frozen=True, slots=True)
