@@ -261,8 +261,7 @@ class ContextInvestigator:
                     evidence, request.now, limits.max_context_characters
                 )
                 steward_query = (
-                    query
-                    + "\n\n[stewardship] If this turn established durable "
+                    query + "\n\n[stewardship] If this turn established durable "
                     "understanding useful for future personalization, and you "
                     "have evidence ids to cite, call propose_lifecycle_change. "
                     "Otherwise stop. Do not invent evidence ids."
@@ -278,7 +277,10 @@ class ContextInvestigator:
                 )
                 decision = await self.model.decide(steward_req)
                 investigated.append(f"stewardship:{decision.action}: {decision.reason}")
-                if decision.action not in ("stop", "final") and decision.action in self.tools:
+                if (
+                    decision.action not in ("stop", "final")
+                    and decision.action in self.tools
+                ):
                     tool = self.tools.get(decision.action)
                     if tool is not None and tool_calls < limits.max_tool_calls:
                         tool_calls += 1
@@ -300,9 +302,13 @@ class ContextInvestigator:
                         else:
                             if result.metadata:
                                 accepted = result.metadata.get("accepted")
-                                operation = result.metadata.get("operation") or decision.action
+                                operation = (
+                                    result.metadata.get("operation") or decision.action
+                                )
                                 if accepted is True:
-                                    investigated.append(f"proposal_accepted:{operation}")
+                                    investigated.append(
+                                        f"proposal_accepted:{operation}"
+                                    )
                                 elif accepted is False:
                                     investigated.append(
                                         f"proposal_rejected:{operation}:"

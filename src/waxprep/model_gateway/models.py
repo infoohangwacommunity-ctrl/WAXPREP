@@ -116,9 +116,7 @@ class ModelRequest:
         if self.reasoning_effort is not None:
             allowed = {"low", "medium", "high", "xhigh", "max"}
             if self.reasoning_effort not in allowed:
-                raise ValueError(
-                    f"reasoning_effort must be one of {sorted(allowed)}"
-                )
+                raise ValueError(f"reasoning_effort must be one of {sorted(allowed)}")
 
 
 @dataclass(frozen=True, slots=True)

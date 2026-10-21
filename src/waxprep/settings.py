@@ -66,7 +66,9 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         or env.get("WAXPREP_UPSTAGE_MODEL")
         or "solar-pro4",
         reasoning_effort=(
-            env.get("WAXPREP_REASONING_EFFORT") or env.get("REASONING_EFFORT") or "medium"
+            env.get("WAXPREP_REASONING_EFFORT")
+            or env.get("REASONING_EFFORT")
+            or "medium"
         ).lower(),
         voice_provider=(env.get("WAXPREP_VOICE_PROVIDER") or None),
         gemini_api_key=env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY"),

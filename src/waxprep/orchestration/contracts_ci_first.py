@@ -56,6 +56,10 @@ class TeacherInput:
     - The exact student message (never rewritten)
     - A complete ContextPackage from CI
     - The current time
+    - The last few turns of the exchange (recent_turns) — the
+      raw, verbatim exchange that makes the teacher feel like it's
+      IN the exchange, not reading a case file. Long-term memory
+      stays in CI's hands; this is short-term exchangeal context.
 
     The Teacher does NOT receive a consultation capability because
     CI has already completed its investigation.
@@ -65,6 +69,7 @@ class TeacherInput:
     original_message: HistoryEntry
     context_package: ContextPackage
     now: datetime
+    recent_turns: tuple[HistoryEntry, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

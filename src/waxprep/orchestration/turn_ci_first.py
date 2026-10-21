@@ -47,7 +47,6 @@ from typing import Any
 from waxprep.channel.contracts import InteractiveSuggestion
 from waxprep.clock import Clock
 from waxprep.context.investigator import ContextInvestigator
-from waxprep.orchestration.post_turn import PostTurnQualityRecord, PostTurnReview
 from waxprep.context.models import (
     ContextPackage,
     InvestigationLimits,
@@ -77,6 +76,7 @@ from waxprep.orchestration.contracts_ci_first import (
     TextDeltaSink,
 )
 from waxprep.orchestration.errors import InvalidTeacherOutcomeError
+from waxprep.orchestration.post_turn import PostTurnQualityRecord, PostTurnReview
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
@@ -256,11 +256,23 @@ class TurnServiceCiFirst:
                 "invalid_selection": context_package.invalid_selection,
             },
         )
+        # Fetch the last 6 turns of exchange (3 exchanges) for
+        # short-term exchangeal context. Long-term memory stays
+        # in CI's hands; this is the raw, verbatim recent exchange
+        # that makes the teacher feel like it's IN the exchange,
+        # not reading a case file.
+        recent_turns = self._storage.list_history(
+            wax_id,
+            limit=6,
+            newest_first=True,
+        )
+
         teacher_input = TeacherInputCiFirst(
             wax_id=wax_id,
             original_message=student_entry,
             context_package=context_package,
             now=now,
+            recent_turns=recent_turns,
         )
         outcome: TeacherOutcomeCiFirst = await self._teacher.teach(
             teacher_input,
@@ -357,9 +369,7 @@ class TurnServiceCiFirst:
         # Post-response quality record (structured event, no plaintext body).
         try:
             investigated = list(context_package.investigated) if context_package else []
-            notebook_ok = any(
-                x.startswith("proposal_accepted:") for x in investigated
-            )
+            notebook_ok = any(x.startswith("proposal_accepted:") for x in investigated)
             PostTurnReview(self._storage, enable_stewardship=False).record_quality(
                 PostTurnQualityRecord(
                     wax_id=wax_id,
@@ -378,9 +388,9 @@ class TurnServiceCiFirst:
                     ),
                     notebook_proposal_accepted=notebook_ok,
                     reply_chars=len(reply_text or ""),
-                    notes=tuple(
-                        x for x in investigated if x.startswith("proposal_")
-                    )[:6],
+                    notes=tuple(x for x in investigated if x.startswith("proposal_"))[
+                        :6
+                    ],
                 ),
                 now=now,
             )

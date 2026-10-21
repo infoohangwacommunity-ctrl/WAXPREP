@@ -11,11 +11,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 from waxprep.context.investigator import ContextInvestigator
-from waxprep.context.models import InvestigationRequest, InvestigationLimits
+from waxprep.context.models import InvestigationLimits, InvestigationRequest
 from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import Event, HistoryEntry, new_id
 from waxprep.storage.protocol import Storage
@@ -79,9 +78,7 @@ class PostTurnReview:
                         "evidence_count": int(record.evidence_count),
                         "invalid_selection": bool(record.invalid_selection),
                         "notebook_proposal": (
-                            "accepted"
-                            if record.notebook_proposal_accepted
-                            else "none"
+                            "accepted" if record.notebook_proposal_accepted else "none"
                         ),
                         "reply_chars": int(record.reply_chars),
                     },

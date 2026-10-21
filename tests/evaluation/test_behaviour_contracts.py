@@ -39,7 +39,12 @@ async def test_every_message_saved_and_quality_event_recorded() -> None:
     clock = FakeClock(datetime(2026, 10, 20, 12, 0, tzinfo=UTC))
     wax = new_wax_id()
     storage.create_student(
-        Student(wax_id=wax, status=StudentStatus.ACTIVE, created_at=clock.now())
+        Student(
+            wax_id=wax,
+            status=StudentStatus.ACTIVE,
+            created_at=clock.now(),
+            updated_at=clock.now(),
+        )
     )
     token_index = TokenIndex(cipher)
     indexer = Indexer(storage, token_index, clock, has_embedder=False)
@@ -50,7 +55,7 @@ async def test_every_message_saved_and_quality_event_recorded() -> None:
         model=MockContextModel(),
         tools=build_default_tools(storage, retriever, None, evolution=evolution),
     )
-    teacher = MockTeacher(
+    teacher = MockTeacher(  # type: ignore[arg-type]
         script=MockTeacherScript(
             instructions=[("reply", "Hello — I'm Wax Prep. What are you working on?")]
         )
@@ -59,7 +64,7 @@ async def test_every_message_saved_and_quality_event_recorded() -> None:
         storage,
         history,
         investigator,
-        teacher,
+        teacher,  # type: ignore[arg-type]
         clock,
         ci_limits=InvestigationLimits(max_steps=2, max_tool_calls=2),
     )
@@ -101,7 +106,12 @@ def test_post_turn_quality_record_shape() -> None:
     wax = new_wax_id()
     now = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
     storage.create_student(
-        Student(wax_id=wax, status=StudentStatus.ACTIVE, created_at=now)
+        Student(
+            wax_id=wax,
+            status=StudentStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        )
     )
     PostTurnReview(storage, enable_stewardship=False).record_quality(
         PostTurnQualityRecord(
