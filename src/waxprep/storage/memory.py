@@ -181,10 +181,7 @@ class InMemoryStorage:
                     and existing.channel_ref == entry.channel_ref
                 ):
                     return existing, False
-        if (
-            entry.author_kind is AuthorKind.TUTOR
-            and entry.reply_to_id is not None
-        ):
+        if entry.author_kind is AuthorKind.TUTOR and entry.reply_to_id is not None:
             for existing in self._history.values():
                 if (
                     existing.wax_id == entry.wax_id
