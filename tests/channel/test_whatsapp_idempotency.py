@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import asyncio
 from datetime import UTC, datetime
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
