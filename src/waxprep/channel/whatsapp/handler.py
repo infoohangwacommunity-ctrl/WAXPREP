@@ -173,9 +173,7 @@ class WhatsAppInboundHandler:
                 return await self._handle_message_unlocked(msg)
         return await self._handle_message_unlocked(msg)
 
-    async def _handle_message_unlocked(
-        self, msg: NormalizedInbound
-    ) -> InboundResult:
+    async def _handle_message_unlocked(self, msg: NormalizedInbound) -> InboundResult:
         """Process a normalized inbound WhatsApp message.
 
         This is the main entry point called from the webhook route.

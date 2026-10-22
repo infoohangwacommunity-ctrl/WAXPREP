@@ -357,7 +357,9 @@ class TurnServiceCiFirst:
             with self._storage.transaction():
                 # Idempotent: a concurrent recovery path may have already saved
                 # the tutor reply for this student entry.
-                existing_tutor = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
+                existing_tutor = self._storage.find_tutor_reply_to(
+                    wax_id, student_entry.id
+                )
                 if existing_tutor is not None:
                     tutor_entry = existing_tutor
                 else:
@@ -408,8 +410,12 @@ class TurnServiceCiFirst:
 
             # Post-response quality record (structured event, no plaintext body).
             try:
-                investigated = list(context_package.investigated) if context_package else []
-                notebook_ok = any(x.startswith("proposal_accepted:") for x in investigated)
+                investigated = (
+                    list(context_package.investigated) if context_package else []
+                )
+                notebook_ok = any(
+                    x.startswith("proposal_accepted:") for x in investigated
+                )
                 PostTurnReview(self._storage, enable_stewardship=False).record_quality(
                     PostTurnQualityRecord(
                         wax_id=wax_id,
@@ -424,13 +430,15 @@ class TurnServiceCiFirst:
                             len(context_package.evidence) if context_package else 0
                         ),
                         invalid_selection=bool(
-                            context_package.invalid_selection if context_package else False
+                            context_package.invalid_selection
+                            if context_package
+                            else False
                         ),
                         notebook_proposal_accepted=notebook_ok,
                         reply_chars=len(reply_text or ""),
-                        notes=tuple(x for x in investigated if x.startswith("proposal_"))[
-                            :6
-                        ],
+                        notes=tuple(
+                            x for x in investigated if x.startswith("proposal_")
+                        )[:6],
                     ),
                     now=now,
                 )

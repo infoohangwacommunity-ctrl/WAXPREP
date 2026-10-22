@@ -66,7 +66,9 @@ def _stack(clock: FakeClock):
     return storage, history, turns
 
 
-def _seed_student(storage: InMemoryStorage, clock: FakeClock, phone: str = "15551234567"):
+def _seed_student(
+    storage: InMemoryStorage, clock: FakeClock, phone: str = "15551234567"
+):
     wax = new_wax_id()
     now = clock.now()
     storage.create_student(
@@ -84,7 +86,9 @@ def _seed_student(storage: InMemoryStorage, clock: FakeClock, phone: str = "1555
     return wax
 
 
-def _msg(wamid: str, text: str = "hello", phone: str = "15551234567") -> NormalizedInbound:
+def _msg(
+    wamid: str, text: str = "hello", phone: str = "15551234567"
+) -> NormalizedInbound:
     return NormalizedInbound(
         channel="whatsapp",
         wax_id=None,
@@ -110,7 +114,11 @@ async def test_duplicate_webhook_same_wamid_single_tutor_reply() -> None:
     r2 = await handler.handle_message(msg)
     assert r1.accepted and r2.accepted
     assert r1.student_entry_id == r2.student_entry_id
-    tutors = [e for e in storage.list_history(wax, limit=50) if e.author_kind is AuthorKind.TUTOR]
+    tutors = [
+        e
+        for e in storage.list_history(wax, limit=50)
+        if e.author_kind is AuthorKind.TUTOR
+    ]
     assert len(tutors) == 1
 
 
@@ -127,7 +135,11 @@ async def test_concurrent_handle_same_message_one_tutor() -> None:
         handler.handle_message(msg),
     )
     assert all(r.accepted for r in results)
-    tutors = [e for e in storage.list_history(wax, limit=50) if e.author_kind is AuthorKind.TUTOR]
+    tutors = [
+        e
+        for e in storage.list_history(wax, limit=50)
+        if e.author_kind is AuthorKind.TUTOR
+    ]
     assert len(tutors) == 1
 
 
@@ -166,7 +178,11 @@ async def test_process_turn_job_after_tutor_exists_is_noop() -> None:
     )
     recovered = await turns.process_turn_job(job)
     assert recovered.duplicate is True
-    tutors = [e for e in storage.list_history(wax, limit=50) if e.author_kind is AuthorKind.TUTOR]
+    tutors = [
+        e
+        for e in storage.list_history(wax, limit=50)
+        if e.author_kind is AuthorKind.TUTOR
+    ]
     assert len(tutors) == 1
 
 
@@ -179,7 +195,11 @@ async def test_tutor_record_race_returns_existing_not_raise() -> None:
         wax, AuthorKind.STUDENT, "x", channel="whatsapp", channel_ref="wamid.RACE"
     )
     t1, c1 = history.record_with_status(
-        wax, AuthorKind.TUTOR, "first answer", channel="whatsapp", reply_to_id=student.id
+        wax,
+        AuthorKind.TUTOR,
+        "first answer",
+        channel="whatsapp",
+        reply_to_id=student.id,
     )
     t2, c2 = history.record_with_status(
         wax,
@@ -228,7 +248,10 @@ async def test_outbox_skips_already_delivered() -> None:
         return_value=type("R", (), {"success": True, "provider_message_id": "x"})()
     )
     outbox = WhatsAppOutbox(
-        storage, client, clock, config=OutboxConfig(batch_size=10, poll_interval_seconds=60)
+        storage,
+        client,
+        clock,
+        config=OutboxConfig(batch_size=10, poll_interval_seconds=60),
     )
     await outbox._process_delivery(delivery, now)
     client.send_text.assert_not_called()
@@ -247,7 +270,11 @@ async def test_failure_after_reply_process_turn_does_not_second_tutor() -> None:
         wax, "q1", channel="whatsapp", channel_ref="wamid.POST_FAIL"
     )
     assert r2.duplicate is True
-    tutors = [e for e in storage.list_history(wax, limit=50) if e.author_kind is AuthorKind.TUTOR]
+    tutors = [
+        e
+        for e in storage.list_history(wax, limit=50)
+        if e.author_kind is AuthorKind.TUTOR
+    ]
     assert len(tutors) == 1
 
 
