@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
@@ -35,6 +37,7 @@ from waxprep.domain.models import (
 from waxprep.history.service import HistoryService
 from waxprep.index.indexer import Indexer
 from waxprep.index.tokens import TokenIndex
+from waxprep.orchestration.contracts_ci_first import Teacher as TeacherProtocol
 from waxprep.orchestration.mock_teacher import MockTeacher, MockTeacherScript
 from waxprep.orchestration.turn_ci_first import TurnServiceCiFirst
 from waxprep.storage.memory import InMemoryStorage
@@ -59,7 +62,7 @@ def _stack(clock: FakeClock):
         storage,
         history,
         investigator,
-        teacher,
+        cast(TeacherProtocol, teacher),
         clock,
         ci_limits=InvestigationLimits(max_steps=2, max_tool_calls=2),
     )
