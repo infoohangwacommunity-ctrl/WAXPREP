@@ -146,6 +146,15 @@ class WhatsAppOutbox:
         self, delivery: OutboundDelivery, now: datetime
     ) -> None:
         """Process a single delivery record."""
+        if delivery.status is OutboundStatus.DELIVERED:
+            logger.info(
+                "skipping already-delivered outbound",
+                extra={"delivery_id": str(delivery.id)},
+            )
+            return
+        if delivery.status is OutboundStatus.FAILED:
+            return
+
         logger.info(
             "processing delivery",
             extra={

@@ -17,6 +17,8 @@ The handler ensures:
 
 from __future__ import annotations
 
+import asyncio
+
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
@@ -123,6 +125,16 @@ class WhatsAppInboundHandler:
         # the Teacher generates (progressive delivery). Outbox remains the
         # durable recovery path for the final authoritative text.
         self._whatsapp_client = whatsapp_client
+        self._message_locks: dict[str, asyncio.Lock] = {}
+        self._message_locks_guard = asyncio.Lock()
+
+    async def _lock_for_message(self, provider_message_id: str) -> asyncio.Lock:
+        async with self._message_locks_guard:
+            lock = self._message_locks.get(provider_message_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._message_locks[provider_message_id] = lock
+            return lock
 
     def resolve_sender(self, sender: str) -> WaxId | None:
         """Resolve a WhatsApp phone number to a WAX ID.
@@ -153,6 +165,17 @@ class WhatsAppInboundHandler:
         return student
 
     async def handle_message(self, msg: NormalizedInbound) -> InboundResult:
+        """Serialize per WhatsApp message id, then process once."""
+        mid = (msg.provider_message_id or "").strip()
+        if mid:
+            lock = await self._lock_for_message(mid)
+            async with lock:
+                return await self._handle_message_unlocked(msg)
+        return await self._handle_message_unlocked(msg)
+
+    async def _handle_message_unlocked(
+        self, msg: NormalizedInbound
+    ) -> InboundResult:
         """Process a normalized inbound WhatsApp message.
 
         This is the main entry point called from the webhook route.

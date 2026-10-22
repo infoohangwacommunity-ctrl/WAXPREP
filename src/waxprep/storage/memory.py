@@ -180,6 +180,17 @@ class InMemoryStorage:
                     and existing.channel_ref == entry.channel_ref
                 ):
                     return existing, False
+        if (
+            entry.author_kind is AuthorKind.TUTOR
+            and entry.reply_to_id is not None
+        ):
+            for existing in self._history.values():
+                if (
+                    existing.wax_id == entry.wax_id
+                    and existing.author_kind is AuthorKind.TUTOR
+                    and existing.reply_to_id == entry.reply_to_id
+                ):
+                    return existing, False
         if (entry.wax_id, entry.id) in self._history:
             raise ValueError("history entry already exists")
         # All pre-checks passed; mutate.

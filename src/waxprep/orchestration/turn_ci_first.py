@@ -208,7 +208,21 @@ class TurnServiceCiFirst:
             # Previous attempt crashed before tutor reply was saved;
             # resume teaching below.
 
-        # 3. Context Intelligence runs automatically for every message.
+        # 3. Race barrier: concurrent webhook + process_turn must not teach twice.
+        existing_reply = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
+        if existing_reply is not None:
+            outbound = self._storage.get_outbound_delivery_for_tutor(
+                wax_id, existing_reply.id, channel
+            )
+            return TurnResultCiFirst(
+                student_entry=student_entry,
+                tutor_entry=existing_reply,
+                context_package=None,
+                duplicate=True,
+                outbound_delivery_id=outbound.id if outbound else None,
+            )
+
+        # 4. Context Intelligence runs automatically for every message.
         now = self._clock.now()
         ci_request = InvestigationRequest(
             wax_id=wax_id,
@@ -301,23 +315,15 @@ class TurnServiceCiFirst:
             if existing_tutor is not None:
                 tutor_entry = existing_tutor
             else:
-                try:
-                    tutor_entry = self._history.record(
-                        wax_id,
-                        AuthorKind.TUTOR,
-                        reply_text,
-                        channel=channel,
-                        thread_ref=thread_ref,
-                        reply_to_id=student_entry.id,
-                    )
-                except ValueError as exc:
-                    if "already exists" not in str(exc).lower():
-                        raise
-                    tutor_entry = self._storage.find_tutor_reply_to(
-                        wax_id, student_entry.id
-                    )
-                    if tutor_entry is None:
-                        raise
+                # Idempotent under one-tutor-reply-per-trigger unique index.
+                tutor_entry, _tutor_created = self._history.record_with_status(
+                    wax_id,
+                    AuthorKind.TUTOR,
+                    reply_text,
+                    channel=channel,
+                    thread_ref=thread_ref,
+                    reply_to_id=student_entry.id,
+                )
             outbound_id = None
             if channel is not None:
                 existing_out = self._storage.get_outbound_delivery_for_tutor(

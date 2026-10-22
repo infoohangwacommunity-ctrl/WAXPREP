@@ -376,6 +376,22 @@ class PostgresStorage:
                     if row is not None:
                         self._conn.commit()
                         return self._history(row), False
+                # Tutor one-reply-per-trigger unique index: concurrent turn may
+                # already have saved the tutor reply. Resolve by reply_to_id.
+                if (
+                    entry.author_kind is AuthorKind.TUTOR
+                    and entry.reply_to_id is not None
+                ):
+                    cur.execute(
+                        f"SELECT {HISTORY_COLUMNS} FROM history_entries "
+                        "WHERE wax_id = %s AND reply_to_id = %s "
+                        "AND author_kind = %s",
+                        (wax_id, entry.reply_to_id, AuthorKind.TUTOR.value),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        self._conn.commit()
+                        return self._history(row), False
                 self._conn.commit()
                 raise ValueError("history entry already exists")
             # Insert succeeded: write tokens and jobs in the same transaction.
