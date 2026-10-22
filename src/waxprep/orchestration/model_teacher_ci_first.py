@@ -27,7 +27,6 @@ from dataclasses import replace
 
 from waxprep.channel.contracts import InteractiveButtonSpec, InteractiveSuggestion
 from waxprep.context.models import ContextPackage
-from waxprep.domain.models import HistoryEntry
 from waxprep.model_gateway.gateway import ModelGateway
 from waxprep.model_gateway.models import (
     ContentItem,
@@ -80,13 +79,15 @@ teaches.
 
 ## How you work
 
-You receive the student's current message, the last few turns of your
-exchange together, and a brief about the student from Context
-Intelligence. Use the brief and the exchange naturally — like a
-person who remembers what you talked about. Never mention packages,
-evidence, memory systems, or investigation to the student. Just talk.
+You receive the student's current message and a brief from Context
+Intelligence — what matters about this student right now, based on
+its investigation of their history and notebook. Use the brief
+naturally, like a person who remembers what you talked about. Never
+mention packages, evidence, memory systems, or investigation to the
+student. Just talk.
 
-Trust the recent exchange over the brief if they ever disagree.
+If the brief is missing or says CI found nothing, answer honestly
+without pretending you know more than you do.
 
 ## Guidelines (not rules — use judgment)
 
@@ -270,37 +271,23 @@ class ModelTeacherCiFirst:
         return stripped
 
     def _build_prompt(self, inp: TeacherInput) -> str:
-        """Build the prompt in the order that creates the "exchange"
-        feel: brief first, recent turns second, current message third,
-        evidence last.
-
-        Blueprint Gap 1+3+4: the teacher sees the exchange it's in,
-        led by a natural-language brief (not a legal dossier of caution
-        metadata). Evidence is plain and secondary.
+        """Build the prompt: brief first, current message second,
+        evidence last. No raw recent-turn transcript — continuity
+        comes from CI's investigation, not a fixed window.
         """
         parts: list[str] = []
         parts.append(f"Current time (UTC): {inp.now.isoformat()}")
 
         # 1. Brief — CI's natural-language summary as a warm note.
-        # No evidence IDs, no "needs_checking" labels, no provenance
-        # warnings. Just what matters about this student right now.
         brief = self._render_brief(inp.context_package)
         if brief:
             parts.append(brief)
 
-        # 2. Recent exchange — the last few turns verbatim.
-        # This is what makes the teacher feel like it's IN the
-        # exchange, not reading a case file.
-        if inp.recent_turns:
-            transcript = self._render_recent_turns(inp.recent_turns)
-            if transcript:
-                parts.append(transcript)
-
-        # 3. Current student message.
+        # 2. Current student message.
         message = inp.original_message.text or ""
         parts.append(f"Student (just now):\n{message}")
 
-        # 4. Evidence — plain, secondary, only when CI found something.
+        # 3. Evidence — plain, secondary, only when CI found something.
         evidence = self._render_evidence_plain(inp.context_package)
         if evidence:
             parts.append(evidence)
@@ -324,8 +311,8 @@ class ModelTeacherCiFirst:
             return (
                 "Note: Context Intelligence could not complete its "
                 f"investigation (status: {status.value}). Answer "
-                "without pretending you know more than the recent "
-                "exchange shows."
+                "without pretending you know more than what you "
+                "can establish from this message."
             )
         if status.value == "skipped":
             return ""  # blank message — no brief needed
@@ -335,35 +322,10 @@ class ModelTeacherCiFirst:
         if status.value == "empty":
             return (
                 "Note: Context Intelligence looked but found no "
-                "relevant prior context. The recent exchange is "
-                "all you have."
+                "relevant prior context. Answer from what you "
+                "can establish from this message."
             )
         return ""
-
-    @staticmethod
-    def _render_recent_turns(turns: tuple[HistoryEntry, ...]) -> str:
-        """Render the last few turns as a natural exchange transcript.
-
-        No metadata — just who said what, in order. This is the
-        "exchange" that makes the teacher feel present.
-        """
-        # turns come newest_first=True from list_history; reverse for
-        # chronological order.
-        chronological = list(reversed(turns))
-        lines: list[str] = []
-        for entry in chronological:
-            text = (entry.text or "").strip()
-            if not text:
-                continue
-            if entry.author_kind.value == "student":
-                lines.append(f"Student: {text}")
-            elif entry.author_kind.value == "tutor":
-                lines.append(f"Wax Prep: {text}")
-            else:
-                lines.append(f"System: {text}")
-        if not lines:
-            return ""
-        return "Recent exchange:\n" + "\n".join(lines)
 
     @staticmethod
     def _render_evidence_plain(package: ContextPackage) -> str:

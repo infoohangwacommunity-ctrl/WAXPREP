@@ -256,23 +256,11 @@ class TurnServiceCiFirst:
                 "invalid_selection": context_package.invalid_selection,
             },
         )
-        # Fetch the last 6 turns of exchange (3 exchanges) for
-        # short-term exchangeal context. Long-term memory stays
-        # in CI's hands; this is the raw, verbatim recent exchange
-        # that makes the teacher feel like it's IN the exchange,
-        # not reading a case file.
-        recent_turns = self._storage.list_history(
-            wax_id,
-            limit=6,
-            newest_first=True,
-        )
-
         teacher_input = TeacherInputCiFirst(
             wax_id=wax_id,
             original_message=student_entry,
             context_package=context_package,
             now=now,
-            recent_turns=recent_turns,
         )
         outcome: TeacherOutcomeCiFirst = await self._teacher.teach(
             teacher_input,
