@@ -155,6 +155,18 @@ class WhatsAppOutbox:
         if delivery.status is OutboundStatus.FAILED:
             return
 
+        # Cross-replica CAS: only one outbox worker may send this delivery.
+        claimed = self._storage.claim_outbound_delivery(
+            delivery.wax_id, delivery.id, now
+        )
+        if claimed is None:
+            logger.info(
+                "outbound claim lost (already claimed or delivered)",
+                extra={"delivery_id": str(delivery.id)},
+            )
+            return
+        delivery = claimed
+
         logger.info(
             "processing delivery",
             extra={

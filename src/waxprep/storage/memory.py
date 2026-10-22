@@ -94,6 +94,7 @@ class InMemoryStorage:
         self._investigations: list[InvestigationRecord] = []
         self._events: dict[WaxId, list[Event]] = {}
         self._outbound: dict[Key, OutboundDelivery] = {}
+        self._turn_locks: set[tuple[WaxId, UUID]] = set()
         self._interactive_offers: dict[Key, InteractiveOffer] = {}
         # Blueprint Part IV §16-17: deletion requests are auditable and
         # propagated separately from supersession. The in-memory store
@@ -1091,11 +1092,32 @@ class InMemoryStorage:
             d
             for d in self._outbound.values()
             if (wax_id is None or d.wax_id == wax_id)
-            and d.status in (OutboundStatus.PENDING, OutboundStatus.IN_PROGRESS)
+            and d.status is OutboundStatus.PENDING
             and d.run_after <= now
         ]
         due.sort(key=lambda d: d.run_after)
         return tuple(due[:limit])
+
+    def claim_outbound_delivery(
+        self, wax_id: WaxId, delivery_id: UUID, now: datetime
+    ) -> OutboundDelivery | None:
+        key = (wax_id, delivery_id)
+        old = self._outbound.get(key)
+        if old is None or old.status is not OutboundStatus.PENDING:
+            return None
+        updated = replace(old, status=OutboundStatus.IN_PROGRESS, updated_at=now)
+        self._outbound[key] = updated
+        return updated
+
+    def try_acquire_turn_lock(self, wax_id: WaxId, student_entry_id: UUID) -> bool:
+        key = (wax_id, student_entry_id)
+        if key in self._turn_locks:
+            return False
+        self._turn_locks.add(key)
+        return True
+
+    def release_turn_lock(self, wax_id: WaxId, student_entry_id: UUID) -> None:
+        self._turn_locks.discard((wax_id, student_entry_id))
 
     def mark_outbound_delivered(
         self,

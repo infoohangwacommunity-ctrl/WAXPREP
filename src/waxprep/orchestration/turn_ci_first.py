@@ -222,183 +222,233 @@ class TurnServiceCiFirst:
                 outbound_delivery_id=outbound.id if outbound else None,
             )
 
-        # 4. Context Intelligence runs automatically for every message.
-        now = self._clock.now()
-        ci_request = InvestigationRequest(
-            wax_id=wax_id,
-            query=text,
-            now=now,
-            trigger_entry_id=student_entry.id,
-            limits=self._ci_limits,
-        )
-        context_package: ContextPackage = await self._investigator.investigate(
-            ci_request
-        )
+        # Cross-replica advisory lock (Postgres) / in-process set (memory).
+        lock_held = self._storage.try_acquire_turn_lock(wax_id, student_entry.id)
+        if not lock_held:
+            import asyncio
 
-        # Persist the investigation audit row. In CI-first mode this is
-        # the *only* audit trail for what CI did and what package it
-        # produced. The audit row carries the closed-vocabulary
-        # investigation_status and the invalid_selection flag so an
-        # operator can distinguish a successful investigation from one
-        # that hit a budget, had tools fail, or returned an invalid
-        # evidence selection. The audit row is best-effort: a failure to
-        # write it must not crash the turn (the student still gets an
-        # answer), but it is logged loudly.
-        self._record_investigation_audit(
-            wax_id=wax_id,
-            student_entry=student_entry,
-            package=context_package,
-            now=now,
-        )
-
-        # 4. Teacher receives student message + ContextPackage, produces final response.
-        logger.info(
-            "ci_investigation_complete",
-            extra={
-                "wax_id": str(wax_id),
-                "student_entry_id": str(student_entry.id),
-                "evidence_count": len(context_package.evidence)
-                if context_package is not None
-                else 0,
-                "has_summary": bool(
-                    context_package.summary if context_package else None
-                ),
-                "uncertainty_count": len(context_package.uncertainty)
-                if context_package and context_package.uncertainty
-                else 0,
-                "investigation_status": context_package.investigation_status.value,
-                "invalid_selection": context_package.invalid_selection,
-            },
-        )
-        teacher_input = TeacherInputCiFirst(
-            wax_id=wax_id,
-            original_message=student_entry,
-            context_package=context_package,
-            now=now,
-        )
-        outcome: TeacherOutcomeCiFirst = await self._teacher.teach(
-            teacher_input,
-            on_text_delta=on_text_delta,
-        )
-
-        # Handle empty Teacher response explicitly.
-        # A blank or None reply is a controlled failure, not a silent completion.
-        if outcome.reply_text is None:
-            logger.warning(
-                "Teacher returned None for wax_id=%s, message_id=%s; "
-                "this is a controlled failure, not a valid turn completion",
-                wax_id,
-                student_entry.id,
-            )
-            raise InvalidTeacherOutcomeError(
-                "Teacher returned None (no reply) for a processed message"
-            )
-
-        # Validate that the reply is not blank/whitespace
-        reply_text = self._validated_reply_text(outcome.reply_text)
-
-        # 5+6. Save exactly one tutor reply AND its outbound delivery
-        # record in ONE transaction. A crash between them is repaired
-        # on the next retry (step 2 above).
-        logger.info(
-            "tutor_reply_ready",
-            extra={
-                "wax_id": str(wax_id),
-                "student_entry_id": str(student_entry.id),
-                "reply_chars": len(outcome.reply_text or ""),
-            },
-        )
-        with self._storage.transaction():
-            # Idempotent: a concurrent recovery path may have already saved
-            # the tutor reply for this student entry.
-            existing_tutor = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
-            if existing_tutor is not None:
-                tutor_entry = existing_tutor
-            else:
-                # Idempotent under one-tutor-reply-per-trigger unique index.
-                tutor_entry, _tutor_created = self._history.record_with_status(
-                    wax_id,
-                    AuthorKind.TUTOR,
-                    reply_text,
-                    channel=channel,
-                    thread_ref=thread_ref,
-                    reply_to_id=student_entry.id,
+            for _ in range(40):
+                existing_reply = self._storage.find_tutor_reply_to(
+                    wax_id, student_entry.id
                 )
-            outbound_id = None
-            if channel is not None:
-                existing_out = self._storage.get_outbound_delivery_for_tutor(
-                    wax_id, tutor_entry.id, channel
+                if existing_reply is not None:
+                    outbound = self._storage.get_outbound_delivery_for_tutor(
+                        wax_id, existing_reply.id, channel
+                    )
+                    return TurnResultCiFirst(
+                        student_entry=student_entry,
+                        tutor_entry=existing_reply,
+                        context_package=None,
+                        duplicate=True,
+                        outbound_delivery_id=outbound.id if outbound else None,
+                    )
+                await asyncio.sleep(0.05)
+                lock_held = self._storage.try_acquire_turn_lock(
+                    wax_id, student_entry.id
                 )
-                if existing_out is not None:
-                    outbound_id = existing_out.id
-                else:
-                    try:
-                        delivery = self._storage.create_outbound_delivery(
-                            OutboundDelivery(
-                                id=new_id(),
-                                wax_id=wax_id,
-                                tutor_entry_id=tutor_entry.id,
-                                channel=channel,
-                                channel_ref=channel_ref,
-                                provider_message_id=None,
-                                status=OutboundStatus.PENDING,
-                                attempts=0,
-                                last_error=None,
-                                delivered_at=None,
-                                run_after=now,
-                                created_at=now,
-                                updated_at=now,
-                            )
-                        )
-                        outbound_id = delivery.id
-                    except Exception:
-                        logger.exception(
-                            "outbound delivery create failed; continuing with reply saved"
-                        )
-                        repaired = self._storage.get_outbound_delivery_for_tutor(
-                            wax_id, tutor_entry.id, channel
-                        )
-                        outbound_id = repaired.id if repaired else None
+                if lock_held:
+                    break
+            if not lock_held:
+                existing_reply = self._storage.find_tutor_reply_to(
+                    wax_id, student_entry.id
+                )
+                if existing_reply is not None:
+                    outbound = self._storage.get_outbound_delivery_for_tutor(
+                        wax_id, existing_reply.id, channel
+                    )
+                    return TurnResultCiFirst(
+                        student_entry=student_entry,
+                        tutor_entry=existing_reply,
+                        context_package=None,
+                        duplicate=True,
+                        outbound_delivery_id=outbound.id if outbound else None,
+                    )
+                raise RuntimeError(
+                    "turn lock unavailable; concurrent processing in progress"
+                )
 
-        # Post-response quality record (structured event, no plaintext body).
         try:
-            investigated = list(context_package.investigated) if context_package else []
-            notebook_ok = any(x.startswith("proposal_accepted:") for x in investigated)
-            PostTurnReview(self._storage, enable_stewardship=False).record_quality(
-                PostTurnQualityRecord(
-                    wax_id=wax_id,
-                    student_entry_id=student_entry.id,
-                    tutor_entry_id=tutor_entry.id,
-                    investigation_status=(
-                        context_package.investigation_status.value
-                        if context_package
-                        else "unknown"
-                    ),
-                    evidence_count=(
-                        len(context_package.evidence) if context_package else 0
-                    ),
-                    invalid_selection=bool(
-                        context_package.invalid_selection if context_package else False
-                    ),
-                    notebook_proposal_accepted=notebook_ok,
-                    reply_chars=len(reply_text or ""),
-                    notes=tuple(x for x in investigated if x.startswith("proposal_"))[
-                        :6
-                    ],
-                ),
+            # 4. Context Intelligence runs automatically for every message.
+            now = self._clock.now()
+            ci_request = InvestigationRequest(
+                wax_id=wax_id,
+                query=text,
+                now=now,
+                trigger_entry_id=student_entry.id,
+                limits=self._ci_limits,
+            )
+            context_package: ContextPackage = await self._investigator.investigate(
+                ci_request
+            )
+
+            # Persist the investigation audit row. In CI-first mode this is
+            # the *only* audit trail for what CI did and what package it
+            # produced. The audit row carries the closed-vocabulary
+            # investigation_status and the invalid_selection flag so an
+            # operator can distinguish a successful investigation from one
+            # that hit a budget, had tools fail, or returned an invalid
+            # evidence selection. The audit row is best-effort: a failure to
+            # write it must not crash the turn (the student still gets an
+            # answer), but it is logged loudly.
+            self._record_investigation_audit(
+                wax_id=wax_id,
+                student_entry=student_entry,
+                package=context_package,
                 now=now,
             )
-        except Exception:
-            logger.exception("post-turn quality recording failed")
 
-        return TurnResultCiFirst(
-            student_entry=student_entry,
-            tutor_entry=tutor_entry,
-            context_package=context_package,
-            duplicate=not created,
-            outbound_delivery_id=outbound_id,
-            interactive=outcome.interactive,
-        )
+            # 4. Teacher receives student message + ContextPackage, produces final response.
+            logger.info(
+                "ci_investigation_complete",
+                extra={
+                    "wax_id": str(wax_id),
+                    "student_entry_id": str(student_entry.id),
+                    "evidence_count": len(context_package.evidence)
+                    if context_package is not None
+                    else 0,
+                    "has_summary": bool(
+                        context_package.summary if context_package else None
+                    ),
+                    "uncertainty_count": len(context_package.uncertainty)
+                    if context_package and context_package.uncertainty
+                    else 0,
+                    "investigation_status": context_package.investigation_status.value,
+                    "invalid_selection": context_package.invalid_selection,
+                },
+            )
+            teacher_input = TeacherInputCiFirst(
+                wax_id=wax_id,
+                original_message=student_entry,
+                context_package=context_package,
+                now=now,
+            )
+            outcome: TeacherOutcomeCiFirst = await self._teacher.teach(
+                teacher_input,
+                on_text_delta=on_text_delta,
+            )
+
+            # Handle empty Teacher response explicitly.
+            # A blank or None reply is a controlled failure, not a silent completion.
+            if outcome.reply_text is None:
+                logger.warning(
+                    "Teacher returned None for wax_id=%s, message_id=%s; "
+                    "this is a controlled failure, not a valid turn completion",
+                    wax_id,
+                    student_entry.id,
+                )
+                raise InvalidTeacherOutcomeError(
+                    "Teacher returned None (no reply) for a processed message"
+                )
+
+            # Validate that the reply is not blank/whitespace
+            reply_text = self._validated_reply_text(outcome.reply_text)
+
+            # 5+6. Save exactly one tutor reply AND its outbound delivery
+            # record in ONE transaction. A crash between them is repaired
+            # on the next retry (step 2 above).
+            logger.info(
+                "tutor_reply_ready",
+                extra={
+                    "wax_id": str(wax_id),
+                    "student_entry_id": str(student_entry.id),
+                    "reply_chars": len(outcome.reply_text or ""),
+                },
+            )
+            with self._storage.transaction():
+                # Idempotent: a concurrent recovery path may have already saved
+                # the tutor reply for this student entry.
+                existing_tutor = self._storage.find_tutor_reply_to(wax_id, student_entry.id)
+                if existing_tutor is not None:
+                    tutor_entry = existing_tutor
+                else:
+                    # Idempotent under one-tutor-reply-per-trigger unique index.
+                    tutor_entry, _tutor_created = self._history.record_with_status(
+                        wax_id,
+                        AuthorKind.TUTOR,
+                        reply_text,
+                        channel=channel,
+                        thread_ref=thread_ref,
+                        reply_to_id=student_entry.id,
+                    )
+                outbound_id = None
+                if channel is not None:
+                    existing_out = self._storage.get_outbound_delivery_for_tutor(
+                        wax_id, tutor_entry.id, channel
+                    )
+                    if existing_out is not None:
+                        outbound_id = existing_out.id
+                    else:
+                        try:
+                            delivery = self._storage.create_outbound_delivery(
+                                OutboundDelivery(
+                                    id=new_id(),
+                                    wax_id=wax_id,
+                                    tutor_entry_id=tutor_entry.id,
+                                    channel=channel,
+                                    channel_ref=channel_ref,
+                                    provider_message_id=None,
+                                    status=OutboundStatus.PENDING,
+                                    attempts=0,
+                                    last_error=None,
+                                    delivered_at=None,
+                                    run_after=now,
+                                    created_at=now,
+                                    updated_at=now,
+                                )
+                            )
+                            outbound_id = delivery.id
+                        except Exception:
+                            logger.exception(
+                                "outbound delivery create failed; continuing with reply saved"
+                            )
+                            repaired = self._storage.get_outbound_delivery_for_tutor(
+                                wax_id, tutor_entry.id, channel
+                            )
+                            outbound_id = repaired.id if repaired else None
+
+            # Post-response quality record (structured event, no plaintext body).
+            try:
+                investigated = list(context_package.investigated) if context_package else []
+                notebook_ok = any(x.startswith("proposal_accepted:") for x in investigated)
+                PostTurnReview(self._storage, enable_stewardship=False).record_quality(
+                    PostTurnQualityRecord(
+                        wax_id=wax_id,
+                        student_entry_id=student_entry.id,
+                        tutor_entry_id=tutor_entry.id,
+                        investigation_status=(
+                            context_package.investigation_status.value
+                            if context_package
+                            else "unknown"
+                        ),
+                        evidence_count=(
+                            len(context_package.evidence) if context_package else 0
+                        ),
+                        invalid_selection=bool(
+                            context_package.invalid_selection if context_package else False
+                        ),
+                        notebook_proposal_accepted=notebook_ok,
+                        reply_chars=len(reply_text or ""),
+                        notes=tuple(x for x in investigated if x.startswith("proposal_"))[
+                            :6
+                        ],
+                    ),
+                    now=now,
+                )
+            except Exception:
+                logger.exception("post-turn quality recording failed")
+
+            return TurnResultCiFirst(
+                student_entry=student_entry,
+                tutor_entry=tutor_entry,
+                context_package=context_package,
+                duplicate=not created,
+                outbound_delivery_id=outbound_id,
+                interactive=outcome.interactive,
+            )
+
+        finally:
+            if lock_held:
+                self._storage.release_turn_lock(wax_id, student_entry.id)
 
     async def process_turn_job(self, job: DerivationJob) -> TurnResultCiFirst:
         """Recover a saved student message by re-running the full CI-first path.

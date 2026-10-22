@@ -2011,11 +2011,68 @@ class PostgresStorage:
         rows = self._read(
             wax_id,
             "SELECT * FROM outbound_deliveries WHERE wax_id = %s "
-            "AND status IN ('pending', 'in_progress') AND run_after <= %s "
+            "AND status = 'pending' AND run_after <= %s "
             "ORDER BY run_after LIMIT %s",
             (wax_id, now, limit),
         )
         return tuple(self._outbound(r) for r in rows)
+
+    def claim_outbound_delivery(
+        self, wax_id: WaxId, delivery_id: UUID, now: datetime
+    ) -> OutboundDelivery | None:
+        """CAS claim: pending → in_progress. Only one winner across replicas."""
+        set_current_wax_id(self._conn, wax_id)
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "UPDATE outbound_deliveries SET status = 'in_progress', "
+                "updated_at = %s "
+                "WHERE wax_id = %s AND id = %s AND status = 'pending' "
+                "RETURNING *",
+                (now, wax_id, delivery_id),
+            )
+            row = cur.fetchone()
+        if self._txn_depth == 0:
+            self._conn.commit()
+        if row is None:
+            return None
+        return self._outbound(row)
+
+    @staticmethod
+    def _turn_lock_keys(wax_id: WaxId, student_entry_id: UUID) -> tuple[int, int]:
+        import hashlib
+        import struct
+
+        digest = hashlib.sha256(
+            f"turn:{wax_id}:{student_entry_id}".encode("utf-8")
+        ).digest()
+        k1, k2 = struct.unpack(">ii", digest[:8])
+        return k1, k2
+
+    def try_acquire_turn_lock(self, wax_id: WaxId, student_entry_id: UUID) -> bool:
+        """Session-level advisory lock; works across Railway replicas."""
+        k1, k2 = self._turn_lock_keys(wax_id, student_entry_id)
+        set_current_wax_id(self._conn, wax_id)
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s, %s)", (k1, k2))
+            row = cur.fetchone()
+        # Advisory locks survive beyond the transaction; do not leave an
+        # open transaction. Commit/rollback keeps connection healthy.
+        if self._txn_depth == 0:
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
+        return bool(row and row[0])
+
+    def release_turn_lock(self, wax_id: WaxId, student_entry_id: UUID) -> None:
+        k1, k2 = self._turn_lock_keys(wax_id, student_entry_id)
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s, %s)", (k1, k2))
+        if self._txn_depth == 0:
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
 
     def mark_outbound_delivered(
         self,

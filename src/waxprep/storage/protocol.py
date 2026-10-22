@@ -443,6 +443,27 @@ class Storage(Protocol):
         self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]: ...
 
+    def claim_outbound_delivery(
+        self, wax_id: WaxId, delivery_id: UUID, now: datetime
+    ) -> OutboundDelivery | None:
+        """Atomically claim a pending outbound for send (pending → in_progress).
+
+        Returns the claimed row, or None if another worker already claimed or
+        the row is already delivered/failed.
+        """
+        ...
+
+    def try_acquire_turn_lock(self, wax_id: WaxId, student_entry_id: UUID) -> bool:
+        """Cross-replica lock for teaching one student history entry.
+
+        Postgres uses session advisory locks; memory uses an in-process set.
+        """
+        ...
+
+    def release_turn_lock(self, wax_id: WaxId, student_entry_id: UUID) -> None:
+        """Release a lock acquired by try_acquire_turn_lock."""
+        ...
+
     def mark_outbound_delivered(
         self,
         wax_id: WaxId,

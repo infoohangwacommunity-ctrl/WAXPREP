@@ -249,3 +249,50 @@ async def test_failure_after_reply_process_turn_does_not_second_tutor() -> None:
     assert r2.duplicate is True
     tutors = [e for e in storage.list_history(wax, limit=50) if e.author_kind is AuthorKind.TUTOR]
     assert len(tutors) == 1
+
+
+@pytest.mark.asyncio
+async def test_outbound_claim_is_exclusive() -> None:
+    clock = FakeClock(datetime(2026, 10, 22, 14, 0, tzinfo=UTC))
+    storage, history, _turns = _stack(clock)
+    wax = _seed_student(storage, clock)
+    student, _ = history.record_with_status(
+        wax, AuthorKind.STUDENT, "hi", channel="whatsapp", channel_ref="wamid.CLAIM"
+    )
+    tutor, _ = history.record_with_status(
+        wax, AuthorKind.TUTOR, "ans", channel="whatsapp", reply_to_id=student.id
+    )
+    now = clock.now()
+    delivery = storage.create_outbound_delivery(
+        OutboundDelivery(
+            id=new_id(),
+            wax_id=wax,
+            tutor_entry_id=tutor.id,
+            channel="whatsapp",
+            channel_ref=None,
+            status=OutboundStatus.PENDING,
+            attempts=0,
+            last_error=None,
+            delivered_at=None,
+            run_after=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    first = storage.claim_outbound_delivery(wax, delivery.id, now)
+    second = storage.claim_outbound_delivery(wax, delivery.id, now)
+    assert first is not None
+    assert first.status is OutboundStatus.IN_PROGRESS
+    assert second is None
+
+
+@pytest.mark.asyncio
+async def test_turn_lock_exclusive() -> None:
+    clock = FakeClock(datetime(2026, 10, 22, 14, 0, tzinfo=UTC))
+    storage, history, _turns = _stack(clock)
+    wax = _seed_student(storage, clock)
+    entry_id = new_id()
+    assert storage.try_acquire_turn_lock(wax, entry_id) is True
+    assert storage.try_acquire_turn_lock(wax, entry_id) is False
+    storage.release_turn_lock(wax, entry_id)
+    assert storage.try_acquire_turn_lock(wax, entry_id) is True

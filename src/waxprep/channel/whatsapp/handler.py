@@ -440,6 +440,26 @@ class WhatsAppInboundHandler:
                 )
             )
 
+            # Claim outbound before any channel send so the outbox worker
+            # cannot deliver the same tutor text a second time.
+            if turn_result.outbound_delivery_id is not None:
+                claimed = self._storage.claim_outbound_delivery(
+                    wax_id,
+                    turn_result.outbound_delivery_id,
+                    self._clock.now(),
+                )
+                if claimed is None:
+                    # Already claimed/delivered by another path — skip send.
+                    logger.info(
+                        "outbound already claimed; skipping progressive send",
+                        extra={
+                            "outbound_delivery_id": str(
+                                turn_result.outbound_delivery_id
+                            )
+                        },
+                    )
+                    progressive = None
+
             # Flush any remaining progressive buffer after the Teacher finishes.
             if progressive is not None:
                 try:
