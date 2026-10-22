@@ -2042,9 +2042,7 @@ class PostgresStorage:
         import hashlib
         import struct
 
-        digest = hashlib.sha256(
-            f"turn:{wax_id}:{student_entry_id}".encode("utf-8")
-        ).digest()
+        digest = hashlib.sha256(f"turn:{wax_id}:{student_entry_id}".encode()).digest()
         k1, k2 = struct.unpack(">ii", digest[:8])
         return k1, k2
 
