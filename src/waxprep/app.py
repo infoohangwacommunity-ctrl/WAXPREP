@@ -147,15 +147,30 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                     updated_at=now,
                 )
             )
-            active_storage.create_channel_identity(
-                ChannelIdentity(
-                    id=uuid4(),
-                    wax_id=wax,
-                    channel=channel,
-                    external_id=sender,
-                    created_at=now,
+            try:
+                active_storage.create_channel_identity(
+                    ChannelIdentity(
+                        id=uuid4(),
+                        wax_id=wax,
+                        channel=channel,
+                        external_id=sender,
+                        created_at=now,
+                    )
                 )
-            )
+            except Exception:
+                # Concurrent provision or prior identity: resolve instead of 500.
+                existing = active_storage.get_channel_identity(channel, sender)
+                if existing is not None:
+                    logger.info(
+                        "provision raced; using existing channel identity",
+                        extra={
+                            "wax_id": str(existing.wax_id),
+                            "channel": channel,
+                            "sender": sender,
+                        },
+                    )
+                    return existing.wax_id
+                raise
             logger.info(
                 "provisioned channel student",
                 extra={"wax_id": str(wax), "channel": channel, "sender": sender},
