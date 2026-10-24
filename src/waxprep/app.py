@@ -258,9 +258,14 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                     await services.worker.run_once()
                 except Exception:
                     logger.exception("derivation worker iteration failed")
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(settings.worker_interval_seconds)
 
-        asyncio.create_task(_worker_loop())
+        if settings.worker_enabled:
+            asyncio.create_task(_worker_loop())
+            logger.info(
+                "merged background worker started (interval=%ss)",
+                settings.worker_interval_seconds,
+            )
         logger.info("waxprep channels ready")
     except Exception:
         logger.exception("failed to compose channel services")

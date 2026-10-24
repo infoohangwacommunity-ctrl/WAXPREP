@@ -43,6 +43,10 @@ class Settings:
     public_base_url: str | None = None
     media_limits: MediaLimits = MediaLimits()
     blob_root: str = ".waxprep-blobs"
+    # Merged background worker (runs inside the web process — no separate
+    # service needed). On Render's free tier, this is the only option.
+    worker_enabled: bool = True
+    worker_interval_seconds: float = 5.0
 
 
 def load_settings(environ: dict[str, str] | None = None) -> Settings:
@@ -87,6 +91,8 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         public_base_url=env.get("WAXPREP_PUBLIC_BASE_URL"),
         media_limits=limits,
         blob_root=env.get("WAXPREP_BLOB_ROOT", ".waxprep-blobs"),
+        worker_enabled=env.get("WAXPREP_WORKER_ENABLED", "1") != "0",
+        worker_interval_seconds=float(env.get("WAXPREP_WORKER_INTERVAL", "5")),
     )
     if settings.whatsapp_enabled:
         missing = [

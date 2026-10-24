@@ -1,0 +1,99 @@
+# Render deployment configuration for Wax Prep.
+#
+# This blueprint deploys ONE web service that serves both the FastAPI
+# HTTP endpoints (WhatsApp/Telegram webhooks) AND the background worker
+# (embeddings, token indexing, artifact processing, deletion requests).
+#
+# No separate worker service is needed — the worker runs as an asyncio
+# background task inside the web process. This is the Render free-tier
+# pattern: one process, one service, zero extra cost.
+#
+# Database: Supabase PostgreSQL (external). Set DATABASE_URL in the
+# Render dashboard to your Supabase connection string.
+#
+# How to deploy:
+# 1. Push this branch to GitHub.
+# 2. Go to https://dashboard.render.com → New → Blueprint.
+# 3. Select the repository and this branch.
+# 4. Set the environment variables (see below).
+# 5. Render will detect render.yaml and deploy automatically.
+
+services:
+  - type: web
+    name: waxprep
+    runtime: python
+    # Python 3.13 — matches .python-version and pyproject.toml.
+    pythonVersion: "3.13"
+    # Install dependencies using uv (faster than pip, matches the project's
+    # existing toolchain). Render's native Python runtime supports custom
+    # build commands.
+    buildCommand: |
+      pip install uv &&
+      uv sync --frozen --python 3.13
+    # Start the FastAPI app with uvicorn. The background worker runs
+    # inside the same process as an asyncio task (app.py lifespan).
+    startCommand: uv run uvicorn waxprep.app:app --host 0.0.0.0 --port $PORT
+    # Render's free tier: the service sleeps after 15 minutes of
+    # inactivity. When a webhook wakes it, the worker resumes too.
+    plan: free
+    # Health check: Render pings /health to verify the service is up.
+    healthCheckPath: /health
+    # Auto-deploy on every push to this branch.
+    autoDeploy: true
+    # Environment variables — set these in the Render dashboard
+    # (or in a Render Environment Group for reuse).
+    envVars:
+      # === Database (Supabase PostgreSQL) ===
+      # Paste your Supabase connection string here.
+      # Use port 5432 for session mode (recommended for this app).
+      # Example: postgresql://postgres:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres
+      # Or use the pooler with port 6543 for transaction mode.
+      - key: DATABASE_URL
+        sync: false  # set manually in the dashboard
+      # === Encryption keys (required) ===
+      # Generate with: python -c "import os,base64; print(f'1:{base64.b64encode(os.urandom(32)).decode()}')"
+      - key: WAXPREP_MASTER_KEYS
+        sync: false
+      - key: WAXPREP_ACTIVE_KEY_ID
+        value: "1"
+      # === Upstage AI (required for CI + Teacher) ===
+      - key: UPSTAGE_API_KEY
+        sync: false
+      - key: UPSTAGE_MODEL
+        value: solar-pro4
+      # === WhatsApp (optional — enable if using WhatsApp) ===
+      - key: WAXPREP_WHATSAPP_ENABLED
+        value: "1"
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      # === Telegram (optional — enable if using Telegram) ===
+      - key: WAXPREP_TELEGRAM_ENABLED
+        value: "1"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      # === Public URL (Render assigns this — set after first deploy) ===
+      # After deploying, Render gives you a URL like
+      # https://waxprep.onrender.com. Set this so Telegram/WhatsApp
+      # webhooks can reach the app.
+      - key: WAXPREP_PUBLIC_BASE_URL
+        sync: false
+      # === Merged background worker ===
+      # The worker runs inside the web process (no separate service).
+      # Interval: how often the worker loop runs (seconds).
+      - key: WAXPREP_WORKER_INTERVAL
+        value: "5"
+      # Set to "0" to disable the worker (if you ever add a separate
+      # worker service on a paid plan).
+      - key: WAXPREP_WORKER_ENABLED
+        value: "1"
+      # === Logging ===
+      - key: WAXPREP_LOG_LEVEL
+        value: INFO
