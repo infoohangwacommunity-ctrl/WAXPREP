@@ -1,31 +1,27 @@
--- Table owners are subject to RLS when FORCE is on, so SECURITY DEFINER
--- owned by the migration user still cannot see rows without current_wax_id.
--- Keep RLS enabled for waxprep_app; drop FORCE so the owner (and
--- RESET ROLE lookup paths) can resolve channel → wax_id at login.
+-- Allow channel identity lookup when app.current_wax_id is unset (login path).
+-- FORCE RLS + isolation policy previously hid all rows from lookup, so every
+-- Telegram webhook tried INSERT again → unique_violation → HTTP 500.
+-- When current_wax_id is set, isolation remains tenant-scoped.
 
-ALTER TABLE channel_identities NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE students NO FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS channel_identities_isolation ON channel_identities;
+CREATE POLICY channel_identities_isolation ON channel_identities
+    FOR ALL
+    USING (
+        nullif(current_setting('app.current_wax_id', true), '') IS NULL
+        OR wax_id::text = current_setting('app.current_wax_id', true)
+    )
+    WITH CHECK (
+        wax_id::text = current_setting('app.current_wax_id', true)
+    );
 
--- Keep policies for waxprep_app; owner bypasses without FORCE.
-
-CREATE OR REPLACE FUNCTION waxprep_lookup_channel(
-    p_channel TEXT,
-    p_external_id TEXT
-) RETURNS TABLE (
-    id UUID,
-    wax_id UUID,
-    channel TEXT,
-    external_id TEXT,
-    created_at TIMESTAMPTZ
-)
-LANGUAGE sql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-    SELECT id, wax_id, channel, external_id, created_at
-    FROM channel_identities
-    WHERE channel = p_channel AND external_id = p_external_id
-$$;
-
-REVOKE ALL ON FUNCTION waxprep_lookup_channel(TEXT, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION waxprep_lookup_channel(TEXT, TEXT) TO waxprep_app;
+-- Avoid casting empty current_wax_id to uuid inside RLS (uuid: "").
+DROP POLICY IF EXISTS deletion_requests_isolation ON deletion_requests;
+CREATE POLICY deletion_requests_isolation ON deletion_requests
+    FOR ALL
+    USING (
+        nullif(current_setting('app.current_wax_id', true), '') IS NULL
+        OR wax_id::text = current_setting('app.current_wax_id', true)
+    )
+    WITH CHECK (
+        wax_id::text = current_setting('app.current_wax_id', true)
+    );
