@@ -158,7 +158,11 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                     )
                 )
             except Exception:
-                # Concurrent provision or prior identity: resolve instead of 500.
+                # UniqueViolation aborts the transaction; clear it so lookup works.
+                try:
+                    active_storage._conn.rollback()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
                 existing = active_storage.get_channel_identity(channel, sender)
                 if existing is not None:
                     logger.info(

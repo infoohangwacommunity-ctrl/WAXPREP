@@ -247,14 +247,25 @@ class PostgresStorage:
     def get_channel_identity(
         self, channel: str, external_id: str
     ) -> ChannelIdentity | None:
+        # A prior UniqueViolation leaves the connection aborted; clear it.
+        try:
+            if self._conn.info.transaction_status != 0:  # not IDLE
+                self._conn.rollback()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
         with self._conn.cursor(row_factory=dict_row) as cur:
+            # Owner-level lookup via SECURITY DEFINER (no FORCE RLS on table).
             cur.execute(
                 "SELECT id, wax_id, channel, external_id, created_at "
                 "FROM waxprep_lookup_channel(%s, %s)",
                 (channel, external_id),
             )
             row = cur.fetchone()
-        self._conn.commit()
+        if self._txn_depth == 0:
+            self._conn.commit()
         if row is None:
             return None
         return ChannelIdentity(
