@@ -2373,12 +2373,18 @@ class PostgresStorage:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT wax_id FROM waxprep_wax_ids_with_pending_deletions(%s)",
-                (limit,),
+                (int(limit),),
             )
             rows: list[Row] = cur.fetchall()
         if self._txn_depth == 0:
             self._conn.commit()
-        return tuple(WaxId(r["wax_id"]) for r in rows)
+        out: list[WaxId] = []
+        for r in rows:
+            raw = r.get("wax_id") if isinstance(r, dict) else r[0]
+            if raw is None or raw == "":
+                continue
+            out.append(WaxId(raw))
+        return tuple(out)
 
     def update_deletion_request(self, request: DeletionRequest) -> DeletionRequest:
         changed = self._write(
