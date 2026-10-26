@@ -43,12 +43,15 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from waxprep.channel.contracts import InteractiveSuggestion
 from waxprep.clock import Clock
+from waxprep.context.exchange import trim_exchange
 from waxprep.context.investigator import ContextInvestigator
 from waxprep.context.models import (
     ContextPackage,
+    ExchangeTurn,
     InvestigationLimits,
     InvestigationRequest,
 )
@@ -270,12 +273,17 @@ class TurnServiceCiFirst:
         try:
             # 4. Context Intelligence runs automatically for every message.
             now = self._clock.now()
+            # The application hands CI the raw exchange material and
+            # nothing more: no relevance judgement, no filtering, no
+            # "this turn does not look interesting" rule. Supply only.
+            exchange = self._collect_exchange(wax_id, student_entry.id)
             ci_request = InvestigationRequest(
                 wax_id=wax_id,
                 query=text,
                 now=now,
                 trigger_entry_id=student_entry.id,
                 limits=self._ci_limits,
+                exchange=exchange,
             )
             context_package: ContextPackage = await self._investigator.investigate(
                 ci_request
@@ -436,6 +444,12 @@ class TurnServiceCiFirst:
                         ),
                         notebook_proposal_accepted=notebook_ok,
                         reply_chars=len(reply_text or ""),
+                        exchange_included=bool(context_package.exchange)
+                        if context_package
+                        else False,
+                        exchange_turns=len(context_package.exchange)
+                        if context_package
+                        else 0,
                         notes=tuple(
                             x for x in investigated if x.startswith("proposal_")
                         )[:6],
@@ -499,6 +513,59 @@ class TurnServiceCiFirst:
             channel_ref=student_entry.channel_ref,
             thread_ref=student_entry.thread_ref,
             occurred_at=student_entry.occurred_at,
+        )
+
+    def _collect_exchange(
+        self,
+        wax_id: WaxId,
+        trigger_entry_id: UUID,
+    ) -> tuple[ExchangeTurn, ...]:
+        """Assemble the raw exchange material for this turn.
+
+        Mechanical, and deliberately so. The application takes the newest
+        saved history entries, drops the message that triggered this
+        turn (the Teacher renders that one separately), drops system
+        noise and empty messages, puts the rest in chronological order,
+        and trims it to the configured character budget.
+
+        It does **not** decide that a turn matters, and it does not
+        decide that one does not. That judgement belongs to Context
+        Intelligence, and it is made on the assembled exchange — which
+        is why the whole exchange is handed over, not a pre-filtered
+        slice of it.
+        """
+        limits = self._ci_limits
+        entries = self._storage.list_history(
+            wax_id,
+            # One extra slot: the trigger entry is normally the newest
+            # and is removed below.
+            limit=limits.max_exchange_entries + 2,
+            newest_first=True,
+        )
+        turns: list[ExchangeTurn] = []
+        for entry in entries:
+            if entry.id == trigger_entry_id:
+                continue
+            if entry.author_kind == AuthorKind.SYSTEM:
+                continue
+            text = (entry.text or "").strip()
+            if not text:
+                continue
+            turns.append(
+                ExchangeTurn(
+                    author_kind=entry.author_kind,
+                    text=text,
+                    entry_id=entry.id,
+                    occurred_at=entry.occurred_at,
+                )
+            )
+            if len(turns) >= limits.max_exchange_entries:
+                break
+        # list_history returned newest-first; the exchange reads forward.
+        turns.reverse()
+        return trim_exchange(
+            tuple(turns),
+            max_characters=limits.max_exchange_characters,
         )
 
     @staticmethod

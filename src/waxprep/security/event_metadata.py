@@ -38,6 +38,8 @@ ALLOWED_EVENT_METADATA_KEYS: frozenset[str] = frozenset(
         "invalid_selection",  # bool — CI selection contract failure
         "notebook_proposal",  # "accepted" | "none" | "rejected"
         "reply_chars",  # length of tutor reply (not the text)
+        "exchange_included",  # bool — the Teacher received the live exchange
+        "exchange_turns",  # integer count of exchange turns carried
     }
 )
 

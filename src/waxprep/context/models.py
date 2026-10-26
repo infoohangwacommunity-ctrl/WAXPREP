@@ -22,6 +22,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from waxprep.domain.identifiers import WaxId
+from waxprep.domain.models import AuthorKind
 
 
 class ContextDecision(StrEnum):
@@ -91,6 +92,30 @@ class InvestigationStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ExchangeTurn:
+    """One turn of the live exchange: who spoke, and exactly what they said.
+
+    This is **raw material**, not evidence and not a finding.
+
+    The application supplies it — mechanically, from the newest saved
+    history entries — because handing CI the thread is *supply*, the same
+    category as tools, scope and limits. It carries no judgement: the
+    application never decides that a turn matters, and never decides that
+    it does not.
+
+    Context Intelligence decides what travels to the Teacher. The Teacher
+    only ever sees the exchange if CI puts it in the package. That is the
+    whole point: continuity is assembled by the intelligence, not routed
+    around it by the application.
+    """
+
+    author_kind: AuthorKind
+    text: str
+    entry_id: UUID | None = None
+    occurred_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Evidence:
     """One piece of evidence, always carrying when it happened and who said it."""
 
@@ -115,6 +140,11 @@ class ContextPackage:
     boundary between CI and the Teacher explicit:
 
     - ``evidence`` is the curated set of items the model selected.
+    - ``exchange`` is the recent exchange CI chose to carry to the
+      Teacher: the raw material the application supplied, in order,
+      trimmed only for length. It is empty on a cold start, and it is
+      empty when CI explicitly decided the thread was not worth
+      carrying — a decision CI makes, and one the runtime records.
     - ``summary`` is a concise synthesis — never the whole history.
     - ``uncertainty`` lists unresolved conflicts, stale signals, or gaps.
     - ``investigated`` is an audit trail of every action attempted,
@@ -137,6 +167,7 @@ class ContextPackage:
     query: str
     evidence: tuple[Evidence, ...]
     summary: str
+    exchange: tuple[ExchangeTurn, ...] = ()
     uncertainty: tuple[str, ...] = ()
     investigated: tuple[str, ...] = ()
     stopped_reason: str = ""
@@ -160,6 +191,15 @@ class InvestigationLimits:
     max_evidence: int = 12
     max_context_characters: int = 12000
     max_model_output_tokens: int = 1000
+    max_exchange_entries: int = 12
+    """How many recent history entries the application may hand to CI as
+    exchange material. A *supply* budget, not a relevance rule: the
+    application never chooses which of these turns matter, CI does."""
+
+    max_exchange_characters: int = 4000
+    """Character budget for the supplied exchange material. When the
+    material is too long, the oldest turns are dropped first — the
+    recent end of the exchange is what a follow-up refers to."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +210,11 @@ class InvestigationRequest:
     history entry that triggered the investigation. CI uses it for
     read-around calls when it needs to inspect the context around the
     trigger itself. The application supplies it; the model does not.
+
+    The ``exchange`` is the raw material of the live exchange: the
+    newest history entries, in order, trimmed only for length. The
+    application supplies it without judging it. CI decides whether it
+    travels to the Teacher.
     """
 
     wax_id: WaxId
@@ -177,6 +222,7 @@ class InvestigationRequest:
     now: datetime
     trigger_entry_id: UUID | None = None
     limits: InvestigationLimits = field(default_factory=InvestigationLimits)
+    exchange: tuple[ExchangeTurn, ...] = ()
 
 
 __all__ = [
@@ -184,6 +230,7 @@ __all__ = [
     "ContextPackage",
     "Evidence",
     "EvidenceType",
+    "ExchangeTurn",
     "InvestigationLimits",
     "InvestigationRequest",
     "InvestigationStatus",

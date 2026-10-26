@@ -1,6 +1,10 @@
 from __future__ import annotations
-import asyncio, json, os, sys
-from dataclasses import dataclass, field
+
+import asyncio
+import json
+import os
+import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,7 +22,9 @@ from waxprep.storage.memory import InMemoryStorage
 from waxprep.wiring import build_services
 
 API = os.environ["UPSTAGE_API_KEY"]
-MODEL = "solar-mini"
+# Different jobs, different models: Solar Pro 4 teaches, Mini investigates.
+TEACHER_MODEL = os.environ.get("WAXPREP_LIVE_TEACHER_MODEL", "solar-pro4")
+CI_MODEL = os.environ.get("WAXPREP_LIVE_CI_MODEL", "solar-mini")
 
 
 @dataclass
@@ -27,7 +33,8 @@ class T:
     i: int
     student: str
     tutor: str | None
-    cons: int
+    ci_status: str
+    exchange_turns: int
     err: str | None = None
 
 
@@ -35,11 +42,17 @@ async def main():
     provider = UpstageResponsesProvider(api_key=API)
     reg = ModelRegistry()
     reg.register_provider(provider)
-    caps = provider.capabilities(MODEL)
-    for name, role in [("teacher", ModelRole.TEACHER), ("context", ModelRole.CONTEXT)]:
+    for name, role, model in [
+        ("teacher", ModelRole.TEACHER, TEACHER_MODEL),
+        ("context", ModelRole.CONTEXT, CI_MODEL),
+    ]:
         reg.register_model(
             ModelConfig(
-                name=name, provider="upstage", model=MODEL, role=role, capabilities=caps
+                name=name,
+                provider="upstage",
+                model=model,
+                role=role,
+                capabilities=provider.capabilities(model),
             )
         )
     gw = ModelGateway(reg, max_retries=1)
@@ -50,7 +63,6 @@ async def main():
         clock=SystemClock(),
         context_model=GatewayContextModel(gw, model_name="context"),
         gateway=gw,
-        max_consultations=2,
     )
     users = [
         (
@@ -143,9 +155,18 @@ async def main():
             )
             rep = r.tutor_entry.text if r.tutor_entry else None
             err = None if rep and str(rep).strip() else "empty"
-            return T(user, i, msg, rep, r.consultations_made, err)
+            pkg = r.context_package
+            return T(
+                user,
+                i,
+                msg,
+                rep,
+                pkg.investigation_status.value if pkg else "none",
+                len(pkg.exchange) if pkg else 0,
+                err,
+            )
         except Exception as e:
-            return T(user, i, msg, None, 0, f"{type(e).__name__}: {e}")
+            return T(user, i, msg, None, "error", 0, f"{type(e).__name__}: {e}")
 
     for label, msgs in users:
         wax = new_wax_id()
@@ -162,6 +183,7 @@ async def main():
             print(f"[{'OK' if not rec.err else 'FAIL:' + str(rec.err)}] {label} T{i}")
             print(f"  STUDENT: {msg}")
             print(f"  TUTOR:   {(rec.tutor or '')[:500]}")
+            print(f"  ci={rec.ci_status} exchange_turns={rec.exchange_turns}")
             await asyncio.sleep(0.2)
     for label, msg in singles:
         wax = new_wax_id()

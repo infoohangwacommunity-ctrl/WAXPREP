@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from uuid import UUID
 
 from waxprep.channel.contracts import InteractiveButtonSpec, InteractiveSuggestion
+from waxprep.context.exchange import format_exchange
 from waxprep.context.models import ContextPackage
 from waxprep.model_gateway.gateway import ModelGateway
 from waxprep.model_gateway.models import (
@@ -79,12 +81,24 @@ teaches.
 
 ## How you work
 
-You receive the student's current message and a brief from Context
-Intelligence — what matters about this student right now, based on
-its investigation of their history and notebook. Use the brief
-naturally, like a person who remembers what you talked about. Never
-mention packages, evidence, memory systems, or investigation to the
-student. Just talk.
+You receive the student's current message, a brief from Context
+Intelligence — what matters about this student right now, based on its
+investigation of their history and notebook — and, usually, the recent
+exchange: the last part of your exchange with this student, verbatim, in
+order.
+
+Use the exchange like a person who was actually there. When the student
+refers to "that", "it", "earlier" or "you said", the answer is sitting
+right there in the exchange — use it and move on. Do not quote it back
+to them, do not number the turns, do not say "as we discussed
+earlier". You were there. You simply remember.
+
+Use the brief naturally too — like a person who knows this student.
+Never mention packages, evidence, memory systems, or investigation to
+the student. Just talk.
+
+If there is no exchange, this is the start of a fresh one — treat it
+that way, and do not pretend to remember what you were not told.
 
 If the brief is missing or says CI found nothing, answer honestly
 without pretending you know more than you do.
@@ -271,9 +285,12 @@ class ModelTeacherCiFirst:
         return stripped
 
     def _build_prompt(self, inp: TeacherInput) -> str:
-        """Build the prompt: brief first, current message second,
-        evidence last. No raw recent-turn transcript — continuity
-        comes from CI's investigation, not a fixed window.
+        """Build the prompt: brief first, the exchange second, the current
+        message third, evidence last.
+
+        The exchange is not a raw window the application decided on —
+        it is whatever Context Intelligence chose to carry into the
+        package. The Teacher renders it as it finds it.
         """
         parts: list[str] = []
         parts.append(f"Current time (UTC): {inp.now.isoformat()}")
@@ -283,17 +300,55 @@ class ModelTeacherCiFirst:
         if brief:
             parts.append(brief)
 
-        # 2. Current student message.
+        # 2. The exchange CI carried — who said what, in order.
+        exchange = self._render_exchange(inp.context_package)
+        if exchange:
+            parts.append(exchange)
+
+        # 3. Current student message.
         message = inp.original_message.text or ""
         parts.append(f"Student (just now):\n{message}")
 
-        # 3. Evidence — plain, secondary, only when CI found something.
-        evidence = self._render_evidence_plain(inp.context_package)
+        # 4. Evidence — plain, secondary, only when CI found something.
+        evidence = self._render_evidence_plain(
+            inp.context_package,
+            already_shown=self._already_shown_ids(inp),
+        )
         if evidence:
             parts.append(evidence)
 
         parts.append("Respond now as Wax Prep.")
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _already_shown_ids(inp: TeacherInput) -> set[UUID]:
+        """Ids the prompt already carries: the current message, plus every
+        turn of the exchange CI brought along.
+
+        The same words shown twice is noise, and the exchange is the
+        primary carrier of the live thread — so the evidence section
+        does not repeat it. This is de-duplication, not relevance: CI
+        still chose the evidence, the package still carries it, and when
+        CI drops the exchange the evidence still reaches the Teacher.
+        """
+        ids: set[UUID] = {inp.original_message.id}
+        for turn in inp.context_package.exchange:
+            if turn.entry_id is not None:
+                ids.add(turn.entry_id)
+        return ids
+
+    @staticmethod
+    def _render_exchange(package: ContextPackage) -> str:
+        """Render the exchange CI carried into the package.
+
+        No metadata, no ids, no timestamps — just who said what, in
+        order. This is what makes the Teacher sound like it was actually
+        in the room for the previous turns.
+        """
+        body = format_exchange(package.exchange)
+        if not body:
+            return ""
+        return "Recent exchange:\n" + body
 
     @staticmethod
     def _render_brief(package: ContextPackage) -> str:
@@ -328,19 +383,29 @@ class ModelTeacherCiFirst:
         return ""
 
     @staticmethod
-    def _render_evidence_plain(package: ContextPackage) -> str:
+    def _render_evidence_plain(
+        package: ContextPackage,
+        *,
+        already_shown: set[UUID] | None = None,
+    ) -> str:
         """Render evidence as plain text — no evidence IDs, no timestamps,
         no provenance warnings, no "needs_checking" labels.
 
         Blueprint Gap 3: the caution machinery stays inside CI. The
         teacher gets the content, not the metadata. If CI found
         something worth showing, show it plainly.
+
+        Items already carried by the exchange (or by the current message)
+        are skipped, so the same turn is never read out twice.
         """
         if not package.evidence:
             return ""
+        seen = already_shown or set()
         parts: list[str] = []
         total = 0
         for item in package.evidence:
+            if item.source_id in seen:
+                continue
             content = (item.content or "").strip()
             if not content:
                 continue

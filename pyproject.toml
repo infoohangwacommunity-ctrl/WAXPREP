@@ -31,15 +31,19 @@ packages = ["src/waxprep"]
 
 [tool.ruff]
 line-length = 88
-src = ["src", "tests"]
-extend-exclude = ["scripts"]
+src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501", "E741"]
 
+[tool.ruff.lint.per-file-ignores]
+# Live scripts put the repo's src/ on sys.path before importing the
+# package, so module-level imports cannot all sit at the top.
+"scripts/*.py" = ["E402"]
+
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "scripts"]
 exclude = [".venv", ".git", ".pytest_cache"]
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false

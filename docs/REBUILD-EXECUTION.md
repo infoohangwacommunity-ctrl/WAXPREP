@@ -1,149 +1,156 @@
-# Foundation Teacher-First Completion — Execution Log
+# Execution Log — CI-first Wax Prep
 
-**Branch:** `foundation-teacher-first-completion`
-**Baseline:** `professional-unified-history-rebuild` (commit `15ef0a0`)
-**Latest commit:** see `git log --oneline -1`
-**Draft PR:** https://github.com/infoohangwacommunity-ctrl/WAXPREP/pull/2
+**Repository:** https://github.com/infoohangwacommunity-ctrl/WAXPREP
+**Branch:** `main`
+**Status:** green — `ruff format`, `ruff check`, `pyright`, `pytest` all clean
 
-## What this branch is
+> This document was rewritten. The previous version described the
+> Teacher-first foundation branch and is a rear-view mirror from a
+> different car: it claimed no real Teacher adapter and no channel
+> adapters existed, and quoted a test count from a different codebase.
+> What follows describes the repository as it actually is.
 
-This branch rebuilds WAXPREP's student-world foundation and Teacher/CI
-orchestration boundary to be correct. It is **not** the
-Teacher-intelligence build — the Teacher is a Protocol; tests use a
-deterministic mock. The future Teacher-intelligence build will plug
-in a real Teacher following the same contract.
+## The architecture as it stands
 
-## CI status
+```text
+Student message
+  |
+  v
+Save the exact student message (history is append-only, never deleted or edited)
+  |
+  v
+The application assembles the raw exchange material (newest history entries,
+character-capped) — supply only, no judgement about what matters
+  |
+  v
+Context Intelligence investigates (mandatory for every non-empty message)
+  |    model decides what to inspect, whether to carry the exchange,
+  |    and when it has enough
+  v
+ContextPackage: evidence + the exchange CI chose to carry + synthesis
+                + uncertainty + investigation status
+  |
+  v
+Teacher receives: the original message + the package
+  |
+  v
+Tutor response saved + outbound delivery recorded
+```
 
-The GitHub Actions `quality-gate` workflow runs on every push and PR.
-It uses PostgreSQL 17 and runs:
-- ruff format --check
-- ruff check
-- pyright
-- pytest -m "not live" (all PostgreSQL-backed tests run against the
-  CI's PostgreSQL 17 container)
-- migration verification (drops schema, applies all migrations)
-- scheduler CLI verification
+CI is the investigating intelligence. The Teacher is the student-facing
+intelligence. The application enforces contracts, bounds, validation and
+persistence — and nothing else.
 
-**Current CI status: ✅ passing** (verified on the latest commit).
+## What is implemented
 
-## What is actually implemented (source code exists)
+### Orchestration (CI-first)
+- `orchestration/contracts_ci_first.py` — the `Teacher` Protocol,
+  `TeacherInput`, `TeacherOutcome`. `TeacherInput` carries the message, the
+  package, the time and one channel. No consultation capability: CI has
+  already run.
+- `orchestration/model_teacher_ci_first.py` — the real, model-backed
+  Teacher on the Model Gateway. Renders brief → exchange → current message →
+  evidence, in that order, so "that" has something to point at.
+- `orchestration/turn_ci_first.py` — the turn orchestrator. Saves first,
+  runs CI, teaches once, saves exactly one reply and its outbound delivery
+  record atomically, repairs a missing outbox row on retry, and takes a
+  cross-replica turn lock so a webhook and a worker cannot both teach.
+- `orchestration/post_turn.py` — the post-turn quality event, and the
+  optional CI notebook stewardship pass.
 
-### Core architecture
-- **Unified history** — `history_entries` table, append-only, timestamped.
-  `HistoryService` saves the exact student message atomically with its
-  index jobs.
-- **Teacher-first orchestration** — `src/waxprep/orchestration/`:
-  - `contracts.py`: Teacher Protocol, TeacherConsultation Protocol,
-    ConsultationRequest/Result, TeacherInput/Outcome.
-  - `consultation.py`: CIBackedConsultation adapter wrapping
-    ContextInvestigator.
-  - `bounded.py`: BoundedConsultation — enforces the consultation
-    budget at the capability boundary, counting every CI call.
-  - `mock_teacher.py`: deterministic test double (NOT teaching
-    intelligence).
-  - `turn.py`: TurnService — Teacher drives the turn with bounded CI
-    consultations.
-- **Outbound delivery outbox** — `outbound_deliveries` table
-  (migration 011). The tutor reply and its outbox record are persisted
-  atomically. If a reply exists but its outbox record is missing
-  (simulating a crash), a retry repairs the record and returns the same
-  stored reply without invoking the Teacher again.
-- **Channel interfaces** — `src/waxprep/channel/__init__.py`:
-  NormalizedInbound, InboundChannelAdapter Protocol,
-  OutboundChannelAdapter Protocol. The actual WhatsApp adapter is a
-  future build; these interfaces define the contract.
+### Context Intelligence
+- `context/investigator.py` — the model decides, the application executes
+  tools and enforces `InvestigationLimits`. The `investigation_status` is
+  computed by the runtime from what actually happened, never taken from the
+  model's own claim.
+- `context/exchange.py` — the mechanical rules for the exchange material:
+  how much may be supplied, and how supplied turns are rendered.
+- `context/system_prompt.py` — the CI prompt: evidence-led investigation,
+  notebook stewardship, the exchange contract, and the safety rules.
+- `context/gateway_model.py` — CI on the Model Gateway. Parses the
+  structured final answer, including `include_exchange`.
 
-### Retrieval
-- **Rank-then-limit** — `find_exact` and `find_by_meaning` paginate
-  through the corpus with deterministic cursors. No arbitrary page
-  limits. Rigorously justified early termination:
-  - Token search: stop when the current top-N min exceeds
-    `sum_of_all_query_token_weights × recency_weight(now, last_seen_time)`.
-  - Semantic search: stop when the current top-N min exceeds
-    `1.0 × recency_weight(now, last_seen_time)`.
+### Continuity through CI (D041)
+The application supplies the raw exchange material on every turn and never
+judges which turns matter. CI decides whether the Teacher receives it; the
+default is *include*, because the Teacher cannot see the thread any other
+way. A drop is explicit, reasoned, and recorded in the audit trail as
+`exchange:dropped:<reason>`; an include is recorded as
+`exchange:included:<n>`.
 
-### Storage
-- **Atomic transactions** — `Storage.transaction()` context manager.
-  PostgresStorage: real DB transaction. InMemoryStorage: snapshot/restore.
-- **Job leases** — `FOR UPDATE SKIP LOCKED` + `lease_until`.
-  Correct attempt accounting: claim increments once; done/failed don't
-  increment.
-- **Cross-tenant FKs** — composite foreign keys + `waxprep_object_owner`
-  SECURITY DEFINER function for polymorphic provenance.
+This closes the hole left by removing the fixed recent-turn window: without
+it, continuity was *possible* but not *guaranteed*.
 
-### Security
-- **Field-level encryption** — AES-256-GCM with per-student derived keys.
-- **Key rotation** — `src/waxprep/security/rotation.py`: `rotate_active_key`,
-  `reencrypt_all` (idempotent, resumable, fail-closed).
-- **Event metadata contract** — `src/waxprep/security/event_metadata.py`:
-  only safe operational keys are allowed; disallowed keys and long
-  values are rejected at the storage layer.
-- **Sanitized errors** — `DerivationWorker.sanitize_error` strips quoted
-  strings and long tokens from exception messages before persisting.
+### Channels
+- **WhatsApp** — Cloud API handler, security (signature verification),
+  normalisation, progressive delivery, outbox.
+- **Telegram** — bot API routes, normalisation, native drafts, outbox.
+- **Streaming** — a shared contract, an accumulator, formatters, renderers
+  and observability, so a reply can be delivered progressively without the
+  educational branching moving into infrastructure.
 
-### Migration & backfill
-- **Full legacy backfill** — `src/waxprep/history/backfill.py`:
-  idempotent, resumable, count-verifiable. Handles messages, notebook
-  entries (payload → encrypted + provenance, atomic), artifact
-  filenames, knowledge verification.
-- **Migration 006** — guards check for UN-BACKFILLED rows (not mere
-  existence); `ADD COLUMN IF NOT EXISTS` makes it idempotent with the
-  backfill.
+### Storage, security, operations
+- Append-only unified history, blind word index, embeddings, provenance
+  links, notebook, summaries, knowledge graph, artifacts, workspace.
+- PostgreSQL Row-Level Security for tenant isolation; composite
+  cross-tenant foreign keys.
+- AES-256-GCM field encryption with per-student keys, blind HMAC word
+  hashes for exact search, and resumable key rotation.
+- An event-metadata contract: only safe operational keys are accepted, and
+  long values are rejected at the storage layer.
+- 14 migrations; the worker applies pending migrations on boot.
 
-### Worker & scheduler
-- **Worker** — `src/waxprep/derive/worker.py`: retries, leases,
-  capability-aware.
-- **Scheduler CLI** — `src/waxprep/scheduler.py`: `python -m waxprep.scheduler
-  run-once` / `run-interval`. Provider-neutral, safe for concurrent
-  workers.
+## What is NOT yet implemented
 
-## What was intentionally deferred (Teacher intelligence)
+These are the real remaining pieces, in the order they should be built:
 
-These belong to the next build, not the foundation:
+1. **The judge** — a background evaluation pass, after the outbox, on the
+   small model, writing structured scores into the `turn_quality` event log
+   that `post_turn.py` already owns. Continuity is already recorded there
+   (`exchange_included`, `exchange_turns`), so the judge has something
+   concrete to score.
+2. **The synthetic preference pipeline** — turning real student exchanges
+   into preference data for future fine-tuning. This is the automation the
+   product needs so that understanding improves without a human in the loop.
+3. **Continuous consolidation schedule** — `ConsolidationService` is
+   invoked explicitly by the scheduler; a nightly per-student schedule is
+   not wired.
 
-- Teacher system prompt content
-- Teaching methodology / pedagogical intelligence
-- Educational response strategy / lesson planning
-- Subject-specific teaching logic / grading logic
-- Teacher personality
-- Real production Teacher model/provider implementation
+## Live testing
 
-## What is NOT yet implemented (infrastructure)
+`scripts/live_e2e_upstage.py` runs ten multi-turn students and forty
+single questions against real Upstage models.
 
-These are infrastructure additions that plug into the existing contracts:
+- The Teacher and CI are registered as **different models**: Solar Pro 4
+  teaches, Mini investigates. Judging the product's voice on the small
+  model tells you about the small model, not about the product. Override
+  with `WAXPREP_LIVE_TEACHER_MODEL` and `WAXPREP_LIVE_CI_MODEL`.
+- The script reports the CI investigation status and how many exchange
+  turns reached the Teacher, so continuity is visible per turn rather than
+  inferred from the prose.
+- `scripts/` is now covered by `pyright` and `ruff`. It used to be
+  excluded, which is how two live scripts kept calling
+  `build_services(max_consultations=...)` — a parameter removed in the
+  CI-first migration — and kept reading `result.consultations_made`, a
+  field the CI-first result never had. Both scripts crashed on the first
+  line of the run. They were instruments that had never played a note.
 
-1. **Inbound channel adapter** — the `InboundChannelAdapter` Protocol
-   is defined in `src/waxprep/channel/__init__.py`, but no concrete
-   adapter (WhatsApp webhook handler, etc.) is implemented. The
-   application exposes `/health` only.
-2. **Outbound channel adapter** — the `OutboundChannelAdapter` Protocol
-   is defined, but no concrete adapter is implemented. The outbox table
-   and `OutboundDelivery` model exist; the delivery worker is not wired.
-3. **Real Teacher adapter** — the Teacher is a Protocol; `MockTeacher`
-   is the only implementation. A real Teacher adapter through
-   `model_gateway` is the next build.
-4. **Artifact byte store (create/edit)** — only reading extracted content
-   through a supplied processor is supported. Writing new files requires
-   a byte store that doesn't exist yet.
-5. **Continuous consolidation schedule** — `ConsolidationService` is
-   invoked explicitly by the scheduler; a nightly per-student schedule
-   is not wired.
-6. **Knowledge graph backfill** — old `knowledge_nodes`/`edges`/`evidence`
-   rows (if any exist) are reported by the backfill but not converted,
-   because the application never wrote to them in the old architecture.
+```bash
+export UPSTAGE_API_KEY=...
+uv run python scripts/live_e2e_upstage.py
+```
 
 ## Test results
 
 ```
-201 passed, 1 deselected (live), 0 failing
+458 passed, 95 skipped (no DATABASE_URL), 5 deselected (live)
 ```
 
 PostgreSQL version tested: **17.11** (Debian 17.11-0+deb13u1).
 CI PostgreSQL: **17** (Docker image `postgres:17`).
 
 Quality gates:
-- `ruff format --check .` → 138 files clean
+- `ruff format --check .` → 228 files clean
 - `ruff check .` → 0 errors
 - `pyright` → 0 errors, 0 warnings
 
@@ -176,10 +183,17 @@ print(apply_migrations(conn))
 uv run python -m waxprep.scheduler run-once
 ```
 
-## Production readiness assessment
+## Where the project stands
 
-The foundation is **coherent, durable, tenant-safe, searchable,
-recoverable, auditable, and genuinely ready for the future Teacher
-intelligence layer**. The architecture is correct; the remaining items
-are infrastructure additions that plug into the existing contracts
-without changing the foundation.
+The foundation is coherent and the architecture is honest: one repository,
+one history, one place where intelligence lives, and an application that
+enforces contracts without pretending to understand students.
+
+Two precise moves remain, and they are the ones that matter:
+
+1. **The judge** — so quality is measured by the system, not by you.
+2. **The synthetic preference pipeline** — so the system improves from real
+   conversations without anyone hand-labelling them.
+
+Both build on contracts that already exist. Neither requires a new
+architecture.

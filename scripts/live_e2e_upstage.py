@@ -27,7 +27,12 @@ from waxprep.storage.memory import InMemoryStorage
 from waxprep.wiring import build_services
 
 API_KEY = os.environ.get("UPSTAGE_API_KEY") or ""
-MODEL = os.environ.get("WAXPREP_LIVE_MODEL", "solar-mini")
+# The Teacher and CI are different jobs, so they get different models.
+# Judging the product's voice on the small model tells you about the
+# small model, not about the product. Solar Pro 4 teaches; Mini
+# investigates.
+TEACHER_MODEL = os.environ.get("WAXPREP_LIVE_TEACHER_MODEL", "solar-pro4")
+CI_MODEL = os.environ.get("WAXPREP_LIVE_CI_MODEL", "solar-mini")
 EMBED_MODEL = os.environ.get(
     "WAXPREP_LIVE_EMBED_MODEL", "solar-embedding-1-large-query"
 )
@@ -40,7 +45,8 @@ class TurnRecord:
     turn_index: int
     student_message: str
     tutor_reply: str | None
-    consultations: int
+    investigation_status: str
+    exchange_turns: int
     error: str | None = None
 
 
@@ -67,23 +73,22 @@ def make_gateway(api_key: str) -> ModelGateway:
     provider = UpstageResponsesProvider(api_key=api_key, base_url=BASE)
     registry = ModelRegistry()
     registry.register_provider(provider)
-    caps = provider.capabilities(MODEL)
     registry.register_model(
         ModelConfig(
             name="teacher",
             provider="upstage",
-            model=MODEL,
+            model=TEACHER_MODEL,
             role=ModelRole.TEACHER,
-            capabilities=caps,
+            capabilities=provider.capabilities(TEACHER_MODEL),
         )
     )
     registry.register_model(
         ModelConfig(
             name="context",
             provider="upstage",
-            model=MODEL,
+            model=CI_MODEL,
             role=ModelRole.CONTEXT,
-            capabilities=caps,
+            capabilities=provider.capabilities(CI_MODEL),
         )
     )
     return ModelGateway(registry, max_retries=1, retry_delay_seconds=0.5)
@@ -236,7 +241,6 @@ async def run() -> RunReport:
         gateway=gateway,
         teacher_model_name="teacher",
         embedder=embedder,
-        max_consultations=2,
     )
 
     for phrase in [
@@ -261,15 +265,27 @@ async def run() -> RunReport:
                 wax, message, channel="live-test", channel_ref=ref
             )
             reply = result.tutor_entry.text if result.tutor_entry else None
+            package = result.context_package
             rec = TurnRecord(
-                user_label, turn_index, message, reply, result.consultations_made
+                user_label,
+                turn_index,
+                message,
+                reply,
+                package.investigation_status.value if package else "none",
+                len(package.exchange) if package else 0,
             )
             if not reply or not str(reply).strip():
                 rec.error = "empty tutor reply"
             return rec
         except Exception as exc:
             return TurnRecord(
-                user_label, turn_index, message, None, 0, f"{type(exc).__name__}: {exc}"
+                user_label,
+                turn_index,
+                message,
+                None,
+                "error",
+                0,
+                f"{type(exc).__name__}: {exc}",
             )
 
     for label, messages in MULTI:
@@ -288,7 +304,9 @@ async def run() -> RunReport:
             print(f"[{status}] {label} T{i}")
             print(f"  STUDENT: {msg}")
             print(f"  TUTOR:   {(rec.tutor_reply or '')[:600]}")
-            print(f"  consultations={rec.consultations}")
+            print(
+                f"  ci={rec.investigation_status} exchange_turns={rec.exchange_turns}"
+            )
             await asyncio.sleep(0.25)
 
     for label, msg in SINGLES:
@@ -330,7 +348,8 @@ def main() -> None:
                     "turn": t.turn_index,
                     "student": t.student_message,
                     "tutor": t.tutor_reply,
-                    "consultations": t.consultations,
+                    "investigation_status": t.investigation_status,
+                    "exchange_turns": t.exchange_turns,
                     "error": t.error,
                 }
                 for t in report.turns

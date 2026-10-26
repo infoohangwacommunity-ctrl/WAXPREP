@@ -90,6 +90,7 @@ class ContextInvestigator:
                 query=query,
                 evidence=(),
                 summary="No context required for a blank message.",
+                exchange=request.exchange,
                 stopped_reason="empty_query",
                 as_of=request.now,
                 investigation_status=InvestigationStatus.SKIPPED,
@@ -122,6 +123,8 @@ class ContextInvestigator:
                 max_output_tokens=limits.max_model_output_tokens,
                 wax_id=request.wax_id,
                 now=request.now,
+                exchange=request.exchange,
+                exchange_empty=not request.exchange,
             )
 
         for _step in range(limits.max_steps):
@@ -274,6 +277,8 @@ class ContextInvestigator:
                     max_output_tokens=limits.max_model_output_tokens,
                     wax_id=request.wax_id,
                     now=request.now,
+                    exchange=request.exchange,
+                    exchange_empty=not request.exchange,
                 )
                 decision = await self.model.decide(steward_req)
                 investigated.append(f"stewardship:{decision.action}: {decision.reason}")
@@ -350,6 +355,21 @@ class ContextInvestigator:
                     "context_intelligence_returned_unmatched_evidence_ids",
                 )
 
+        # The exchange decision belongs to CI alone. The application
+        # supplied the material; CI decides whether the Teacher receives
+        # it. The default is *include*: the Teacher cannot see the thread
+        # any other way, so silence must never strip it. A drop is an
+        # explicit decision and it is recorded, never invisible.
+        if final.include_exchange:
+            package_exchange = request.exchange
+            if package_exchange:
+                investigated.append(f"exchange:included:{len(package_exchange)}")
+        else:
+            package_exchange = ()
+            drop_reason = (final.include_exchange_reason or "no_reason_given")[:80]
+            investigated.append(f"exchange:dropped:{drop_reason}")
+            final_uncertainty = final_uncertainty + (f"exchange_dropped:{drop_reason}",)
+
         status = _compute_status(
             stopped_by_model=stopped_by_model,
             hit_step_budget=hit_step_budget,
@@ -399,6 +419,7 @@ class ContextInvestigator:
             query=query,
             evidence=tuple(selected[: limits.max_evidence]),
             summary=final.summary,
+            exchange=package_exchange,
             uncertainty=final_uncertainty,
             investigated=tuple(investigated),
             stopped_reason=final.stopped_reason,

@@ -295,3 +295,20 @@ CI never writes SQL. Every durable change requires evidence and passes structura
 - Video may be stored but is not semantically processed.
 - WhatsApp Cloud API is a channel adapter only; no second history/session store.
 - Cost/size caps enforced before provider calls.
+
+## D041 — The exchange travels through Context Intelligence
+
+**Status:** Accepted
+
+The application hands CI the raw material of the live exchange — the newest
+history entries, in order, trimmed only for length — and never judges which
+turns matter. CI decides whether the Teacher receives it, and the default is
+*include*: the Teacher cannot see the thread any other way, so continuity is
+guaranteed by the pipeline rather than left to the probability that CI
+bothers to go and fetch it. Dropping the exchange is an explicit, reasoned
+decision, recorded in the audit trail.
+
+This closes the gap left by removing the fixed recent-turn window: without
+it, continuity was *possible* but not *guaranteed*, which is the
+case-file feeling the architecture exists to escape. The exchange now
+arrives through the intelligence, not around it.

@@ -88,7 +88,7 @@ Context Intelligence investigates the student's world
   |    (model decides what to inspect; application executes tools and enforces limits)
   |    (mandatory for every non-empty message — never optional)
   v
-CI produces a ContextPackage: evidence + synthesis + uncertainty + investigation status
+CI produces a ContextPackage: evidence + the exchange CI chose to carry + synthesis + uncertainty + investigation status
   |
   v
 Teacher receives the original student message + the ContextPackage
@@ -126,11 +126,15 @@ a deterministic mock remain, so tests stay offline and reproducible.
   when evidence conflicts, when more investigation is justified, and when it
   has enough to stop. It never teaches the student. The application supplies
   it with: the current message, the current time, the trigger record, the
-  authorized scope, available tools, mechanical limits, and instructions on
-  evidence quality and tool use. The model decides the rest.
+  authorized scope, available tools, mechanical limits, the raw material of
+  the live exchange, and instructions on evidence quality and tool use. The
+  model decides the rest — including whether the Teacher receives that
+  exchange. The application never judges which turns matter.
 - **Teacher** is the **student-facing intelligence**. It receives the original
-  student message plus a ContextPackage, and composes the final educational
-  answer. It does **not** decide whether CI runs — CI has already run. It
+  student message plus a ContextPackage — which carries the recent exchange
+  when CI has judged that the Teacher needs it in order to be inside the
+  exchange — and composes the final educational answer. It does **not**
+  decide whether CI runs — CI has already run. It
   never writes to history or storage; persistence stays with
   `TurnServiceCiFirst` and the storage layer. No keyword routing, phrase
   matching, or student-specific branching lives in the adapter: the model

@@ -35,6 +35,15 @@ class PostTurnQualityRecord:
     notebook_proposal_accepted: bool
     reply_chars: int
     notes: tuple[str, ...] = ()
+    exchange_included: bool = False
+    """Whether the Teacher received the recent exchange in this turn.
+
+    Continuity is a product property, not an implementation detail, so it
+    belongs in the quality signal: a turn that answered "that" without
+    the exchange is a defect, and this is where that shows up."""
+
+    exchange_turns: int = 0
+    """How many turns of the live exchange travelled to the Teacher."""
 
 
 class PostTurnReview:
@@ -81,6 +90,8 @@ class PostTurnReview:
                             "accepted" if record.notebook_proposal_accepted else "none"
                         ),
                         "reply_chars": int(record.reply_chars),
+                        "exchange_included": bool(record.exchange_included),
+                        "exchange_turns": int(record.exchange_turns),
                     },
                 )
             )

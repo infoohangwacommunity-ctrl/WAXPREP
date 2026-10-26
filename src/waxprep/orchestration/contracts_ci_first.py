@@ -60,11 +60,12 @@ class TeacherInput:
     The Teacher does NOT receive a consultation capability because
     CI has already completed its investigation.
 
-    The Teacher does NOT receive a fixed recent-turn transcript.
-    Continuity comes from CI's investigation — it finds the relevant
-    evidence (including recent messages when they matter) and packages
-    it in the ContextPackage. The Teacher uses CI's findings, not a
-    raw window of history.
+    The Teacher does NOT receive a recent-turn transcript of its own
+    choosing. Continuity reaches it through Context Intelligence: CI
+    assembles what the Teacher is given, and the recent exchange travels
+    inside the ContextPackage when CI judges the Teacher needs it in
+    order to be inside the exchange. The Teacher uses CI's findings, not
+    a window of history it picked for itself.
     """
 
     wax_id: WaxId

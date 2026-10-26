@@ -42,6 +42,40 @@ student's message.
 time, age relative to now, author kind (student/tutor/system), whether it is superseded,
 and a plain-language provenance note.
 
+## The exchange material
+
+The application hands CI the **raw material of the live exchange** on every
+turn: the newest saved history entries, in order, trimmed only for length
+(`InvestigationLimits.max_exchange_entries` / `.max_exchange_characters`).
+
+This is *supply*, the same category as tools, scope and limits. The
+application does not decide that a turn matters, and it does not decide that
+one does not. It hands over the clay.
+
+**CI decides what travels to the Teacher.** The Teacher cannot see the
+thread any other way, so the exchange is assembled by the intelligence, not
+routed around it by the application. CI answers one question in the final
+package:
+
+| Field                   | Meaning                                                        |
+| ----------------------- | -------------------------------------------------------------- |
+| `include_exchange`      | `true` (default) — the Teacher receives the supplied exchange.  |
+| `include_exchange_reason` | Why, when CI dropped it. Recorded in the audit trail.        |
+
+The default is *include*. Silence never means "dropped": a malformed final
+answer keeps the exchange, and dropping it has to be an explicit, reasoned
+decision. CI drops the exchange only for a true cold start (no thread yet)
+or when the thread is genuinely irrelevant and nothing in it needs
+resolving — and it says so.
+
+The package carries the decision in `ContextPackage.exchange`, and the
+runtime records it in the `investigated` trail as
+`exchange:included:<n>` or `exchange:dropped:<reason>`. A drop that nobody
+can see would be a bug, not a decision.
+
+The Teacher renders the exchange as plain "who said what, in order", and
+does not repeat a turn that the exchange already carries.
+
 ## Investigation status (closed vocabulary)
 
 Every `ContextPackage` carries an explicit `investigation_status` drawn from
@@ -178,6 +212,7 @@ CI-first mode. The row carries:
 - the list of evidence ids and types
 - the `investigated` audit trail (every action attempted, including failures)
 - the `stopped_reason` and context model name
+- whether the exchange was carried to the Teacher, and how many turns
 
 Operational logs carry investigation id, trigger record, tool name and
 duration, candidate and selected evidence counts, retry and failure class,

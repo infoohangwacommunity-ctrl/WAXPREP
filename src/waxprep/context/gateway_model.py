@@ -8,6 +8,7 @@ import os
 import re
 from typing import Any
 
+from waxprep.context.exchange import format_exchange
 from waxprep.context.model import (
     ContextModelDecision,
     ContextModelFinal,
@@ -116,6 +117,7 @@ class GatewayContextModel:
             if self._use_native_tools
             else "Return a single JSON object with keys action, arguments, reason."
         )
+        exchange = self._render_exchange(request)
         return (
             f"{mode}\n"
             "action must be one of the tool names or 'stop'.\n"
@@ -123,19 +125,52 @@ class GatewayContextModel:
             "do not rely on keyword routing.\n"
             f"Current time (UTC): {request.now.isoformat()}\n"
             f"Student message: {request.user_query}\n"
+            f"{exchange}"
             f"Evidence so far:\n{request.evidence}\n"
             f"Tools: {tools}\n"
         )
 
-    def _final_prompt(self, request: ContextModelRequest) -> str:
+    @staticmethod
+    def _final_prompt(request: ContextModelRequest) -> str:
+        exchange = GatewayContextModel._render_exchange(request)
         return (
-            "Return a single JSON object with keys summary, selected_evidence_ids, "
-            "uncertainty, stopped_reason.\n"
+            "Return a single JSON object with keys summary, "
+            "selected_evidence_ids, uncertainty, stopped_reason, "
+            "include_exchange, include_exchange_reason.\n"
             "Select only evidence that helps the Teacher for *this* intent; "
             "omit irrelevant history.\n"
+            "Set include_exchange to true so the Teacher receives the recent "
+            "exchange. The Teacher cannot see the thread any other way. "
+            "Set it to false only when the exchange is genuinely irrelevant "
+            "and nothing in it needs resolving, and say why in "
+            "include_exchange_reason.\n"
             f"Current time (UTC): {request.now.isoformat()}\n"
             f"Student message: {request.user_query}\n"
+            f"{exchange}"
             f"Evidence:\n{request.evidence}\n"
+        )
+
+    @staticmethod
+    def _render_exchange(request: ContextModelRequest) -> str:
+        """Render the supplied exchange material for the CI model.
+
+        Framed as raw material the application handed over, so CI does
+        not mistake it for something it already investigated and chosen.
+        When there is nothing to hand over, that is said outright — a
+        missing block would otherwise read as an oversight.
+        """
+        if request.exchange_empty or not request.exchange:
+            return (
+                "Recent exchange: none yet. This student has no prior "
+                "exchange, so there is no thread to carry.\n\n"
+            )
+        body = format_exchange(request.exchange)
+        if not body:
+            return ""
+        return (
+            "Recent exchange (raw material supplied by the application, "
+            "in order):\n"
+            f"{body}\n\n"
         )
 
     def _parse_decision(self, text: str) -> ContextModelDecision:
@@ -161,6 +196,10 @@ class GatewayContextModel:
                 selected_evidence_ids=(),
                 uncertainty=("malformed_final_output",),
                 stopped_reason="malformed_final",
+                # A malformed answer must not silently strip the exchange:
+                # the Teacher cannot see the thread any other way.
+                include_exchange=True,
+                include_exchange_reason="malformed_final_output",
             )
         ids_raw = data.get("selected_evidence_ids") or ()
         ids: list[str] = []
@@ -172,11 +211,19 @@ class GatewayContextModel:
             uncertainty = tuple(str(x) for x in unc)
         elif isinstance(unc, str) and unc:
             uncertainty = (unc,)
+        include_raw = data.get("include_exchange")
+        # Default to include. Only an explicit false drops the exchange.
+        include_exchange = include_raw is not False
+        reason = str(data.get("include_exchange_reason") or "")
+        if not include_exchange and not reason:
+            reason = "ci_dropped_exchange_without_reason"
         return ContextModelFinal(
             summary=str(data.get("summary") or ""),
             selected_evidence_ids=tuple(ids),
             uncertainty=uncertainty,
             stopped_reason=str(data.get("stopped_reason") or "model_finalized"),
+            include_exchange=include_exchange,
+            include_exchange_reason=reason,
         )
 
 
