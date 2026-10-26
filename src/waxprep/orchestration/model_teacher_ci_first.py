@@ -240,8 +240,19 @@ class ModelTeacherCiFirst:
         # Final persisted text is always the complete answer — never a partial.
         # Prefer streaming accumulation when the provider advertises STREAMING.
         # History always stores the final complete text only.
+        from waxprep.model_gateway.models import ModelCapability
+        from waxprep.model_gateway.errors import UnsupportedCapabilityError
+
         stream_fn = getattr(self._gateway, "stream", None)
-        if callable(stream_fn):
+        use_streaming = (
+            callable(stream_fn)
+            and self._gateway._registry is not None
+            and self._gateway._registry.has_capability(
+                request.model, ModelCapability.STREAMING
+            )
+        )
+
+        if use_streaming:
             chunks: list[str] = []
             try:
                 stream_request = replace(request, stream=True)
@@ -255,22 +266,30 @@ class ModelTeacherCiFirst:
                             try:
                                 await on_text_delta(event.text)
                             except Exception:
-                                logger.debug(
-                                    "progressive text delta sink failed",
+                                logger.warning(
+                                    "streaming delta delivery failed",
                                     exc_info=True,
+                                    extra={"wax_id": str(request.wax_id)},
                                 )
                 if chunks:
                     return self._parse_reply("".join(chunks))
-            except Exception:
-                # Transport or capability errors fall back to complete().
-                pass
-        response: ModelResponse = await self._gateway.complete(request)
-        if on_text_delta is not None and response.text:
-            try:
-                await on_text_delta(response.text)
-            except Exception:
-                logger.debug("progressive text delta sink failed", exc_info=True)
-        return self._parse_reply(response.text)
+            except UnsupportedCapabilityError:
+                logger.info(
+                    "streaming not supported by model, falling back to complete",
+                    extra={"model": request.model, "wax_id": str(request.wax_id)},
+                )
+                use_streaming = False
+            except Exception as exc:
+                logger.warning(
+                    "streaming failed, falling back to complete",
+                    exc_info=True,
+                    extra={"model": request.model, "wax_id": str(request.wax_id)},
+                )
+                use_streaming = False
+
+        if not use_streaming:
+            response: ModelResponse = await self._gateway.complete(request)
+            return self._parse_reply(response.text)
 
     @staticmethod
     def _parse_reply(text: str) -> str | None:

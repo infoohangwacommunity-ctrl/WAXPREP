@@ -71,3 +71,11 @@ class ModelRegistry:
                 f"expected {role.value!r}"
             )
         return config
+
+    def has_capability(self, model_name: str, capability: ModelCapability) -> bool:
+        """Check if a model has a specific capability."""
+        try:
+            config = self.get_model(model_name)
+            return capability in config.capabilities
+        except KeyError:
+            return False

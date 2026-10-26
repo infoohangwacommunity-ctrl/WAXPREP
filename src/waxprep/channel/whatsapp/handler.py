@@ -421,6 +421,7 @@ class WhatsAppInboundHandler:
             progressive = ProgressiveWhatsAppDelivery(
                 send_text=_send_chunk,
                 send_typing=_send_typing,
+                progressive=True,  # Enable progressive delivery
             )
             on_text_delta = progressive.on_delta
 
