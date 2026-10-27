@@ -79,9 +79,7 @@ def test_orphan_scan_finds_only_abandoned_students() -> None:
     busy = new_wax_id()
     storage.create_student(Student(busy, OLD, OLD))
     storage.append_history_entry(
-        HistoryEntry(
-            new_id(), busy, AuthorKind.STUDENT, "text/plain", "hi", OLD, OLD
-        )
+        HistoryEntry(new_id(), busy, AuthorKind.STUDENT, "text/plain", "hi", OLD, OLD)
     )
     fresh = new_wax_id()
     storage.create_student(Student(fresh, NOW, NOW))
