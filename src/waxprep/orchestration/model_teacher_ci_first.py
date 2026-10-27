@@ -240,13 +240,13 @@ class ModelTeacherCiFirst:
         # Final persisted text is always the complete answer — never a partial.
         # Prefer streaming accumulation when the provider advertises STREAMING.
         # History always stores the final complete text only.
-        from waxprep.model_gateway.models import ModelCapability
-        from waxprep.model_gateway.errors import UnsupportedCapabilityError
         from waxprep.channel.streaming.metrics import (
             record_streaming_attempt,
-            record_streaming_success,
             record_streaming_fallback,
+            record_streaming_success,
         )
+        from waxprep.model_gateway.errors import UnsupportedCapabilityError
+        from waxprep.model_gateway.models import ModelCapability
 
         stream_fn = getattr(self._gateway, "stream", None)
         use_streaming = (
@@ -289,7 +289,7 @@ class ModelTeacherCiFirst:
                     extra={"model": request.model, "wax_id": str(request.wax_id)},
                 )
                 use_streaming = False
-            except Exception as exc:
+            except Exception:
                 logger.warning(
                     "streaming failed, falling back to complete",
                     exc_info=True,

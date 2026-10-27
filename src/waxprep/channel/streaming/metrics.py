@@ -39,25 +39,25 @@ class StreamingStats:
         """Record a streaming attempt."""
         self.total_attempts += 1
         if model:
-            self.model_stats[model]["attempts"] = self.model_stats[model].get(
-                "attempts", 0
-            ) + 1
+            self.model_stats[model]["attempts"] = (
+                self.model_stats[model].get("attempts", 0) + 1
+            )
 
     def record_success(self, model: str | None = None) -> None:
         """Record a successful streaming session."""
         self.successful_streams += 1
         if model:
-            self.model_stats[model]["successes"] = self.model_stats[model].get(
-                "successes", 0
-            ) + 1
+            self.model_stats[model]["successes"] = (
+                self.model_stats[model].get("successes", 0) + 1
+            )
 
     def record_fallback(self, model: str | None = None) -> None:
         """Record a fallback to non-streaming."""
         self.fallback_to_complete += 1
         if model:
-            self.model_stats[model]["fallbacks"] = self.model_stats[model].get(
-                "fallbacks", 0
-            ) + 1
+            self.model_stats[model]["fallbacks"] = (
+                self.model_stats[model].get("fallbacks", 0) + 1
+            )
 
     def record_delta(self) -> None:
         """Record a delta delivery."""
@@ -77,10 +77,9 @@ class StreamingStats:
         """Record time to first delta."""
         self.time_to_first_delta_ns.append(duration_ns)
         if model:
-            self.model_stats[model]["time_to_first_delta_ns"] = (
-                self.model_stats[model].get("time_to_first_delta_ns", [])
-                + [duration_ns]
-            )
+            self.model_stats[model]["time_to_first_delta_ns"] = self.model_stats[
+                model
+            ].get("time_to_first_delta_ns", []) + [duration_ns]
 
     def record_time_to_first_visible(
         self, duration_ns: float, model: str | None = None
@@ -88,10 +87,9 @@ class StreamingStats:
         """Record time to first visible output."""
         self.time_to_first_visible_ns.append(duration_ns)
         if model:
-            self.model_stats[model]["time_to_first_visible_ns"] = (
-                self.model_stats[model].get("time_to_first_visible_ns", [])
-                + [duration_ns]
-            )
+            self.model_stats[model]["time_to_first_visible_ns"] = self.model_stats[
+                model
+            ].get("time_to_first_visible_ns", []) + [duration_ns]
 
     def record_stream_duration(
         self, duration_ns: float, model: str | None = None
@@ -99,10 +97,9 @@ class StreamingStats:
         """Record stream duration."""
         self.stream_duration_ns.append(duration_ns)
         if model:
-            self.model_stats[model]["stream_duration_ns"] = (
-                self.model_stats[model].get("stream_duration_ns", [])
-                + [duration_ns]
-            )
+            self.model_stats[model]["stream_duration_ns"] = self.model_stats[model].get(
+                "stream_duration_ns", []
+            ) + [duration_ns]
 
     def get_success_rate(self) -> float:
         """Get the streaming success rate."""
@@ -157,9 +154,7 @@ class StreamingStats:
     def log_summary(self) -> None:
         """Log a summary of streaming statistics."""
         avg_time_to_first_delta_ms = f"{self.get_avg_time_to_first_delta_ms():.2f}"
-        avg_time_to_first_visible_ms = (
-            f"{self.get_avg_time_to_first_visible_ms():.2f}"
-        )
+        avg_time_to_first_visible_ms = f"{self.get_avg_time_to_first_visible_ms():.2f}"
         model_stats = {
             model: self._summarize_model(stats)
             for model, stats in self.model_stats.items()
@@ -268,4 +263,3 @@ __all__ = [
     "record_delta_failure",
     "record_final_failure",
 ]
-

@@ -253,7 +253,10 @@ jobs:
           # is unreliable while this job keeps the run in progress).
           curl -sS --retry 3 --retry-delay 2 "${auth[@]}" "$api/runs/$RUN_ID/jobs?per_page=100" > jobs.json
 
-          failed_jobs=$(jq -r '[.jobs[] | select(.conclusion == "failure")] | length' jobs.json)
+          # Any non-success conclusion (failure, cancelled, startup_failure,
+          # timed_out) counts as red — counting only "failure" once produced a
+          # false "green" report, closing the triage issue on a failed run.
+          failed_jobs=$(jq -r '[.jobs[] | select(.conclusion != null and .conclusion != "success")] | length' jobs.json)
           if [ "$failed_jobs" -eq 0 ]; then
             echo "All gate jobs green; closing any open triage issue."
             existing=$(gh issue list -R "$REPO" --state open --search "in:title quality-gate failed on $BRANCH" --json number --jq '.[0].number // empty' || true)
@@ -263,10 +266,10 @@ jobs:
             exit 0
           fi
 
-          report=$(jq -r '.jobs[] | select(.conclusion == "failure") | "### job: " + .name + " (failed)" + "\n" + ([.steps[] | select(.conclusion == "failure") | "- failed step: " + .name] | join("\n"))' jobs.json)
+          report=$(jq -r '.jobs[] | select(.conclusion != null and .conclusion != "success") | "### job: " + .name + " (failed)" + "\n" + ([.steps[] | select(.conclusion != null and .conclusion != "success") | "- failed step: " + .name] | join("\n"))' jobs.json)
 
           : > logs-section.md
-          for job_id in $(jq -r '.jobs[] | select(.conclusion == "failure") | .id' jobs.json); do
+          for job_id in $(jq -r '.jobs[] | select(.conclusion != null and .conclusion != "success") | .id' jobs.json); do
             {
               echo "~~~"
               curl -sSL "${auth[@]}" "$api/jobs/$job_id/logs" 2>/dev/null | tail -n 300 || true

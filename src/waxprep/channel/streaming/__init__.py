@@ -28,9 +28,9 @@ from waxprep.channel.streaming.observability import (
     StreamingMetrics,
 )
 from waxprep.channel.streaming.pacing import (
-    PacingPolicy,
     TELEGRAM_DRAFT_DEFAULT,
     WHATSAPP_DEFAULT,
+    PacingPolicy,
 )
 from waxprep.channel.streaming.renderers import (
     telegram_capabilities,

@@ -325,4 +325,3 @@ async def test_turn_lock_exclusive() -> None:
     assert storage.try_acquire_turn_lock(wax, entry_id) is False
     storage.release_turn_lock(wax, entry_id)
     assert storage.try_acquire_turn_lock(wax, entry_id) is True
-

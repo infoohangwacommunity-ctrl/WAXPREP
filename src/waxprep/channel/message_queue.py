@@ -343,4 +343,3 @@ class MessageQueue:
 
 
 __all__ = ["MessageQueue", "QueueConfig", "QueuedMessage"]
-

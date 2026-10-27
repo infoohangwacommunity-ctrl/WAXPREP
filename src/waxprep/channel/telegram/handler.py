@@ -24,8 +24,8 @@ from uuid import UUID, uuid4
 
 from waxprep.channel.contracts import NormalizedInbound, OutboundPayload
 from waxprep.channel.streaming.accumulator import AnswerAccumulator
-from waxprep.channel.streaming.coordinator import StreamingCoordinator
 from waxprep.channel.streaming.contract import ChannelCapability
+from waxprep.channel.streaming.coordinator import StreamingCoordinator
 from waxprep.channel.streaming.observability import StreamingCounters
 from waxprep.channel.streaming.pacing import TELEGRAM_DRAFT_DEFAULT
 from waxprep.channel.streaming.renderers import telegram_capabilities
@@ -134,7 +134,7 @@ class TelegramInboundHandler:
 
     def _ensure_student_exists(self, wax_id: WaxId) -> bool:
         """Check if student exists and is active."""
-        from waxprep.domain.models import Student, StudentStatus
+        from waxprep.domain.models import StudentStatus
 
         student = self._storage.get_student(wax_id)
         if student is None:
@@ -549,4 +549,3 @@ class TelegramInboundHandler:
 
 
 __all__ = ["TelegramInboundHandler", "TelegramInboundConfig", "InboundResult"]
-
