@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: format-fix-${{ github.ref }}
@@ -44,10 +45,11 @@ jobs:
 
       - name: Apply safe lint fixes and canonical formatting
         run: |
-          # --exit-zero: unfixable lint findings must not abort the
-          # formatter; the quality gate still reports them.
-          uv run ruff check --fix --exit-zero .
-          uv run ruff format .
+          # Best effort by design: lint findings that cannot be fixed
+          # automatically must not abort canonical formatting; the quality
+          # gate still reports them.
+          uv run ruff check --fix --exit-zero . || true
+          uv run ruff format . || true
 
       - name: Commit fixes if the tree changed
         run: |
@@ -59,3 +61,29 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "style: auto-apply ruff safe lint fixes and canonical formatting"
           git push
+
+      - name: Report failure to an issue (visibility)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          curl -sS --retry 3 --retry-delay 2 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" > jobs.json
+          body=$(jq -r '.jobs[] | "### job: (.name) — (.conclusion // .status)\n" + ([.steps[] | select(.conclusion == "failure") | "- failed step: (.name)"] | join("\n"))' jobs.json)
+          {
+            echo "The format-fix bot failed on branch '$BRANCH'."
+            echo ""
+            echo "$body"
+            echo ""
+            echo "_Automatically published by the format-fix workflow; this issue can be closed once the bot runs clean._"
+          } > issue-body.md
+          existing=$(gh issue list -R "$REPO" --state open --search "in:title format-fix failed" --json number --jq '.[0].number // empty' || true)
+          if [ -n "${existing:-}" ]; then
+            gh issue comment "$existing" -R "$REPO" --body-file issue-body.md
+          else
+            gh issue create -R "$REPO" --title "format-fix failed on $BRANCH" --body-file issue-body.md
+          fi

@@ -227,14 +227,16 @@ jobs:
     name: publish failure details to an issue
     needs: [static-analysis, tests, database-and-runtime, dependency-audit]
     # Only for direct pushes: PR runs (especially from forks) cannot open issues.
-    if: failure() && github.event_name == 'push'
+    # always(): the report is also published when a needed job was cancelled,
+    # and a green run closes any stale triage issue.
+    if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read
       issues: write
     steps:
-      - name: Collect failed-step logs and open (or update) a triage issue
+      - name: Publish failed-job outcomes and logs to a triage issue
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -244,29 +246,51 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh run view "$RUN_ID" --repo "$REPO" --log-failed > failed-steps.log || {
-            echo "Could not retrieve failed-step logs; nothing to publish."
-            exit 0
-          }
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          api="https://api.github.com/repos/$REPO/actions"
 
-          # Issue bodies are capped at 64k characters. Keep the tail, which
-          # holds the most recent (usually most relevant) output.
-          tail -c 50000 failed-steps.log > trimmed.log || cp failed-steps.log trimmed.log
+          # Per-job and per-step outcomes via REST (gh run view --log-failed
+          # is unreliable while this job keeps the run in progress).
+          curl -sS --retry 3 --retry-delay 2 "${auth[@]}" "$api/runs/$RUN_ID/jobs?per_page=100" > jobs.json
+
+          failed_jobs=$(jq -r '[.jobs[] | select(.conclusion == "failure")] | length' jobs.json)
+          if [ "$failed_jobs" -eq 0 ]; then
+            echo "All gate jobs green; closing any open triage issue."
+            existing=$(gh issue list -R "$REPO" --state open --search "in:title quality-gate failed on $BRANCH" --json number --jq '.[0].number // empty' || true)
+            if [ -n "${existing:-}" ]; then
+              gh issue close "$existing" -R "$REPO" --comment "The quality gate is green again at $COMMIT."
+            fi
+            exit 0
+          fi
+
+          report=$(jq -r '.jobs[] | select(.conclusion == "failure") | "### job: (.name)\n" + ([.steps[] | select(.conclusion == "failure") | "- failed step: (.name)"] | join("\n"))' jobs.json)
+
+          : > logs-section.md
+          for job_id in $(jq -r '.jobs[] | select(.conclusion == "failure") | .id' jobs.json); do
+            {
+              echo "~~~"
+              curl -sSL "${auth[@]}" "$api/jobs/$job_id/logs" 2>/dev/null | tail -n 120 || true
+              echo "~~~"
+              echo ""
+            } >> logs-section.md || true
+          done
+          # Issue bodies are capped at 64k characters: keep the tail.
+          tail -c 40000 logs-section.md > logs-trimmed.md || true
 
           {
             echo "The quality gate failed on branch '$BRANCH' at commit $COMMIT."
             echo ""
-            echo "Failed-step output (trimmed to the most recent 50,000 characters):"
+            echo "$report"
+            echo ""
+            echo "Failed-job logs (tail of each):"
             echo ""
             echo '<details><summary>Logs</summary>'
             echo ""
-            echo '~~~'
-            cat trimmed.log
-            echo '~~~'
+            cat logs-trimmed.md
             echo ""
             echo '</details>'
             echo ""
-            echo "_Automatically published by the quality-gate failure-triage job. This issue can be closed once the gate is green again._"
+            echo "_Automatically published by the quality-gate failure-triage job; closed automatically once the gate is green again._"
           } > issue-body.md
 
           existing=$(gh issue list -R "$REPO" --state open --search "in:title quality-gate failed on $BRANCH" --json number --jq '.[0].number // empty' || true)
