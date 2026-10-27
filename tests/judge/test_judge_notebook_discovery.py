@@ -8,8 +8,9 @@ This is the read side of the feedback loop.
 
 from __future__ import annotations
 
-from support import TEST_CIPHER, World, add_student, make_world
 from test_quality_judge import FakeJudgeModel, add_pair, make_judge
+
+from support import TEST_CIPHER, World, add_student, make_world
 from waxprep.context.evidence import notebook_evidence
 from waxprep.context.investigator import ContextInvestigator
 from waxprep.context.mock_model import MockContextModel
