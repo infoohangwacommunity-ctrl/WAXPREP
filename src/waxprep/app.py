@@ -230,6 +230,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             from waxprep.channel.telegram.client import TelegramClient
             from waxprep.channel.telegram.handler import (
                 InboundResult as TelegramInboundResult,
+            )
+            from waxprep.channel.telegram.handler import (
                 TelegramInboundConfig,
                 TelegramInboundHandler,
             )

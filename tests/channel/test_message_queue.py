@@ -11,6 +11,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+
 from waxprep.channel.contracts import NormalizedInbound
 from waxprep.channel.message_queue import (
     MessageQueue,

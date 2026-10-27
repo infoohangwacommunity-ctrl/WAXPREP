@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest
+
 from support import add_student, make_model_teacher_world
 from waxprep.model_gateway.errors import ModelGatewayError
 from waxprep.model_gateway.models import (
