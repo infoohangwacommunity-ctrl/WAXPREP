@@ -101,6 +101,7 @@ class StreamingCounters:
     cancelled_responses: int = 0
     final_text_mismatches: int = 0
     formatting_validation_failures: int = 0
+    update_count: int = 0
     _failure_categories: Counter[str] = field(default_factory=Counter)
 
     def record(self, metrics: StreamingMetrics) -> None:

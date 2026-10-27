@@ -279,7 +279,7 @@ jobs:
           for job_id in $failed_ids; do
             {
               echo "~~~"
-              grep -aE 'FAILED|ERROR at|short test summary|Required test coverage|Coverage failure|[A-Z]+[0-9]{3} \[|Found [0-9]+ errors?|=== .*failed|=== .*passed|TOTAL|Traceback|assert |error:' "job-$job_id.log" 2>/dev/null | tail -n 120 || true
+              grep -aE 'FAILED|ERROR at|short test summary|Required test coverage|Coverage failure|[A-Z]+[0-9]{3} \[|Found [0-9]+ errors?|=== .*failed|=== .*passed|TOTAL|Traceback|assert |error:|[A-Za-z]+Error' "job-$job_id.log" 2>/dev/null | tail -n 120 || true
               echo "~~~"
               echo ""
             } >> logs-section.md || true

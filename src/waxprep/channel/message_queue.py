@@ -5,7 +5,7 @@ photosynthesis" / "for jss2 please" / "with an example"). The queue groups
 whatever arrives inside a short time window into ONE tutor turn, keeps
 every message saved verbatim in storage (the handlers save before
 submitting), and runs at most one turn per student at a time so
-conversation order is preserved.
+message order is preserved.
 
 Grouping is purely time-window based (arrival cadence). There is no
 keyword matching, phrase routing, or content classification here —

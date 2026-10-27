@@ -189,6 +189,9 @@ async def test_telegram_native_handler_streams_and_sends_final() -> None:
 
     result = await tg_handler.handle_message(_tg_msg())
     assert result.accepted
+    # A swallowed turn failure must fail the test loudly instead of
+    # silently leaving the tutor reply missing.
+    assert result.error is None, f"telegram turn failed: {result.error}"
     assert result.student_entry_id is not None
 
     entries = world.storage.list_history(wax, limit=50)
