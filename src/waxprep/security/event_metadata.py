@@ -40,6 +40,10 @@ ALLOWED_EVENT_METADATA_KEYS: frozenset[str] = frozenset(
         "reply_chars",  # length of tutor reply (not the text)
         "exchange_included",  # bool — the Teacher received the live exchange
         "exchange_turns",  # integer count of exchange turns carried
+        # Quality Judge signals (operational, no student plaintext):
+        "rating",  # integer 1-5 overall tutor-quality rating
+        "confidence",  # closed vocabulary: low | medium | high
+        "window_turns",  # integer count of student-tutor pairs evaluated
     }
 )
 
@@ -100,3 +104,4 @@ __all__ = [
     "MAX_EVENT_METADATA_JSON_BYTES",
     "validate_event_metadata",
 ]
+

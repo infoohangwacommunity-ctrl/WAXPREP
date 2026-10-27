@@ -66,6 +66,7 @@ from waxprep.domain.models import (
     new_id,
 )
 from waxprep.history.service import HistoryService
+from waxprep.judge.service import QualityJudgeService
 from waxprep.orchestration.contracts_ci_first import (
     Teacher as TeacherProtocol,
 )
@@ -121,6 +122,7 @@ class TurnServiceCiFirst:
         *,
         ci_limits: InvestigationLimits | None = None,
         context_model_name: str = "context",
+        judge: QualityJudgeService | None = None,
     ) -> None:
         self._storage = storage
         self._history = history
@@ -129,6 +131,7 @@ class TurnServiceCiFirst:
         self._clock = clock
         self._ci_limits = ci_limits or InvestigationLimits()
         self._context_model_name = context_model_name
+        self._judge = judge
 
     async def handle_student_message(
         self,
@@ -459,6 +462,17 @@ class TurnServiceCiFirst:
             except Exception:
                 logger.exception("post-turn quality recording failed")
 
+            # Quality Judge scheduling (cheap, no model call here): once
+            # enough completed turns have accumulated since the last
+            # assessment, enqueue one background evaluation job. The
+            # judge runs in the worker; a scheduling failure must never
+            # break the turn that already succeeded.
+            if self._judge is not None:
+                try:
+                    self._judge.maybe_schedule(wax_id, now=now)
+                except Exception:
+                    logger.exception("quality judge scheduling failed")
+
             return TurnResultCiFirst(
                 student_entry=student_entry,
                 tutor_entry=tutor_entry,
@@ -638,3 +652,4 @@ class TurnServiceCiFirst:
 
 
 __all__ = ["TurnResultCiFirst", "TurnServiceCiFirst"]
+

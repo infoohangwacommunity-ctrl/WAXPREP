@@ -116,13 +116,19 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         cipher = build_cipher()
         storage = services_storage(cipher)
         clock = SystemClock()
+        # One gateway instance for the whole composition; the judge
+        # runs over the same provider under its own logical role.
+        from waxprep.judge.gateway_model import GatewayJudgeModel
+
+        gateway = build_gateway(settings)
         services = build_services(
             storage=storage,
             cipher=cipher,
             clock=clock,
             context_model=build_context_model(settings),
             teacher=None,
-            gateway=build_gateway(settings),
+            gateway=gateway,
+            judge_model=GatewayJudgeModel(gateway),
         )
         active_storage = storage
         _services = active_storage
@@ -392,6 +398,7 @@ def build_gateway(settings: Any):
     for name, role in (
         ("teacher", ModelRole.TEACHER),
         ("context", ModelRole.CONTEXT),
+        ("judge", ModelRole.JUDGE),
     ):
         registry.register_model(
             ModelConfig(
@@ -458,3 +465,4 @@ def build_queue_config() -> QueueConfig:
         max_batch_messages=_positive_int("WAXPREP_QUEUE_MAX_BATCH", 5),
         max_concurrent_per_student=1,
     )
+

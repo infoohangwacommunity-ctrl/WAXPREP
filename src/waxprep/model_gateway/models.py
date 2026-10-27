@@ -24,6 +24,10 @@ class ModelRole(StrEnum):
     CONTEXT = "context"
     CONSOLIDATION = "consolidation"
     ARTIFACT = "artifact"
+    # Quality Judge: separate logical role so operators can point the
+    # judge at a different model than the teacher (self-preference
+    # bias is a known LLM-as-a-judge failure mode).
+    JUDGE = "judge"
 
 
 class ContentType(StrEnum):
@@ -177,3 +181,4 @@ class StreamEvent:
     usage: ModelUsage | None = None
     error: str | None = None
     provider_request_id: str | None = None
+

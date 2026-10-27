@@ -29,6 +29,7 @@ from waxprep.index.indexer import (
 )
 from waxprep.index.objects import describe_object
 from waxprep.index.tokens import TokenIndex
+from waxprep.judge.service import JOB_JUDGE_TUTOR_QUALITY, QualityJudgeService
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class DerivationWorker:
         turn_processor: object
         | None = None,  # TurnServiceCiFirst; typed loose to avoid cycle
         deletion_service: DeletionService | None = None,
+        judge: QualityJudgeService | None = None,
         max_attempts: int = 5,
         retry_base_seconds: float = 60.0,
     ) -> None:
@@ -94,6 +96,7 @@ class DerivationWorker:
         self._artifacts = artifacts
         self._turn_processor = turn_processor
         self._deletion_service = deletion_service
+        self._judge = judge
         self._max_attempts = max_attempts
         self._retry_base = retry_base_seconds
 
@@ -111,6 +114,8 @@ class DerivationWorker:
             handlers[JOB_UNDERSTAND_ARTIFACT] = self._understand
         if self._turn_processor is not None:
             handlers[JOB_PROCESS_TURN] = self._process_turn
+        if self._judge is not None:
+            handlers[JOB_JUDGE_TUTOR_QUALITY] = self._judge_handler
         return handlers
 
     async def run_once(
@@ -308,6 +313,17 @@ class DerivationWorker:
             raise RuntimeError("process_turn handler not configured")
         await processor.process_turn_job(job)  # type: ignore[attr-defined]
 
+    async def _judge_handler(self, job: DerivationJob) -> None:
+        """Run one periodic tutor-quality evaluation (Quality Judge).
+
+        The judge service owns windowing, dedup, and persistence; this
+        handler only dispatches. A judge failure raises so the job
+        system retries with backoff — the cursor event is only written
+        on a recorded outcome, so a failed run never skips turns.
+        """
+        assert self._judge is not None
+        await self._judge.evaluate_recent(job.wax_id)
+
     async def _understand(self, job: DerivationJob) -> None:
         assert self._artifacts is not None
         await self._artifacts.understand(job.wax_id, job.object_id)
@@ -334,3 +350,4 @@ class DerivationWorker:
                 "content_kind": entry.content_kind,
             },
         )
+

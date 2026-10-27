@@ -35,6 +35,7 @@ emit DeprecationWarning on import. Production composition never uses them.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -53,6 +54,8 @@ from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.history.service import HistoryService
 from waxprep.index.indexer import Indexer
 from waxprep.index.tokens import TokenIndex
+from waxprep.judge.models import JudgeModel
+from waxprep.judge.service import QualityJudgeService, judge_config_from_env
 from waxprep.model_gateway.gateway import ModelGateway
 from waxprep.orchestration.contracts_ci_first import (
     DEFAULT_TEACHER_MODEL_NAME as DEFAULT_TEACHER_MODEL_NAME,
@@ -82,6 +85,7 @@ class WaxPrepServices:
     deletion: DeletionService
     consolidation: ConsolidationService | None
     artifacts: ArtifactUnderstandingService | None
+    judge: QualityJudgeService | None
 
 
 def build_services(
@@ -97,6 +101,7 @@ def build_services(
     consolidation_model: ConsolidationModel | None = None,
     artifact_processor: ArtifactProcessor | None = None,
     ci_limits: InvestigationLimits | None = None,
+    judge_model: JudgeModel | None = None,
 ) -> WaxPrepServices:
     """Build the unified service graph.
 
@@ -159,6 +164,21 @@ def build_services(
         model=context_model,
         tools=build_default_tools(storage, retriever, embedder, evolution=evolution),
     )
+    # Quality Judge: bound only when a judge model is provided. The
+    # trigger/window knobs come from WAXPREP_JUDGE_* environment
+    # variables; WAXPREP_JUDGE_EVERY_N_TURNS=0 disables judging
+    # (no jobs are ever scheduled, no model is called).
+    judge = (
+        QualityJudgeService(
+            storage=storage,
+            evolution=evolution,
+            clock=clock,
+            model=judge_model,
+            config=judge_config_from_env(os.environ),
+        )
+        if judge_model is not None
+        else None
+    )
     artifacts = (
         ArtifactUnderstandingService(storage, indexer, artifact_processor, clock)
         if artifact_processor is not None
@@ -176,6 +196,7 @@ def build_services(
         teacher,
         clock,
         ci_limits=ci_limits,
+        judge=judge,
     )
     # Blueprint Part IV §16-17: the deletion workflow is wired into the
     # worker so pending requests are actually processed by the running
@@ -190,6 +211,7 @@ def build_services(
         artifacts=artifacts,
         turn_processor=turns,
         deletion_service=deletion,
+        judge=judge,
     )
     return WaxPrepServices(
         storage=storage,
@@ -203,4 +225,6 @@ def build_services(
         deletion=deletion,
         consolidation=consolidation,
         artifacts=artifacts,
+        judge=judge,
     )
+
