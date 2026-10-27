@@ -198,6 +198,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
         if settings.telegram_enabled:
             from waxprep.channel.telegram.client import TelegramClient
+            from waxprep.channel.telegram.handler import (
+                InboundResult as TelegramInboundResult,
+            )
             from waxprep.channel.telegram.outbox import (
                 TelegramOutbox,
                 TelegramOutboxConfig,
@@ -206,7 +209,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
             tg_client = TelegramClient(settings.telegram_bot_token or "")
 
-            async def accept_tg(msg: NormalizedInbound) -> InboundResult | None:
+            async def accept_tg(
+                msg: NormalizedInbound,
+            ) -> TelegramInboundResult | None:
                 handler = WhatsAppInboundHandler(
                     storage=active_storage,
                     history=services.history,
@@ -219,7 +224,19 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                     # shared base class or a Protocol refactor.
                     whatsapp_client=tg_client,  # type: ignore[arg-type]
                 )
-                return await handler.handle_message(msg)
+                result = await handler.handle_message(msg)
+                # The telegram router expects the telegram result type;
+                # the shared WhatsApp handler returns its own,
+                # structurally identical one. Adapt field by field
+                # rather than silence the type checker.
+                return TelegramInboundResult(
+                    accepted=result.accepted,
+                    wax_id=result.wax_id,
+                    student_entry_id=result.student_entry_id,
+                    outbound_delivery_id=result.outbound_delivery_id,
+                    needs_linking=result.needs_linking,
+                    error=result.error,
+                )
 
             app.include_router(
                 build_telegram_router(

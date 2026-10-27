@@ -31,7 +31,7 @@ from waxprep.channel.streaming.pacing import TELEGRAM_DRAFT_DEFAULT
 from waxprep.channel.streaming.renderers import telegram_capabilities
 from waxprep.channel.telegram.client import TelegramClient
 from waxprep.clock import Clock
-from waxprep.domain.identifiers import WaxId
+from waxprep.domain.identifiers import WaxId, new_wax_id
 from waxprep.domain.models import (
     AuthorKind,
     DerivationJob,
@@ -525,7 +525,7 @@ class TelegramInboundHandler:
         result = await client.send_text(
             OutboundPayload(
                 channel=self._config.channel,
-                wax_id=WaxId(""),  # Not used by client
+                wax_id=new_wax_id(),  # placeholder - the client ignores it
                 recipient_external_id=chat_id,
                 text=text,
             )
