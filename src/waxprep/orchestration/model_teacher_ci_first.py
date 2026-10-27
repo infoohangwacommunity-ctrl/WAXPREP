@@ -283,6 +283,14 @@ class ModelTeacherCiFirst:
                     # Record successful streaming
                     record_streaming_success(request.model)
                     return self._parse_reply("".join(chunks))
+                # The stream completed normally but produced zero usable
+                # text deltas. Never return an empty answer: fall back to
+                # a single complete call instead.
+                logger.warning(
+                    "streaming produced no text deltas; falling back to complete",
+                    extra={"model": request.model, "wax_id": str(request.wax_id)},
+                )
+                use_streaming = False
             except UnsupportedCapabilityError:
                 logger.info(
                     "streaming not supported by model, falling back to complete",

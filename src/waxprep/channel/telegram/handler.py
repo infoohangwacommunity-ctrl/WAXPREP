@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from waxprep.channel.contracts import NormalizedInbound, OutboundPayload
+from waxprep.channel.message_queue import MessageQueue, QueuedMessage
 from waxprep.channel.streaming.accumulator import AnswerAccumulator
 from waxprep.channel.streaming.contract import ChannelCapability
 from waxprep.channel.streaming.coordinator import StreamingCoordinator
@@ -103,6 +104,7 @@ class TelegramInboundHandler:
         *,
         config: TelegramInboundConfig | None = None,
         telegram_client: TelegramClient | None = None,
+        message_queue: MessageQueue | None = None,
     ) -> None:
         self._storage = storage
         self._history = history
@@ -110,6 +112,9 @@ class TelegramInboundHandler:
         self._clock = clock
         self._config = config or TelegramInboundConfig()
         self._telegram_client = telegram_client
+        # Optional per-student queue coordinating rapid message bursts
+        # into single tutor turns (time-window coalescing only).
+        self._message_queue = message_queue
         self._message_locks: dict[str, asyncio.Lock] = {}
         self._message_locks_guard = asyncio.Lock()
 
@@ -314,7 +319,82 @@ class TelegramInboundHandler:
                 error=f"failed_to_save_message: {type(exc).__name__}",
             )
 
-        # Step 5: Process through CI-first turn service with streaming support
+        # Step 5: Process through CI-first turn service with streaming support.
+        # Optional per-student queue: rapid bursts are coordinated into
+        # single tutor turns (time-window coalescing only, never keyword
+        # matching). The message is already durably saved.
+        if self._message_queue is not None:
+            queue_id = await self._message_queue.submit(
+                msg,
+                wax_id,
+                entry_id=student_entry.id,
+                channel=self._config.channel,
+            )
+            if queue_id is not None:
+                logger.info(
+                    "message submitted to per-student queue",
+                    extra={
+                        "wax_id": str(wax_id),
+                        "queue_id": str(queue_id),
+                        "provider_message_id": msg.provider_message_id,
+                    },
+                )
+                return InboundResult(
+                    accepted=True,
+                    wax_id=wax_id,
+                    student_entry_id=student_entry.id,
+                    outbound_delivery_id=None,
+                    needs_linking=False,
+                    error=None,
+                )
+            # Queue declined (rate limited): process inline below.
+
+        return await self._execute_turn(wax_id, msg, student_entry.id)
+
+    async def run_queued_turn(
+        self,
+        wax_id: WaxId,
+        batch: list[QueuedMessage],
+    ) -> None:
+        """Process one coalesced queue batch as a single tutor turn.
+
+        Mirrors the WhatsApp handler: time-window batching only, exact
+        messages stay saved verbatim, the merged text drives the CI
+        investigation, and the trigger (newest) message anchors the
+        turn. Draft streaming runs for the trigger's chat.
+        """
+        if not batch:
+            return
+        trigger = batch[-1]
+        texts = [
+            (item.message.text or "").strip()
+            for item in batch
+            if (item.message.text or "").strip()
+        ]
+        merged = "\n\n".join(texts) or (trigger.message.text or "")
+        entry_id = trigger.entry_id
+        if entry_id is None:
+            existing = self._storage.find_history_by_channel_ref(
+                wax_id, self._config.channel, trigger.message.provider_message_id
+            )
+            entry_id = existing.id if existing is not None else None
+        await self._execute_turn(
+            wax_id,
+            trigger.message,
+            entry_id,
+            text=merged,
+        )
+
+    async def _execute_turn(
+        self,
+        wax_id: WaxId,
+        msg: NormalizedInbound,
+        student_entry_id: UUID | None,
+        *,
+        text: str | None = None,
+    ) -> InboundResult:
+        """Run the CI-first turn with streaming and deliver the reply."""
+        turn_text = text if text is not None else (msg.text or "")
         on_text_delta: TextDeltaSink | None = None
         last_provider_message_id: str | None = None
         coordinator: StreamingCoordinator | None = None
@@ -361,7 +441,7 @@ class TelegramInboundHandler:
             turn_result: TurnResultCiFirst = (
                 await self._turn_service.handle_student_message(
                     wax_id=wax_id,
-                    text=msg.text or "",
+                    text=turn_text,
                     channel=self._config.channel,
                     channel_ref=msg.provider_message_id,
                     thread_ref=msg.reply_to_provider_id,
@@ -453,40 +533,46 @@ class TelegramInboundHandler:
                 "failed during turn processing",
                 extra={
                     "wax_id": str(wax_id),
-                    "student_entry_id": str(student_entry.id),
+                    "student_entry_id": str(student_entry_id),
                     "error": str(exc),
                 },
             )
             # Persist a durable, independently retryable processing job
             now = self._clock.now()
-            try:
-                self._storage.enqueue_job(
-                    DerivationJob(
-                        id=new_id(),
-                        wax_id=wax_id,
-                        kind=JOB_PROCESS_TURN,
-                        object_type=ObjectType.HISTORY,
-                        object_id=student_entry.id,
-                        status=JobStatus.PENDING,
-                        attempts=0,
-                        run_after=now,
-                        created_at=now,
-                        updated_at=now,
-                        last_error=f"processing_failed: {type(exc).__name__}",
+            if student_entry_id is not None:
+                try:
+                    self._storage.enqueue_job(
+                        DerivationJob(
+                            id=new_id(),
+                            wax_id=wax_id,
+                            kind=JOB_PROCESS_TURN,
+                            object_type=ObjectType.HISTORY,
+                            object_id=student_entry_id,
+                            status=JobStatus.PENDING,
+                            attempts=0,
+                            run_after=now,
+                            created_at=now,
+                            updated_at=now,
+                            last_error=f"processing_failed: {type(exc).__name__}",
+                        )
                     )
-                )
-            except Exception:
-                logger.exception(
-                    "failed to enqueue turn-processing recovery job",
-                    extra={
-                        "wax_id": str(wax_id),
-                        "student_entry_id": str(student_entry.id),
-                    },
+                except Exception:
+                    logger.exception(
+                        "failed to enqueue turn-processing recovery job",
+                        extra={
+                            "wax_id": str(wax_id),
+                            "student_entry_id": str(student_entry_id),
+                        },
+                    )
+            else:
+                logger.error(
+                    "cannot enqueue recovery job without a student entry id",
+                    extra={"wax_id": str(wax_id), "error": str(exc)},
                 )
             return InboundResult(
                 accepted=True,
                 wax_id=wax_id,
-                student_entry_id=student_entry.id,
+                student_entry_id=student_entry_id,
                 outbound_delivery_id=None,
                 needs_linking=False,
                 error=f"processing_failed: {type(exc).__name__}",

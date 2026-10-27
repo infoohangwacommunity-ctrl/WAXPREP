@@ -31,6 +31,7 @@ from waxprep.channel.contracts import (
     NormalizedInbound,
     OutboundPayload,
 )
+from waxprep.channel.message_queue import MessageQueue, QueuedMessage
 from waxprep.channel.whatsapp.progressive import ProgressiveWhatsAppDelivery
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
@@ -114,6 +115,7 @@ class WhatsAppInboundHandler:
         *,
         config: WhatsAppInboundConfig | None = None,
         whatsapp_client: WhatsAppClient | None = None,
+        message_queue: MessageQueue | None = None,
     ) -> None:
         self._storage = storage
         self._history = history
@@ -124,6 +126,9 @@ class WhatsAppInboundHandler:
         # the Teacher generates (progressive delivery). Outbox remains the
         # durable recovery path for the final authoritative text.
         self._whatsapp_client = whatsapp_client
+        # Optional per-student queue coordinating rapid message bursts
+        # into single tutor turns (time-window coalescing only).
+        self._message_queue = message_queue
         self._message_locks: dict[str, asyncio.Lock] = {}
         self._message_locks_guard = asyncio.Lock()
 
@@ -393,6 +398,88 @@ class WhatsAppInboundHandler:
             )
 
         # Step 5: Process through CI-first turn service.
+        # Optional per-student queue: rapid bursts are coordinated into
+        # single tutor turns (time-window coalescing only, never keyword
+        # matching). The message is already durably saved, so returning
+        # success here is honest — the queue worker owns the turn.
+        if self._message_queue is not None:
+            queue_id = await self._message_queue.submit(
+                msg,
+                wax_id,
+                entry_id=student_entry.id,
+                channel=self._config.channel,
+            )
+            if queue_id is not None:
+                logger.info(
+                    "message submitted to per-student queue",
+                    extra={
+                        "wax_id": str(wax_id),
+                        "queue_id": str(queue_id),
+                        "provider_message_id": msg.provider_message_id,
+                    },
+                )
+                return InboundResult(
+                    accepted=True,
+                    wax_id=wax_id,
+                    student_entry_id=student_entry.id,
+                    outbound_delivery_id=None,
+                    needs_linking=False,
+                    error=None,
+                )
+            # Queue declined (rate limited): process inline below.
+
+        return await self._execute_turn(wax_id, msg, student_entry.id)
+
+    async def run_queued_turn(
+        self,
+        wax_id: WaxId,
+        batch: list[QueuedMessage],
+    ) -> None:
+        """Process one coalesced queue batch as a single tutor turn.
+
+        Every message in the batch is already saved verbatim; the batch is
+        whatever arrived inside the coalescing window (never keyword-matched
+        content). The merged text drives the turn's CI investigation, the
+        trigger (newest) message anchors idempotency and delivery, and the
+        older fragments stay visible to the Teacher through the exchange.
+        """
+        if not batch:
+            return
+        trigger = batch[-1]
+        texts = [
+            (item.message.text or "").strip()
+            for item in batch
+            if (item.message.text or "").strip()
+        ]
+        merged = "\n\n".join(texts) or (trigger.message.text or "")
+        entry_id = trigger.entry_id
+        if entry_id is None:
+            existing = self._storage.find_history_by_channel_ref(
+                wax_id, self._config.channel, trigger.message.provider_message_id
+            )
+            entry_id = existing.id if existing is not None else None
+        await self._execute_turn(
+            wax_id,
+            trigger.message,
+            entry_id,
+            text=merged,
+        )
+
+    async def _execute_turn(
+        self,
+        wax_id: WaxId,
+        msg: NormalizedInbound,
+        student_entry_id: UUID | None,
+        *,
+        text: str | None = None,
+    ) -> InboundResult:
+        """Run the CI-first turn and deliver the reply.
+
+        Shared by the inline webhook path and the per-student queue
+        worker. ``text`` overrides the message text for coalesced
+        batches; storage always keeps the exact original messages.
+        """
+        turn_text = text if text is not None else (msg.text or "")
         # When a WhatsApp client is available, wire progressive delivery so
         # the student receives complete message chunks while the model streams.
         progressive: ProgressiveWhatsAppDelivery | None = None
@@ -429,7 +516,7 @@ class WhatsAppInboundHandler:
             turn_result: TurnResultCiFirst = (
                 await self._turn_service.handle_student_message(
                     wax_id=wax_id,
-                    text=msg.text or "",
+                    text=turn_text,
                     channel=self._config.channel,
                     channel_ref=msg.provider_message_id,
                     thread_ref=msg.reply_to_provider_id,
@@ -467,21 +554,26 @@ class WhatsAppInboundHandler:
                         "progressive delivery finish failed",
                         exc_info=True,
                     )
-                # The default strategy is FINAL_ONLY (blueprint §6.1): one
-                # coherent final message. If no progressive chunks were sent,
-                # send the complete final text now via the channel client.
-                # If progressive chunks WERE sent, they are already delivered;
-                # do not duplicate the full answer.
-                final_text = progressive.final_text.strip()
+                # The authoritative answer is the persisted tutor reply,
+                # not the accumulated stream text: when streaming fell back
+                # mid-way the two differ, and the student must always end
+                # with the complete answer.
+                authoritative = (
+                    turn_result.tutor_entry.text
+                    if turn_result.tutor_entry is not None
+                    else None
+                )
+                final_text = (authoritative or progressive.final_text).strip()
                 if final_text and progressive.progressive_chunks_sent == 0:
-                    # FINAL_ONLY: send the complete answer as one message.
+                    # FINAL_ONLY (blueprint §6.1): send the complete
+                    # answer as one coherent final message.
                     try:
                         result = await client.send_text(
                             OutboundPayload(
                                 channel=self._config.channel,
                                 wax_id=wax_id,
                                 recipient_external_id=recipient,
-                                text=progressive.final_text,
+                                text=final_text,
                             )
                         )
                         if result.success and result.provider_message_id:
@@ -489,6 +581,18 @@ class WhatsAppInboundHandler:
                     except Exception:
                         logger.debug(
                             "final-only delivery failed",
+                            exc_info=True,
+                        )
+                elif final_text:
+                    # Progressive chunks were already delivered: flush the
+                    # remaining complete units — the never-sent growing
+                    # tail, or the whole authoritative answer when
+                    # streaming fell back mid-way.
+                    try:
+                        await progressive.flush_final(final_text)
+                    except Exception:
+                        logger.debug(
+                            "progressive flush failed",
                             exc_info=True,
                         )
                 # Mark the outbound record delivered so the outbox does
@@ -553,7 +657,7 @@ class WhatsAppInboundHandler:
                 "failed during turn processing",
                 extra={
                     "wax_id": str(wax_id),
-                    "student_entry_id": str(student_entry.id),
+                    "student_entry_id": str(student_entry_id),
                     "error": str(exc),
                 },
             )
@@ -562,34 +666,40 @@ class WhatsAppInboundHandler:
             # this turn after a timeout, process restart, or deployment.
             # The message is accepted as saved but NOT as fully processed.
             now = self._clock.now()
-            try:
-                self._storage.enqueue_job(
-                    DerivationJob(
-                        id=new_id(),
-                        wax_id=wax_id,
-                        kind=JOB_PROCESS_TURN,
-                        object_type=ObjectType.HISTORY,
-                        object_id=student_entry.id,
-                        status=JobStatus.PENDING,
-                        attempts=0,
-                        run_after=now,
-                        created_at=now,
-                        updated_at=now,
-                        last_error=f"processing_failed: {type(exc).__name__}",
+            if student_entry_id is not None:
+                try:
+                    self._storage.enqueue_job(
+                        DerivationJob(
+                            id=new_id(),
+                            wax_id=wax_id,
+                            kind=JOB_PROCESS_TURN,
+                            object_type=ObjectType.HISTORY,
+                            object_id=student_entry_id,
+                            status=JobStatus.PENDING,
+                            attempts=0,
+                            run_after=now,
+                            created_at=now,
+                            updated_at=now,
+                            last_error=f"processing_failed: {type(exc).__name__}",
+                        )
                     )
-                )
-            except Exception:
-                logger.exception(
-                    "failed to enqueue turn-processing recovery job",
-                    extra={
-                        "wax_id": str(wax_id),
-                        "student_entry_id": str(student_entry.id),
-                    },
+                except Exception:
+                    logger.exception(
+                        "failed to enqueue turn-processing recovery job",
+                        extra={
+                            "wax_id": str(wax_id),
+                            "student_entry_id": str(student_entry_id),
+                        },
+                    )
+            else:
+                logger.error(
+                    "cannot enqueue recovery job without a student entry id",
+                    extra={"wax_id": str(wax_id), "error": str(exc)},
                 )
             return InboundResult(
                 accepted=True,
                 wax_id=wax_id,
-                student_entry_id=student_entry.id,
+                student_entry_id=student_entry_id,
                 outbound_delivery_id=None,
                 needs_linking=False,
                 error=f"processing_failed: {type(exc).__name__}",

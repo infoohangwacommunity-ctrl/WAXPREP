@@ -86,6 +86,29 @@ class ProgressiveWhatsAppDelivery:
         self._accumulator.complete()
         return self.final_text
 
+    async def flush_final(self, text: str | None = None) -> str:
+        """Send any complete message units not yet delivered.
+
+        After progressive delivery the last (still-growing) unit was
+        never sent progressively, and a mid-stream fallback can make
+        the authoritative answer differ from what was already sent.
+        This sends every complete unit of ``text`` (default: the
+        accumulated final text) that was not already delivered, so the
+        student always ends with the whole answer. No-op when nothing
+        was sent progressively — the caller sends the final message
+        itself.
+        """
+        final = (text if text is not None else self.final_text) or ""
+        if not self._sent_progressive or not final.strip():
+            return final
+        from waxprep.channel.delivery import split_for_platform
+
+        for chunk in split_for_platform(final, "whatsapp"):
+            if chunk and chunk not in self._sent_progressive:
+                await self._send_text(chunk)
+                self._sent_progressive.append(chunk)
+        return final
+
     @property
     def progressive_chunks_sent(self) -> int:
         """How many progressive message units were sent. Used by the

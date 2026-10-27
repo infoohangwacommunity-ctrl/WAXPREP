@@ -12,6 +12,7 @@ from fastapi import FastAPI
 
 from waxprep import __version__
 from waxprep.channel.contracts import NormalizedInbound
+from waxprep.channel.message_queue import MessageQueue, QueueConfig
 from waxprep.channel.whatsapp.handler import (
     InboundResult,
     WhatsAppInboundConfig,
@@ -54,6 +55,7 @@ _turn_service: Any = None
 _history: Any = None
 _clock: Any = None
 _outboxes: list[Any] = []
+message_queue: MessageQueue | None = None
 
 
 @app.get("/health", tags=["system"])
@@ -88,7 +90,7 @@ def health() -> dict[str, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     """Compose services, start workers, and shut down cleanly."""
-    global _services, _turn_service, _history, _clock, _outboxes
+    global _services, _turn_service, _history, _clock, _outboxes, message_queue
 
     settings = load_settings()
 
@@ -130,7 +132,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
         from uuid import uuid4
 
-        from waxprep.domain.identifiers import new_wax_id
+        from waxprep.domain.identifiers import WaxId, new_wax_id
         from waxprep.domain.models import ChannelIdentity, Student, StudentStatus
 
         def provision(channel: str, sender: str):
@@ -162,21 +164,49 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             )
             return wax
 
+        # Shared per-student queue: rapid message bursts are coalesced by a
+        # short time window into single tutor turns (arrival cadence only —
+        # never keyword matching). One turn per student at a time, strict
+        # FIFO order. Handlers are singletons so per-message idempotency
+        # locks actually serialize webhook deliveries process-wide.
+        queue_handlers: dict[str, Any] = {}
+
+        async def _queue_turn_runner(wax_id: WaxId, batch: list[Any]) -> None:
+            channel = getattr(batch[-1], "channel", None)
+            handler = queue_handlers.get(channel) if channel else None
+            if handler is None and len(queue_handlers) == 1:
+                handler = next(iter(queue_handlers.values()))
+            if handler is None:
+                logger.warning(
+                    "queued batch has no registered handler",
+                    extra={"channel": channel, "wax_id": str(wax_id)},
+                )
+                return
+            await handler.run_queued_turn(wax_id, batch)
+
+        message_queue = MessageQueue(
+            clock,
+            build_queue_config(),
+            turn_runner=_queue_turn_runner,
+        )
+
         if settings.whatsapp_enabled:
             from waxprep.channel.whatsapp.routes import build_whatsapp_router
 
             client = build_whatsapp_client(settings)
+            wa_handler = WhatsAppInboundHandler(
+                storage=active_storage,
+                history=services.history,
+                turn_service=services.turns,
+                clock=clock,
+                config=WhatsAppInboundConfig(channel="whatsapp"),
+                whatsapp_client=client,
+                message_queue=message_queue,
+            )
+            queue_handlers["whatsapp"] = wa_handler
 
             async def accept_wa(msg: NormalizedInbound) -> InboundResult | None:
-                handler = WhatsAppInboundHandler(
-                    storage=active_storage,
-                    history=services.history,
-                    turn_service=services.turns,
-                    clock=clock,
-                    config=WhatsAppInboundConfig(channel="whatsapp"),
-                    whatsapp_client=client,
-                )
-                return await handler.handle_message(msg)
+                return await wa_handler.handle_message(msg)
 
             app.include_router(
                 build_whatsapp_router(
@@ -200,6 +230,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             from waxprep.channel.telegram.client import TelegramClient
             from waxprep.channel.telegram.handler import (
                 InboundResult as TelegramInboundResult,
+                TelegramInboundConfig,
+                TelegramInboundHandler,
             )
             from waxprep.channel.telegram.outbox import (
                 TelegramOutbox,
@@ -209,34 +241,24 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
             tg_client = TelegramClient(settings.telegram_bot_token or "")
 
+            # Native Telegram inbound handler: draft streaming through
+            # the client's real draft API (verified capability), no more
+            # WhatsApp-handler adapter with an ignored type error.
+            tg_handler = TelegramInboundHandler(
+                storage=active_storage,
+                history=services.history,
+                turn_service=services.turns,
+                clock=clock,
+                config=TelegramInboundConfig(),
+                telegram_client=tg_client,
+                message_queue=message_queue,
+            )
+            queue_handlers["telegram"] = tg_handler
+
             async def accept_tg(
                 msg: NormalizedInbound,
             ) -> TelegramInboundResult | None:
-                handler = WhatsAppInboundHandler(
-                    storage=active_storage,
-                    history=services.history,
-                    turn_service=services.turns,
-                    clock=clock,
-                    config=WhatsAppInboundConfig(channel="telegram"),
-                    # TelegramClient duck-types as WhatsAppClient: both
-                    # expose ``send_text`` and ``send_typing``. The cast
-                    # keeps the type checker happy without forcing a
-                    # shared base class or a Protocol refactor.
-                    whatsapp_client=tg_client,  # type: ignore[arg-type]
-                )
-                result = await handler.handle_message(msg)
-                # The telegram router expects the telegram result type;
-                # the shared WhatsApp handler returns its own,
-                # structurally identical one. Adapt field by field
-                # rather than silence the type checker.
-                return TelegramInboundResult(
-                    accepted=result.accepted,
-                    wax_id=result.wax_id,
-                    student_entry_id=result.student_entry_id,
-                    outbound_delivery_id=result.outbound_delivery_id,
-                    needs_linking=result.needs_linking,
-                    error=result.error,
-                )
+                return await tg_handler.handle_message(msg)
 
             app.include_router(
                 build_telegram_router(
@@ -282,6 +304,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     except Exception:
         logger.exception("failed to compose channel services")
     yield
+
+    if message_queue is not None:
+        try:
+            await message_queue.stop()
+        except Exception:
+            logger.exception("error stopping message queue")
 
     for box in list(_outboxes):
         try:
@@ -390,4 +418,41 @@ def build_whatsapp_client(settings: Any):
         getattr(settings, "whatsapp_token", None) or "",
         getattr(settings, "whatsapp_phone_number_id", None) or "",
         api_version=getattr(settings, "whatsapp_api_version", None) or "v21.0",
+    )
+
+
+def build_queue_config() -> QueueConfig:
+    """Per-student queue knobs from the environment (all optional).
+
+    WAXPREP_QUEUE_COALESCE  — "0"/"1" time-window coalescing (default on)
+    WAXPREP_QUEUE_WINDOW    — coalescing window seconds (default 2.0)
+    WAXPREP_QUEUE_MAX_BATCH — max messages coalesced per turn (default 5)
+    """
+
+    def _flag(name: str, default: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _positive_float(name: str, default: float) -> float:
+        try:
+            value = float(os.environ.get(name, ""))
+        except ValueError:
+            return default
+        return value if value > 0 else default
+
+    def _positive_int(name: str, default: int) -> int:
+        try:
+            value = int(os.environ.get(name, ""))
+        except ValueError:
+            return default
+        return value if value > 0 else default
+
+    return QueueConfig(
+        enforce_fifo=True,
+        coalesce_enabled=_flag("WAXPREP_QUEUE_COALESCE", True),
+        coalesce_window_seconds=_positive_float("WAXPREP_QUEUE_WINDOW", 2.0),
+        max_batch_messages=_positive_int("WAXPREP_QUEUE_MAX_BATCH", 5),
+        max_concurrent_per_student=1,
     )
