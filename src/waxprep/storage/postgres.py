@@ -1232,13 +1232,14 @@ class PostgresStorage:
             return  # unstructured object types are not ownership-checked
         set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor() as cur:
+            # Connection uses dict_row; alias so we can read by name.
             cur.execute(
-                "SELECT waxprep_object_owner(%s, %s)",
+                "SELECT waxprep_object_owner(%s, %s) AS owner_id",
                 (object_type.value, object_id),
             )
             row = cur.fetchone()
         self._conn.commit()
-        actual = row[0] if row else None
+        actual = row["owner_id"] if row else None
         if actual is None:
             # Could be missing (the object may not have been created yet) —
             # that's a separate error. We only reject cross-student refs.
@@ -2094,7 +2095,11 @@ class PostgresStorage:
         k1, k2 = self._turn_lock_keys(wax_id, student_entry_id)
         set_current_wax_id(self._conn, wax_id)
         with self._conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(%s, %s)", (k1, k2))
+            # Connection uses dict_row; alias so we can read by name.
+            cur.execute(
+                "SELECT pg_try_advisory_lock(%s, %s) AS acquired",
+                (k1, k2),
+            )
             row = cur.fetchone()
         # Advisory locks survive beyond the transaction; do not leave an
         # open transaction. Commit/rollback keeps connection healthy.
@@ -2103,7 +2108,7 @@ class PostgresStorage:
                 self._conn.commit()
             except Exception:
                 pass
-        return bool(row and row[0])
+        return bool(row and row["acquired"])
 
     def release_turn_lock(self, wax_id: WaxId, student_entry_id: UUID) -> None:
         self._ensure_healthy()
