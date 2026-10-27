@@ -12,12 +12,12 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
+
 from support import TEST_CIPHER, World, add_student, make_world
 from waxprep.derive.worker import DerivationWorker
 from waxprep.domain.models import (
     AuthorKind,
     HistoryEntry,
-    JobStatus,
     ObjectType,
     new_id,
 )

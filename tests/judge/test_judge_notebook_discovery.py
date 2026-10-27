@@ -9,6 +9,7 @@ This is the read side of the feedback loop.
 from __future__ import annotations
 
 from support import TEST_CIPHER, World, add_student, make_world
+from test_quality_judge import FakeJudgeModel, add_pair, make_judge
 from waxprep.context.evidence import notebook_evidence
 from waxprep.context.investigator import ContextInvestigator
 from waxprep.context.mock_model import MockContextModel
@@ -25,8 +26,6 @@ from waxprep.domain.models import NotebookEntry, new_id
 from waxprep.index.tokens import TokenIndex
 from waxprep.judge.models import JudgeRequest
 from waxprep.judge.service import NOTEBOOK_KIND
-
-from test_quality_judge import FakeJudgeModel, add_pair, make_judge
 
 ASSESSMENT_QUERY = "worked examples"
 
