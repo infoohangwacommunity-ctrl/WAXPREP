@@ -652,4 +652,3 @@ class TurnServiceCiFirst:
 
 
 __all__ = ["TurnResultCiFirst", "TurnServiceCiFirst"]
-

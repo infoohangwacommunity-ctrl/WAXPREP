@@ -165,9 +165,7 @@ def active_assessment(world: World, wax_id: UUID) -> dict[str, Any] | None:
     notebook = world.storage.get_notebook(wax_id)
     if notebook is None:
         return None
-    for entry in reversed(
-        world.storage.list_notebook_entries(wax_id, notebook.id)
-    ):
+    for entry in reversed(world.storage.list_notebook_entries(wax_id, notebook.id)):
         if entry.payload.get("kind") == NOTEBOOK_KIND:
             return dict(entry.payload)
     return None
@@ -265,9 +263,7 @@ async def test_evaluate_writes_event_notebook_and_provenance() -> None:
 
     # The event cursor points at the evaluated window end.
     cursor_events = [
-        e
-        for e in world.storage.list_events(wax_id)
-        if e.kind == EVENT_KIND_ASSESSED
+        e for e in world.storage.list_events(wax_id) if e.kind == EVENT_KIND_ASSESSED
     ]
     assert cursor_events[-1].object_id == tutor2.id
 
@@ -600,9 +596,7 @@ def test_scheduling_event_uses_only_allowed_metadata() -> None:
     assert judge.maybe_schedule(wax_id, now=world.clock.now()) is True
 
     scheduled = [
-        e
-        for e in world.storage.list_events(wax_id)
-        if e.kind == EVENT_KIND_SCHEDULED
+        e for e in world.storage.list_events(wax_id) if e.kind == EVENT_KIND_SCHEDULED
     ]
     assert len(scheduled) == 1
     # Every metadata key is in the operational allowlist.
@@ -611,7 +605,7 @@ def test_scheduling_event_uses_only_allowed_metadata() -> None:
     validate_event_metadata(dict(scheduled[0].metadata))
 
 
-def test_window_text_renders_pairs_verbatim() -> None:
+async def test_window_text_renders_pairs_verbatim() -> None:
     world = make_world()
     wax_id = add_student(world)
     model = FakeJudgeModel()

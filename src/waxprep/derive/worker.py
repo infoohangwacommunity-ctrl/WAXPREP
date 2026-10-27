@@ -350,4 +350,3 @@ class DerivationWorker:
                 "content_kind": entry.content_kind,
             },
         )
-

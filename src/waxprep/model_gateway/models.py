@@ -181,4 +181,3 @@ class StreamEvent:
     usage: ModelUsage | None = None
     error: str | None = None
     provider_request_id: str | None = None
-

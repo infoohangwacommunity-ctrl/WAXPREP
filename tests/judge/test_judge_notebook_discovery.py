@@ -75,9 +75,7 @@ async def test_ci_finds_judge_assessment_with_ordinary_tools() -> None:
 
     # No assessment yet: the loop starts empty.
     package = await investigate(world, wax_id, "Help me with fractions")
-    assert not [
-        e for e in package.evidence if e.evidence_type is EvidenceType.NOTEBOOK
-    ]
+    assert not [e for e in package.evidence if e.evidence_type is EvidenceType.NOTEBOOK]
 
     # Run one judge cycle so the assessment lands in the notebook.
     model = FakeJudgeModel()

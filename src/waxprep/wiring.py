@@ -227,4 +227,3 @@ def build_services(
         artifacts=artifacts,
         judge=judge,
     )
-

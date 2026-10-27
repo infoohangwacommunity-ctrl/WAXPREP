@@ -104,4 +104,3 @@ __all__ = [
     "MAX_EVENT_METADATA_JSON_BYTES",
     "validate_event_metadata",
 ]
-

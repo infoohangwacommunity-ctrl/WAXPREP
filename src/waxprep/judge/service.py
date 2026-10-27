@@ -376,16 +376,12 @@ class QualityJudgeService:
             lines.append(f"{role}: {text}")
         return "\n".join(lines)
 
-    def _previous_assessment(
-        self, wax_id: WaxId
-    ) -> tuple[UUID, dict[str, Any]] | None:
+    def _previous_assessment(self, wax_id: WaxId) -> tuple[UUID, dict[str, Any]] | None:
         """The active assessment notebook entry, if one exists."""
         notebook = self._storage.get_notebook(wax_id)
         if notebook is None:
             return None
-        for entry in reversed(
-            self._storage.list_notebook_entries(wax_id, notebook.id)
-        ):
+        for entry in reversed(self._storage.list_notebook_entries(wax_id, notebook.id)):
             if entry.payload.get("kind") == NOTEBOOK_KIND:
                 return entry.id, dict(entry.payload)
         return None
@@ -398,10 +394,9 @@ class QualityJudgeService:
         if notebook is None:
             return None
         for entry in self._storage.list_notebook_entries(wax_id, notebook.id):
-            if (
-                entry.payload.get("kind") == NOTEBOOK_KIND
-                and entry.payload.get("window_last_id") == str(window_last_id)
-            ):
+            if entry.payload.get("kind") == NOTEBOOK_KIND and entry.payload.get(
+                "window_last_id"
+            ) == str(window_last_id):
                 return entry
         return None
 

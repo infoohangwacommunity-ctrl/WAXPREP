@@ -465,4 +465,3 @@ def build_queue_config() -> QueueConfig:
         max_batch_messages=_positive_int("WAXPREP_QUEUE_MAX_BATCH", 5),
         max_concurrent_per_student=1,
     )
-
