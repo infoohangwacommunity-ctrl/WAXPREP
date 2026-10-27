@@ -156,11 +156,12 @@ def test_notebook_evidence_renders_assessment_content() -> None:
     world = make_world()
     wax_id = add_student(world)
     now = world.clock.now()
+    notebook = world.storage.get_or_create_notebook(wax_id, now)
     entry = world.storage.add_notebook_entry(
         NotebookEntry(
             id=new_id(),
             wax_id=wax_id,
-            notebook_id=new_id(),
+            notebook_id=notebook.id,
             schema_version=1,
             payload={
                 "kind": NOTEBOOK_KIND,

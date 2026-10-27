@@ -324,9 +324,11 @@ class QualityJudgeService:
         )
         cursor = self._cursor(wax_id)
         if cursor is not None:
+            # newest_first listing: everything newer than the cursor
+            # sits at indices [0, cut); the cursor itself is at cut.
             cut = next((i for i, e in enumerate(newest) if e.id == cursor), None)
             if cut is not None:
-                newest = newest[cut + 1 :]
+                newest = newest[:cut]
         entries = tuple(reversed(newest))
         return entries[-self._config.window_entries :]
 

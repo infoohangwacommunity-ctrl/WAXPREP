@@ -139,8 +139,6 @@ def build_services(
         registry = getattr(gateway, "_registry", None)
         if isinstance(registry, ModelRegistry):
             registry.require_model_role(teacher_model_name, ModelRole.TEACHER)
-        import os
-
         effort = (os.environ.get("WAXPREP_REASONING_EFFORT") or "medium").lower()
         teacher = ModelTeacherCiFirst(
             gateway,
