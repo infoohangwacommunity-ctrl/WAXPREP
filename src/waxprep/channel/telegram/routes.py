@@ -11,8 +11,8 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from waxprep.channel.contracts import NormalizedInbound
+from waxprep.channel.telegram.handler import InboundResult, TelegramInboundHandler
 from waxprep.channel.telegram.normalize import normalize_telegram_update
-from waxprep.channel.whatsapp.handler import InboundResult
 from waxprep.domain.identifiers import WaxId
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,54 @@ def build_telegram_router(
                     "provider_message_id": msg.provider_message_id,
                     "accepted": result.accepted,
                     "wax_id": str(result.wax_id) if result.wax_id else None,
+                    "error": result.error,
+                }
+            )
+        return {
+            "status": "ok",
+            "message_count": len(messages),
+            "processed_count": len(results),
+            "results": results,
+        }
+
+    return router
+
+
+def build_telegram_router_with_handler(
+    handler: TelegramInboundHandler,
+    *,
+    secret_token: str | None = None,
+) -> APIRouter:
+    """Build a Telegram router with a full handler for streaming support."""
+    router = APIRouter(prefix="/channels/telegram", tags=["telegram"])
+
+    @router.post("/webhook")
+    async def webhook_receive(
+        request: Request,
+        x_telegram_bot_api_secret_token: str | None = Header(
+            None, alias="X-Telegram-Bot-Api-Secret-Token"
+        ),
+    ) -> dict[str, Any]:
+        if secret_token:
+            if x_telegram_bot_api_secret_token != secret_token:
+                raise HTTPException(status_code=403, detail="invalid secret token")
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid json") from exc
+
+        messages = normalize_telegram_update(payload)
+        results: list[dict[str, Any]] = []
+        for msg in messages:
+            result = await handler.handle_message(msg)
+            results.append(
+                {
+                    "provider_message_id": msg.provider_message_id,
+                    "accepted": result.accepted,
+                    "wax_id": str(result.wax_id) if result.wax_id else None,
+                    "student_entry_id": str(result.student_entry_id) if result.student_entry_id else None,
+                    "outbound_delivery_id": str(result.outbound_delivery_id) if result.outbound_delivery_id else None,
+                    "needs_linking": result.needs_linking,
                     "error": result.error,
                 }
             )

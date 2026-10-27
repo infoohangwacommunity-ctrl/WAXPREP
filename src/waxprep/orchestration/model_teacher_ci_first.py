@@ -242,6 +242,11 @@ class ModelTeacherCiFirst:
         # History always stores the final complete text only.
         from waxprep.model_gateway.models import ModelCapability
         from waxprep.model_gateway.errors import UnsupportedCapabilityError
+        from waxprep.channel.streaming.metrics import (
+            record_streaming_attempt,
+            record_streaming_success,
+            record_streaming_fallback,
+        )
 
         stream_fn = getattr(self._gateway, "stream", None)
         use_streaming = (
@@ -251,6 +256,9 @@ class ModelTeacherCiFirst:
                 request.model, ModelCapability.STREAMING
             )
         )
+
+        # Record streaming attempt
+        record_streaming_attempt(request.model)
 
         if use_streaming:
             chunks: list[str] = []
@@ -272,6 +280,8 @@ class ModelTeacherCiFirst:
                                     extra={"wax_id": str(request.wax_id)},
                                 )
                 if chunks:
+                    # Record successful streaming
+                    record_streaming_success(request.model)
                     return self._parse_reply("".join(chunks))
             except UnsupportedCapabilityError:
                 logger.info(
@@ -288,6 +298,8 @@ class ModelTeacherCiFirst:
                 use_streaming = False
 
         if not use_streaming:
+            # Record fallback
+            record_streaming_fallback(request.model)
             response: ModelResponse = await self._gateway.complete(request)
             return self._parse_reply(response.text)
 

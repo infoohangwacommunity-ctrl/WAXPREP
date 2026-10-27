@@ -145,4 +145,13 @@ class StreamingCounters:
         }
 
 
+    def record_delta_success(self) -> None:
+        """Record a successful delta delivery."""
+        self.update_count += 1
+
+    def record_delta_failure(self) -> None:
+        """Record a failed delta delivery."""
+        self.draft_update_failures += 1
+
+
 __all__ = ["StreamingCounters", "StreamingMetrics"]
