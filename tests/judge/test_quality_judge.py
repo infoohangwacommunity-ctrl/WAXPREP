@@ -15,6 +15,7 @@ import pytest
 
 from support import TEST_CIPHER, World, add_student, make_world
 from waxprep.derive.worker import DerivationWorker
+from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import (
     AuthorKind,
     HistoryEntry,
@@ -95,7 +96,7 @@ class FakeJudgeModel:
 
 
 def add_pair(
-    world: World, wax_id: UUID, index: int, *, student_text: str | None = None
+    world: World, wax_id: WaxId, index: int, *, student_text: str | None = None
 ) -> tuple[HistoryEntry, HistoryEntry]:
     """Append one completed student->tutor pair to history."""
     now = world.clock.now()
@@ -155,13 +156,13 @@ def make_judge(
     )
 
 
-def judge_jobs(world: World, wax_id: UUID) -> list[tuple[str, UUID]]:
+def judge_jobs(world: World, wax_id: WaxId) -> list[tuple[str, UUID]]:
     """Claim due judge jobs (test doubles never run the worker here)."""
     jobs = world.storage.claim_due_jobs(wax_id, world.clock.now(), 50)
     return [(j.kind, j.object_id) for j in jobs if j.kind == JOB_JUDGE_TUTOR_QUALITY]
 
 
-def active_assessment(world: World, wax_id: UUID) -> dict[str, Any] | None:
+def active_assessment(world: World, wax_id: WaxId) -> dict[str, Any] | None:
     notebook = world.storage.get_notebook(wax_id)
     if notebook is None:
         return None
@@ -171,7 +172,7 @@ def active_assessment(world: World, wax_id: UUID) -> dict[str, Any] | None:
     return None
 
 
-def assessed_events(world: World, wax_id: UUID) -> list[dict[str, Any]]:
+def assessed_events(world: World, wax_id: WaxId) -> list[dict[str, Any]]:
     return [
         dict(event.metadata)
         for event in world.storage.list_events(wax_id)
