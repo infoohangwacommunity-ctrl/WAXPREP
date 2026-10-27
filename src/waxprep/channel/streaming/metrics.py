@@ -7,11 +7,9 @@ including counters, histograms, and success rate tracking.
 from __future__ import annotations
 
 import logging
-import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -270,3 +268,4 @@ __all__ = [
     "record_delta_failure",
     "record_final_failure",
 ]
+

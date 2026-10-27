@@ -263,19 +263,19 @@ jobs:
             exit 0
           fi
 
-          report=$(jq -r '.jobs[] | select(.conclusion == "failure") | "### job: (.name)\n" + ([.steps[] | select(.conclusion == "failure") | "- failed step: (.name)"] | join("\n"))' jobs.json)
+          report=$(jq -r '.jobs[] | select(.conclusion == "failure") | "### job: " + .name + " (failed)" + "\n" + ([.steps[] | select(.conclusion == "failure") | "- failed step: " + .name] | join("\n"))' jobs.json)
 
           : > logs-section.md
           for job_id in $(jq -r '.jobs[] | select(.conclusion == "failure") | .id' jobs.json); do
             {
               echo "~~~"
-              curl -sSL "${auth[@]}" "$api/jobs/$job_id/logs" 2>/dev/null | tail -n 120 || true
+              curl -sSL "${auth[@]}" "$api/jobs/$job_id/logs" 2>/dev/null | tail -n 300 || true
               echo "~~~"
               echo ""
             } >> logs-section.md || true
           done
           # Issue bodies are capped at 64k characters: keep the tail.
-          tail -c 40000 logs-section.md > logs-trimmed.md || true
+          tail -c 55000 logs-section.md > logs-trimmed.md || true
 
           {
             echo "The quality gate failed on branch '$BRANCH' at commit $COMMIT."
@@ -300,3 +300,4 @@ jobs:
           else
             gh issue create -R "$REPO" --title "quality-gate failed on $BRANCH" --body-file issue-body.md
           fi
+

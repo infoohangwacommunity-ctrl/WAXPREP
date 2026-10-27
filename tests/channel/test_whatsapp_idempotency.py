@@ -289,7 +289,7 @@ async def test_outbound_claim_is_exclusive() -> None:
         wax, AuthorKind.STUDENT, "hi", channel="whatsapp", channel_ref="wamid.CLAIM"
     )
     tutor, _ = history.record_with_status(
-        wax, AuthorKind.TUTOR, "ans", channel="whatsapp", reply_to_id=student.id
+        wax, AuthorKind.TUTOR, "answer", channel="whatsapp", reply_to_id=student.id
     )
     now = clock.now()
     delivery = storage.create_outbound_delivery(
@@ -325,3 +325,4 @@ async def test_turn_lock_exclusive() -> None:
     assert storage.try_acquire_turn_lock(wax, entry_id) is False
     storage.release_turn_lock(wax, entry_id)
     assert storage.try_acquire_turn_lock(wax, entry_id) is True
+

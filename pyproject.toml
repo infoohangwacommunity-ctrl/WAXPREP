@@ -10,7 +10,7 @@ dependencies = [
     "uvicorn[standard]>=0.32,<1.0",
     "httpx>=0.28,<1.0",
     "psycopg[binary]>=3.2,<4.0",
-    "cryptography>=44.0,<47.0",
+    "cryptography>=50.0,<51.0",
 ]
 
 [dependency-groups]
@@ -56,7 +56,7 @@ extraPaths = ["tests"]
 venvPath = "."
 venv = ".venv"
 
-[tool.pytest]
+[tool.pytest.ini_options]
 minversion = "9.0"
 addopts = ["-ra", "--strict-config", "--strict-markers"]
 testpaths = ["tests"]
@@ -74,6 +74,9 @@ markers = [
 
 [tool.uv]
 default-groups = ["dev"]
+# Security floor: pip-audit flags certifi < 2026.10.19 (PYSEC-2026-4320).
+# The constraint forces uv.lock onto the fixed version.
+constraint-dependencies = ["certifi>=2026.10.19"]
 
 [tool.coverage.run]
 # Measure the shipped package, not tests or scripts.
@@ -92,3 +95,4 @@ exclude_lines = [
     "@abstractmethod",
     "@overload",
 ]
+

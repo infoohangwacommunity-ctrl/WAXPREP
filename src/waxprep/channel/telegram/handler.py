@@ -20,20 +20,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
-from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from waxprep.channel.contracts import NormalizedInbound, OutboundPayload
 from waxprep.channel.streaming.accumulator import AnswerAccumulator
 from waxprep.channel.streaming.coordinator import StreamingCoordinator
-from waxprep.channel.streaming.contract import (
-    ChannelCapabilities,
-    DeliveryStrategy,
-)
-from waxprep.channel.streaming.formatter import SafeIncrement, StreamSafeFormatter
-from waxprep.channel.streaming.observability import StreamingMetrics
-from waxprep.channel.streaming.pacing import PacingPolicy, TELEGRAM_DRAFT_DEFAULT
+from waxprep.channel.streaming.contract import ChannelCapability
+from waxprep.channel.streaming.observability import StreamingCounters
+from waxprep.channel.streaming.pacing import TELEGRAM_DRAFT_DEFAULT
 from waxprep.channel.streaming.renderers import telegram_capabilities
 from waxprep.channel.telegram.client import TelegramClient
 from waxprep.clock import Clock
@@ -50,9 +44,6 @@ from waxprep.index.indexer import JOB_INGEST_MEDIA, JOB_PROCESS_TURN
 from waxprep.orchestration.contracts_ci_first import TextDeltaSink
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
 from waxprep.storage.protocol import Storage
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +114,7 @@ class TelegramInboundHandler:
         self._message_locks_guard = asyncio.Lock()
 
         # Streaming support
-        self._streaming_metrics = StreamingMetrics()
+        self._streaming_counters = StreamingCounters()
         self._capabilities = telegram_capabilities()
 
     async def _lock_for_message(self, provider_message_id: str) -> asyncio.Lock:
@@ -326,47 +317,43 @@ class TelegramInboundHandler:
         # Step 5: Process through CI-first turn service with streaming support
         on_text_delta: TextDeltaSink | None = None
         last_provider_message_id: str | None = None
-        draft_id: str | None = None
         coordinator: StreamingCoordinator | None = None
 
         if self._telegram_client is not None:
-            client = self._telegram_client
-            recipient = msg.provider_sender_id
-            draft_id = str(uuid4())
-
-            # Check if Telegram supports native draft updates
             caps = self._capabilities
-            supports_draft = (
-                ChannelCapabilities.NATIVE_TEXT_DRAFT_UPDATES in caps
-                or ChannelCapabilities.NATIVE_RICH_DRAFT_UPDATES in caps
-            )
+            supports_draft = caps.has(
+                ChannelCapability.NATIVE_TEXT_DRAFT_UPDATES
+            ) or caps.has(ChannelCapability.NATIVE_RICH_DRAFT_UPDATES)
 
             if supports_draft:
-                # Use native Telegram draft streaming
+                # Use native Telegram draft streaming (verified capability).
                 on_text_delta = self._create_draft_sink(
-                    client, recipient, draft_id
+                    self._telegram_client,
+                    msg.provider_sender_id,
+                    str(uuid4()),
                 )
             else:
-                # Fall back to progressive complete messages
+                # Fall back to progressive complete-message streaming via
+                # the shared coordinator (pacing + stream-safe formatting).
                 accumulator = AnswerAccumulator()
                 accumulator.start()
-                formatter = StreamSafeFormatter()
-                pacing = PacingPolicy(**TELEGRAM_DRAFT_DEFAULT)
+                client = self._telegram_client
+                recipient = msg.provider_sender_id
 
-                coordinator = StreamingCoordinator(
+                async def send_update(text: str) -> str | None:
+                    await self._send_progressive_chunk(client, recipient, text)
+                    return None
+
+                coord = StreamingCoordinator(
                     accumulator=accumulator,
-                    formatter=formatter,
-                    pacing=pacing,
                     capabilities=caps,
-                    metrics=self._streaming_metrics,
+                    pacing=TELEGRAM_DRAFT_DEFAULT,
+                    send_update=send_update,
                 )
+                coordinator = coord
 
                 async def on_delta(text: str) -> None:
-                    await coordinator.on_delta(text)
-                    if coordinator.should_flush():
-                        await self._send_progressive_chunk(
-                            client, recipient, coordinator.get_flushable_text()
-                        )
+                    await coord.on_delta(text)
 
                 on_text_delta = on_delta
 
@@ -405,12 +392,10 @@ class TelegramInboundHandler:
                 final_text = turn_result.tutor_entry.text
 
                 if coordinator is not None:
-                    # Flush any remaining text
-                    remaining = coordinator.get_flushable_text()
-                    if remaining:
-                        await self._send_progressive_chunk(
-                            client, recipient, remaining
-                        )
+                    # Finalize the streamed response: the coordinator's
+                    # pacing policy sends the final streamed update. The
+                    # authoritative complete message is sent below.
+                    await coordinator.complete()
 
                 # Send final complete message
                 if self._telegram_client is not None:
@@ -418,7 +403,7 @@ class TelegramInboundHandler:
                         OutboundPayload(
                             channel=self._config.channel,
                             wax_id=wax_id,
-                            recipient_external_id=recipient,
+                            recipient_external_id=msg.provider_sender_id,
                             text=final_text,
                         )
                     )
@@ -525,9 +510,9 @@ class TelegramInboundHandler:
                     "telegram draft update failed",
                     extra={"error": result.error_detail},
                 )
-                self._streaming_metrics.record_delta_failure()
+                self._streaming_counters.record_delta_failure()
             else:
-                self._streaming_metrics.record_delta_success()
+                self._streaming_counters.record_delta_success()
 
         return sink
 
@@ -550,9 +535,9 @@ class TelegramInboundHandler:
                 "telegram progressive chunk send failed",
                 extra={"error": result.error_detail},
             )
-            self._streaming_metrics.record_delta_failure()
+            self._streaming_counters.record_delta_failure()
         else:
-            self._streaming_metrics.record_delta_success()
+            self._streaming_counters.record_delta_success()
 
     def create_linking_response(self, sender: str) -> str:
         """Create a response for unlinked senders."""
@@ -564,3 +549,4 @@ class TelegramInboundHandler:
 
 
 __all__ = ["TelegramInboundHandler", "TelegramInboundConfig", "InboundResult"]
+

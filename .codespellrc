@@ -7,3 +7,6 @@ skip = uv.lock,.git,.venv,__pycache__,dist,build,*.egg-info,*.svg
 # intentional spellings, not typos. Real typos must be fixed in the source.
 count = false
 quiet-level = 3
+# "ot" is a legitimate domain abbreviation (teacher/OT), not a typo of "or".
+ignore-words-list = ot
+

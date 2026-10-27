@@ -25,7 +25,6 @@ from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import new_id
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
     from waxprep.channel.contracts import NormalizedInbound
     from waxprep.storage.protocol import Storage
 
@@ -52,9 +51,14 @@ class QueueConfig:
     queue_timeout_seconds: float = 30.0
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class QueuedMessage:
-    """A message in the queue."""
+    """A message in the queue.
+
+    Mutable by design: the queue flips ``processing``/``processed`` as a
+    message moves through the pipeline (dequeue → mark_processed), so it
+    must not be frozen.
+    """
 
     id: UUID
     wax_id: WaxId
@@ -339,3 +343,4 @@ class MessageQueue:
 
 
 __all__ = ["MessageQueue", "QueueConfig", "QueuedMessage"]
+

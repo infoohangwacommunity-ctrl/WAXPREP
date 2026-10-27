@@ -1,30 +1,40 @@
 name: lockfile
 
+# Lockfile bot: keeps uv.lock current after dependency changes on main.
+# Direct bot pushes to main are blocked by branch protection, so the bot
+# falls back to opening a pull request with the regenerated lockfile.
 on:
   push:
     branches: [main]
 
 permissions:
   contents: write
+  pull-requests: write
+
+concurrency:
+  group: lockfile-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   lockfile:
     name: lockfile
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
+    # Never react to bot commits (this workflow or the format-fix bot):
+    # that would risk push loops.
     if: github.actor != 'github-actions[bot]'
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version-file: ".python-version"
 
@@ -32,6 +42,8 @@ jobs:
         run: uv lock
 
       - name: Commit lockfile if changed
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if git diff --quiet -- uv.lock; then
             echo "uv.lock is already current."
@@ -43,4 +55,18 @@ jobs:
 
           git add uv.lock
           git commit -m "chore: update uv lockfile"
-          git push
+
+          # Direct pushes to main are blocked by branch protection for bots.
+          # Fall back to a branch + pull request so the lockfile is never lost.
+          if ! git push origin HEAD:main 2>push-error.log; then
+            echo "Push to main rejected (expected under branch protection):"
+            cat push-error.log || true
+            BRANCH="uvlock/$GITHUB_SHA"
+            git push origin "HEAD:$BRANCH"
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore: update uv lockfile" \
+              --body "Regenerated uv.lock after a dependency change on main. Direct bot pushes to main are blocked by branch protection; merge to keep the lockfile current." \
+              || echo "PR may already exist."
+          fi

@@ -13,6 +13,7 @@ on:
 permissions:
   contents: write
   issues: write
+  pull-requests: write
 
 concurrency:
   group: format-fix-${{ github.ref }}
@@ -52,6 +53,8 @@ jobs:
           uv run ruff format . || true
 
       - name: Commit fixes if the tree changed
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if git diff --quiet; then
             echo "Tree already canonical; nothing to commit."
@@ -60,7 +63,20 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "style: auto-apply ruff safe lint fixes and canonical formatting"
-          git push
+          # Direct pushes to main are blocked by branch protection for bots.
+          # Fall back to a branch + pull request so the fixes are never lost.
+          if ! git push origin HEAD:main 2>push-error.log; then
+            echo "Push to main rejected (expected under branch protection):"
+            cat push-error.log || true
+            BRANCH="autoformat/$GITHUB_SHA"
+            git push origin "HEAD:$BRANCH"
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "style: auto-apply ruff safe lint fixes and canonical formatting" \
+              --body "Canonical formatting produced by the format-fix bot because direct bot pushes to main are blocked by branch protection. Merge to keep the tree canonical." \
+              || echo "PR may already exist."
+          fi
 
       - name: Report failure to an issue (visibility)
         if: failure()
@@ -73,7 +89,7 @@ jobs:
           set -euo pipefail
           curl -sS --retry 3 --retry-delay 2 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" > jobs.json
-          body=$(jq -r '.jobs[] | "### job: (.name) — (.conclusion // .status)\n" + ([.steps[] | select(.conclusion == "failure") | "- failed step: (.name)"] | join("\n"))' jobs.json)
+          body=$(jq -r '.jobs[] | "### job: " + .name + " — " + (.conclusion // .status) + "\n" + ([.steps[] | select(.conclusion == "failure") | "- failed step: " + .name] | join("\n"))' jobs.json)
           {
             echo "The format-fix bot failed on branch '$BRANCH'."
             echo ""
@@ -87,3 +103,4 @@ jobs:
           else
             gh issue create -R "$REPO" --title "format-fix failed on $BRANCH" --body-file issue-body.md
           fi
+
