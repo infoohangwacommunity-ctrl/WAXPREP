@@ -2,17 +2,62 @@ name: quality-gate
 
 on:
   push:
-    branches: [main, "professional-unified-history-rebuild", "foundation-teacher-first-completion"]
+    branches: [main]
   pull_request:
     branches: [main]
 
+# Superseded runs on the same branch are cancelled: fast feedback and no
+# wasted runner minutes. Standard practice for production CI fleets.
+concurrency:
+  group: quality-gate-${{{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: gate jobs only read the repository. The triage job is
+# granted the extra permissions it needs at job level.
 permissions:
   contents: read
 
 jobs:
-  quality-gate:
-    name: quality-gate
+  static-analysis:
+    name: static analysis (lockfile, spelling, format, lint, types)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install locked environment
+        run: uv sync --locked
+
+      - name: Verify lockfile is up to date
+        run: uv lock --check
+
+      - name: Spelling check (codespell)
+        run: uvx codespell .
+
+      - name: Format check (ruff, with diff output)
+        run: uv run ruff format --check --diff .
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Type check (pyright)
+        run: uv run pyright
+
+  tests:
+    name: tests + coverage gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -42,39 +87,90 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version-file: ".python-version"
 
       - name: Install locked environment
         run: uv sync --locked
 
-      - name: Verify lockfile is up to date
-        run: uv lock --check
+      - name: Run tests with coverage gate (excluding paid live API calls)
+        run: >
+          uv run --with pytest-cov pytest -m "not live" --tb=short
+          --cov --cov-report=term-missing --cov-report=xml
 
-      - name: Format check
-        run: uv run ruff format --check .
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          if [ -f coverage.xml ]; then
+            total=$(python3 -c "import xml.etree.ElementTree as ET; print(f"{float(ET.parse('coverage.xml').getroot().attrib['line-rate']) * 100:.1f}")" 2>/dev/null || echo "n/a")
+            {
+              echo "## Test coverage"
+              echo ""
+              echo "Total line coverage: ${total}% (gate floor: configured via fail_under in pyproject.toml)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-      - name: Lint
-        run: uv run ruff check .
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
 
-      - name: Type check
-        run: uv run pyright
+  database-and-runtime:
+    name: migrations, scheduler, boot smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
-      - name: Run tests (excluding paid live API calls)
-        run: uv run pytest -m "not live" --tb=short
+    services:
+      postgres:
+        # Use the same major PostgreSQL version intended for deployment.
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: waxprep_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d waxprep_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/waxprep_test
+      WAXPREP_MASTER_KEYS: "1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      WAXPREP_ACTIVE_KEY_ID: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install locked environment
+        run: uv sync --locked
 
       - name: Verify migrations against a clean database
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/waxprep_test
         run: |
           uv run python -c "
           import psycopg
@@ -90,8 +186,93 @@ jobs:
           "
 
       - name: Verify the worker scheduler CLI works
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/waxprep_test
-          WAXPREP_MASTER_KEYS: "1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          WAXPREP_ACTIVE_KEY_ID: "1"
         run: uv run python -m waxprep.scheduler run-once
+
+      - name: Boot smoke test (deploy parity with railway.toml healthcheck)
+        run: |
+          uv run uvicorn waxprep.app:app --host 127.0.0.1 --port 8080 > uvicorn.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            sleep 1
+            if curl -sf http://127.0.0.1:8080/health > /dev/null; then
+              echo "/health responded:"
+              curl -s http://127.0.0.1:8080/health
+              echo
+              exit 0
+            fi
+          done
+          echo "::error::/health did not return 200 within 30 seconds"
+          cat uvicorn.log
+          exit 1
+
+  dependency-audit:
+    name: dependency vulnerability audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+
+      - name: Export locked production dependencies
+        run: uv export --no-group dev --no-emit-project -o requirements-audit.txt
+
+      - name: Audit for known vulnerabilities (pip-audit)
+        run: uvx pip-audit -r requirements-audit.txt
+
+  failure-triage:
+    name: publish failure details to an issue
+    needs: [static-analysis, tests, database-and-runtime, dependency-audit]
+    # Only for direct pushes: PR runs (especially from forks) cannot open issues.
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: Collect failed-step logs and open (or update) a triage issue
+        env:
+          GH_TOKEN: ${{{ github.token }}
+          REPO: ${{{ github.repository }}
+          RUN_ID: ${{{ github.run_id }}
+          BRANCH: ${{{ github.ref_name }}
+          COMMIT: ${{{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          gh run view "$RUN_ID" --repo "$REPO" --log-failed > failed-steps.log || {
+            echo "Could not retrieve failed-step logs; nothing to publish."
+            exit 0
+          }
+
+          # Issue bodies are capped at 64k characters. Keep the tail, which
+          # holds the most recent (usually most relevant) output.
+          tail -c 50000 failed-steps.log > trimmed.log || cp failed-steps.log trimmed.log
+
+          {
+            echo "The quality gate failed on branch '$BRANCH' at commit $COMMIT."
+            echo ""
+            echo "Failed-step output (trimmed to the most recent 50,000 characters):"
+            echo ""
+            echo '<details><summary>Logs</summary>'
+            echo ""
+            echo '~~~'
+            cat trimmed.log
+            echo '~~~'
+            echo ""
+            echo '</details>'
+            echo ""
+            echo "_Automatically published by the quality-gate failure-triage job. This issue can be closed once the gate is green again._"
+          } > issue-body.md
+
+          existing=$(gh issue list -R "$REPO" --state open --search "in:title quality-gate failed on $BRANCH" --json number --jq '.[0].number // empty' || true)
+          if [ -n "${{existing:-}" ]; then
+            echo "Adding findings to existing issue #$existing"
+            gh issue comment "$existing" -R "$REPO" --body-file issue-body.md
+          else
+            gh issue create -R "$REPO" --title "quality-gate failed on $BRANCH" --body-file issue-body.md
+          fi

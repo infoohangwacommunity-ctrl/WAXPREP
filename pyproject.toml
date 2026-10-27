@@ -74,3 +74,21 @@ markers = [
 
 [tool.uv]
 default-groups = ["dev"]
+
+[tool.coverage.run]
+# Measure the shipped package, not tests or scripts.
+source = ["src/waxprep"]
+
+[tool.coverage.report]
+# The quality gate fails below this floor. Raise it over time; never lower it
+# to make a red gate green — add or fix tests instead.
+fail_under = 50
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+    "@overload",
+]

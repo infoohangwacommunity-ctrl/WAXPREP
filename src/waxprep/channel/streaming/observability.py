@@ -144,7 +144,6 @@ class StreamingCounters:
             "failure_categories": dict(self._failure_categories),
         }
 
-
     def record_delta_success(self) -> None:
         """Record a successful delta delivery."""
         self.update_count += 1

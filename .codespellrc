@@ -1,0 +1,9 @@
+# Codespell configuration — used by the quality-gate spelling check.
+# Reference: https://github.com/codespell-project/codespell#configuration
+[codespell]
+# Generated/vendored files contain no hand-written prose to check.
+skip = uv.lock,.git,.venv,__pycache__,dist,build,*.egg-info,*.svg
+# Add domain terms to ignore-words-list ONLY after confirming they are
+# intentional spellings, not typos. Real typos must be fixed in the source.
+count = false
+quiet-level = 3

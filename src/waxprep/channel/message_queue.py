@@ -220,7 +220,10 @@ class MessageQueue:
         Returns None if queue is empty or student has too many concurrent messages.
         """
         async with self._processing_lock:
-            if self._active_processing[wax_id] >= self._config.max_concurrent_per_student:
+            if (
+                self._active_processing[wax_id]
+                >= self._config.max_concurrent_per_student
+            ):
                 return None
             self._active_processing[wax_id] += 1
 
