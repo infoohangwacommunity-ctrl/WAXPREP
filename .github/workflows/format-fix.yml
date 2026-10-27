@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: format-fix-${{{ github.ref }}
+  group: format-fix-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -44,7 +44,9 @@ jobs:
 
       - name: Apply safe lint fixes and canonical formatting
         run: |
-          uv run ruff check --fix .
+          # --exit-zero: unfixable lint findings must not abort the
+          # formatter; the quality gate still reports them.
+          uv run ruff check --fix --exit-zero .
           uv run ruff format .
 
       - name: Commit fixes if the tree changed

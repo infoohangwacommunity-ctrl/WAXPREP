@@ -9,7 +9,7 @@ on:
 # Superseded runs on the same branch are cancelled: fast feedback and no
 # wasted runner minutes. Standard practice for production CI fleets.
 concurrency:
-  group: quality-gate-${{{ github.ref }}
+  group: quality-gate-${{ github.ref }}
   cancel-in-progress: true
 
 # Least privilege: gate jobs only read the repository. The triage job is
@@ -111,7 +111,7 @@ jobs:
         if: always()
         run: |
           if [ -f coverage.xml ]; then
-            total=$(python3 -c "import xml.etree.ElementTree as ET; print(f"{float(ET.parse('coverage.xml').getroot().attrib['line-rate']) * 100:.1f}")" 2>/dev/null || echo "n/a")
+            total=$(python3 -c "import xml.etree.ElementTree as ET; print(round(float(ET.parse('coverage.xml').getroot().attrib['line-rate']) * 100, 1))" 2>/dev/null || echo "n/a")
             {
               echo "## Test coverage"
               echo ""
@@ -188,7 +188,7 @@ jobs:
       - name: Verify the worker scheduler CLI works
         run: uv run python -m waxprep.scheduler run-once
 
-      - name: Boot smoke test (deploy parity with railway.toml healthcheck)
+      - name: Boot smoke test (deploy parity with the production healthcheck)
         run: |
           uv run uvicorn waxprep.app:app --host 127.0.0.1 --port 8080 > uvicorn.log 2>&1 &
           server_pid=$!
@@ -236,11 +236,11 @@ jobs:
     steps:
       - name: Collect failed-step logs and open (or update) a triage issue
         env:
-          GH_TOKEN: ${{{ github.token }}
-          REPO: ${{{ github.repository }}
-          RUN_ID: ${{{ github.run_id }}
-          BRANCH: ${{{ github.ref_name }}
-          COMMIT: ${{{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -270,7 +270,7 @@ jobs:
           } > issue-body.md
 
           existing=$(gh issue list -R "$REPO" --state open --search "in:title quality-gate failed on $BRANCH" --json number --jq '.[0].number // empty' || true)
-          if [ -n "${{existing:-}" ]; then
+          if [ -n "${existing:-}" ]; then
             echo "Adding findings to existing issue #$existing"
             gh issue comment "$existing" -R "$REPO" --body-file issue-body.md
           else

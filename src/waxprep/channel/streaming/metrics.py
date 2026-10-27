@@ -144,8 +144,28 @@ class StreamingStats:
             return 0.0
         return sum(self.stream_duration_ns) / len(self.stream_duration_ns) / 1_000_000
 
+    @staticmethod
+    def _summarize_model(stats: dict[str, Any]) -> dict[str, Any]:
+        """Summarize per-model streaming statistics for logging."""
+        attempts = stats.get("attempts", 0)
+        successes = stats.get("successes", 0)
+        return {
+            "attempts": attempts,
+            "successes": successes,
+            "fallbacks": stats.get("fallbacks", 0),
+            "success_rate": f"{(successes / max(attempts, 1) * 100):.2f}%",
+        }
+
     def log_summary(self) -> None:
         """Log a summary of streaming statistics."""
+        avg_time_to_first_delta_ms = f"{self.get_avg_time_to_first_delta_ms():.2f}"
+        avg_time_to_first_visible_ms = (
+            f"{self.get_avg_time_to_first_visible_ms():.2f}"
+        )
+        model_stats = {
+            model: self._summarize_model(stats)
+            for model, stats in self.model_stats.items()
+        }
         logger.info(
             "streaming_stats_summary",
             extra={
@@ -157,18 +177,10 @@ class StreamingStats:
                 "total_deltas": self.total_deltas,
                 "delta_failures": self.delta_failures,
                 "final_message_failures": self.final_message_failures,
-                "avg_time_to_first_delta_ms": f"{self.get_avg_time_to_first_delta_ms():.2f}",
-                "avg_time_to_first_visible_ms": f"{self.get_avg_time_to_first_visible_ms():.2f}",
+                "avg_time_to_first_delta_ms": avg_time_to_first_delta_ms,
+                "avg_time_to_first_visible_ms": avg_time_to_first_visible_ms,
                 "avg_stream_duration_ms": f"{self.get_avg_stream_duration_ms():.2f}",
-                "model_stats": {
-                    model: {
-                        "attempts": stats.get("attempts", 0),
-                        "successes": stats.get("successes", 0),
-                        "fallbacks": stats.get("fallbacks", 0),
-                        "success_rate": f"{(stats.get("successes", 0) / max(stats.get("attempts", 1), 1) * 100):.2f}%",
-                    }
-                    for model, stats in self.model_stats.items()
-                },
+                "model_stats": model_stats,
             },
         )
 

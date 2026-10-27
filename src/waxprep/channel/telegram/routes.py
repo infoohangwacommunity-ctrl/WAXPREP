@@ -104,13 +104,21 @@ def build_telegram_router_with_handler(
         results: list[dict[str, Any]] = []
         for msg in messages:
             result = await handler.handle_message(msg)
+            student_entry_id = (
+                str(result.student_entry_id) if result.student_entry_id else None
+            )
+            outbound_delivery_id = (
+                str(result.outbound_delivery_id)
+                if result.outbound_delivery_id
+                else None
+            )
             results.append(
                 {
                     "provider_message_id": msg.provider_message_id,
                     "accepted": result.accepted,
                     "wax_id": str(result.wax_id) if result.wax_id else None,
-                    "student_entry_id": str(result.student_entry_id) if result.student_entry_id else None,
-                    "outbound_delivery_id": str(result.outbound_delivery_id) if result.outbound_delivery_id else None,
+                    "student_entry_id": student_entry_id,
+                    "outbound_delivery_id": outbound_delivery_id,
                     "needs_linking": result.needs_linking,
                     "error": result.error,
                 }
