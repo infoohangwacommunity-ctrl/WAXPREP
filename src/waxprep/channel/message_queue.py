@@ -115,7 +115,6 @@ class MessageQueue:
             return True  # No limit
 
         now = self._clock.now()
-        window = timedelta(seconds=1.0 / self._config.rate_limit_per_student)
 
         # Clean old timestamps
         while self._last_send_times[wax_id] and (
