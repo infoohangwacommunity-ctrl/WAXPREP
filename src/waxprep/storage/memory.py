@@ -1337,5 +1337,37 @@ class InMemoryStorage:
         self._deletion_requests[key] = claimed
         return claimed
 
+    # --- maintenance ---------------------------------------------------------------
+    def list_orphan_student_ids(self, older_than: datetime) -> tuple[WaxId, ...]:
+        """Students older than ``older_than`` with no identity and no data.
+
+        These are provisioning leftovers: the student row was created
+        but the channel identity write failed (provider webhook
+        retries against a failing request).
+        """
+        linked = {identity.wax_id for identity in self._channels.values()}
+        orphans: list[WaxId] = []
+        for wax_id, student in self._students.items():
+            if student.created_at >= older_than or wax_id in linked:
+                continue
+            has_data = (
+                any(w == wax_id for (w, _) in self._history)
+                or wax_id in self._events
+                or any(w == wax_id for (w, _) in self._jobs)
+                or any(w == wax_id for (w, _) in self._outbound)
+                or any(w == wax_id for (w, _) in self._entries)
+                or wax_id in self._notebooks
+                or any(w == wax_id for (w, _) in self._attachments)
+                or any(w == wax_id for (w, _) in self._deletion_requests)
+                or any(w == wax_id for (w, _) in self._interactive_offers)
+            )
+            if not has_data:
+                orphans.append(wax_id)
+        return tuple(sorted(orphans, key=str))
+
+    def delete_student(self, wax_id: WaxId) -> bool:
+        """Hard-delete one student row; True when a row was removed."""
+        return self._students.pop(wax_id, None) is not None
+
 
 __all__ = ["InMemoryStorage"]

@@ -567,5 +567,20 @@ class Storage(Protocol):
         """
         ...
 
+    # --- maintenance ----------------------------------------------------------------
+    def list_orphan_student_ids(self, older_than: datetime) -> tuple[WaxId, ...]:
+        """Students older than ``older_than`` with no channel identity and
+        no data of any kind — leftovers from failed provisioning retries.
+        """
+        ...
+
+    def delete_student(self, wax_id: WaxId) -> bool:
+        """Hard-delete one student row. Returns True if a row was removed.
+
+        Only safe for orphans from ``list_orphan_student_ids``: real
+        students are protected by foreign keys from their data tables.
+        """
+        ...
+
 
 __all__ = ["Storage", "TokenMatch", "TokenStats"]

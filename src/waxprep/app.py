@@ -20,6 +20,7 @@ from waxprep.channel.whatsapp.handler import (
 )
 from waxprep.channel.whatsapp.outbox import OutboxConfig, WhatsAppOutbox
 from waxprep.clock import SystemClock
+from waxprep.domain.identifiers import WaxId
 from waxprep.settings import load_settings
 from waxprep.storage.protocol import Storage
 from waxprep.wiring import build_services
@@ -56,6 +57,7 @@ _history: Any = None
 _clock: Any = None
 _outboxes: list[Any] = []
 message_queue: MessageQueue | None = None
+_memory_storage: Storage | None = None
 
 
 @app.get("/health", tags=["system"])
@@ -72,13 +74,8 @@ def health() -> dict[str, str]:
     try:
         from waxprep.domain.identifiers import new_wax_id
 
-        # Clear a poisoned aborted transaction so health can recover.
-        try:
-            conn = getattr(_services, "_conn", None)
-            if conn is not None:
-                conn.rollback()
-        except Exception:
-            pass
+        # PostgresStorage heals a poisoned connection itself; a plain
+        # read is enough to prove the database is reachable.
         _services.get_student(new_wax_id())
     except Exception as exc:  # noqa: BLE001 — health must never crash
         logger.exception("health check failed: storage unreachable")
@@ -114,21 +111,39 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 
     try:
         cipher = build_cipher()
+        # Three separate connections: webhook, derivation worker, and
+        # outbox. Sharing one connection let a failed worker statement
+        # poison the transaction state for every webhook (live
+        # incident: each WhatsApp message 500'd, Meta retried, and
+        # every retry created another orphan student).
         storage = services_storage(cipher)
+        worker_storage = services_storage(cipher)
+        outbox_storage = services_storage(cipher)
         clock = SystemClock()
         # One gateway instance for the whole composition; the judge
         # runs over the same provider under its own logical role.
         from waxprep.judge.gateway_model import GatewayJudgeModel
 
         gateway = build_gateway(settings)
+        context_model = build_context_model(settings)
+        judge_model = GatewayJudgeModel(gateway)
         services = build_services(
             storage=storage,
             cipher=cipher,
             clock=clock,
-            context_model=build_context_model(settings),
+            context_model=context_model,
             teacher=None,
             gateway=gateway,
-            judge_model=GatewayJudgeModel(gateway),
+            judge_model=judge_model,
+        )
+        worker_services = build_services(
+            storage=worker_storage,
+            cipher=cipher,
+            clock=clock,
+            context_model=context_model,
+            teacher=None,
+            gateway=gateway,
+            judge_model=judge_model,
         )
         active_storage = storage
         _services = active_storage
@@ -136,39 +151,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         _history = services.history
         _clock = clock
 
-        from uuid import uuid4
+        # Students left behind by failed provisioning (webhook retries
+        # that crashed between the two writes) are pruned at startup.
+        _prune_orphan_students(active_storage, clock)
 
-        from waxprep.domain.identifiers import WaxId, new_wax_id
-        from waxprep.domain.models import ChannelIdentity, Student, StudentStatus
-
-        def provision(channel: str, sender: str):
-            identity = active_storage.get_channel_identity(channel, sender)
-            if identity is not None:
-                return identity.wax_id
-            now = clock.now()
-            wax = new_wax_id()
-            active_storage.create_student(
-                Student(
-                    wax_id=wax,
-                    status=StudentStatus.ACTIVE,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            active_storage.create_channel_identity(
-                ChannelIdentity(
-                    id=uuid4(),
-                    wax_id=wax,
-                    channel=channel,
-                    external_id=sender,
-                    created_at=now,
-                )
-            )
-            logger.info(
-                "provisioned channel student",
-                extra={"wax_id": str(wax), "channel": channel, "sender": sender},
-            )
-            return wax
+        def provision(channel: str, sender: str) -> WaxId:
+            return provision_channel_student(active_storage, clock, channel, sender)
 
         # Shared per-student queue: rapid message bursts are coalesced by a
         # short time window into single tutor turns (arrival cadence only —
@@ -223,7 +211,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 )
             )
             wa_outbox = WhatsAppOutbox(
-                storage=active_storage,
+                storage=outbox_storage,
                 client=client,
                 clock=clock,
                 config=OutboxConfig(),
@@ -276,7 +264,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 )
             )
             tg_outbox = TelegramOutbox(
-                storage=active_storage,
+                storage=outbox_storage,
                 client=tg_client,
                 clock=clock,
                 config=TelegramOutboxConfig(),
@@ -302,7 +290,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         async def _worker_loop() -> None:
             while True:
                 try:
-                    await services.worker.run_once()
+                    await worker_services.worker.run_once()
                 except Exception:
                     logger.exception("derivation worker iteration failed")
                 await asyncio.sleep(2.0)
@@ -344,7 +332,103 @@ def services_storage(cipher: Any | None = None) -> Storage:
         return PostgresStorage(conn, cipher)
     from waxprep.storage.memory import InMemoryStorage
 
-    return InMemoryStorage()
+    # Without a database the webhook, worker, and outbox still have to
+    # observe the same data, so they share one in-memory store
+    # (production gives each subsystem its own real connection).
+    global _memory_storage
+    if _memory_storage is None:
+        _memory_storage = InMemoryStorage()
+    return _memory_storage
+
+
+def provision_channel_student(
+    storage: Storage, clock: Any, channel: str, sender: str
+) -> WaxId:
+    """Idempotently provision the student for a channel sender.
+
+    Safe across provider webhook retries: the student and channel
+    identity are created in ONE transaction, and a racing retry that
+    finds the pair half-built re-reads the identity instead of
+    failing (live incident: retries against a 500 left orphan
+    students with no identity).
+    """
+    identity = storage.get_channel_identity(channel, sender)
+    if identity is not None:
+        return identity.wax_id
+    from uuid import uuid4
+
+    from waxprep.domain.identifiers import new_wax_id
+    from waxprep.domain.models import ChannelIdentity, Student, StudentStatus
+
+    now = clock.now()
+    wax = new_wax_id()
+    try:
+        with storage.transaction():
+            storage.create_student(
+                Student(
+                    wax_id=wax,
+                    status=StudentStatus.ACTIVE,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            storage.create_channel_identity(
+                ChannelIdentity(
+                    id=uuid4(),
+                    wax_id=wax,
+                    channel=channel,
+                    external_id=sender,
+                    created_at=now,
+                )
+            )
+    except Exception:
+        # A concurrent webhook retry may have created the pair while
+        # this call was in flight; re-read and reuse it.
+        retry_identity = storage.get_channel_identity(channel, sender)
+        if retry_identity is not None:
+            return retry_identity.wax_id
+        # Nothing to reuse: remove the half-created student so retries
+        # cannot accumulate orphans, then surface the real error.
+        try:
+            storage.delete_student(wax)
+        except Exception:
+            logger.exception(
+                "orphan student cleanup failed", extra={"wax_id": str(wax)}
+            )
+        raise
+    logger.info(
+        "provisioned channel student",
+        extra={"wax_id": str(wax), "channel": channel, "sender": sender},
+    )
+    return wax
+
+
+def _prune_orphan_students(storage: Storage, clock: Any) -> None:
+    """Best-effort removal of students created by failed provisioning.
+
+    A student older than an hour with no channel identity and no data
+    of any kind was never reachable: nothing can ever address it again.
+    The live incident left exactly such rows behind.
+    """
+    from datetime import timedelta
+
+    older_than = clock.now() - timedelta(hours=1)
+    try:
+        orphans = storage.list_orphan_student_ids(older_than)
+    except Exception:
+        logger.exception("orphan student scan failed")
+        return
+    removed = 0
+    for wax_id in orphans:
+        try:
+            if storage.delete_student(wax_id):
+                removed += 1
+        except Exception:
+            logger.exception(
+                "orphan student removal failed", extra={"wax_id": str(wax_id)}
+            )
+    if removed:
+        logger.info("pruned orphan students", extra={"count": removed})
 
 
 def build_cipher():
