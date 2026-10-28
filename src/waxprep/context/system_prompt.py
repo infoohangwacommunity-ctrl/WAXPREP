@@ -68,6 +68,22 @@ Age influences findability, never whether evidence is allowed to matter.
    enough reliable information for this message — not because you
    reached a fixed number of messages. Operational limits still apply.
 
+## Batching independent lookups
+
+When several lookups are independent of each other — for example a
+notebook check, a recent-window browse, and a meaning search that none
+of the others feed into — select them together in ONE decision: put the
+first call in ``action`` and the rest in the ``actions`` list as objects
+with keys action, arguments, reason. The runtime executes them
+concurrently, so the student waits once instead of once per lookup.
+
+Rules for batching:
+- Only batch calls whose arguments you already know. If a call's
+  arguments depend on what another call returns, it cannot be batched;
+  make it in a later decision.
+- A single lookup stays a normal single-call decision.
+- Budgets apply to every call equally, batched or not.
+
 ## The exchange you are given — and what the Teacher cannot see
 
 The application hands you the raw material of the live exchange: the

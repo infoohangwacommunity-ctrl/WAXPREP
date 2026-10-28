@@ -21,36 +21,64 @@ here and made regression-testable:
    evidence when the model returned ids that matched nothing. This made a
    broken selection indistinguishable from "use everything". The fallback
    is removed. When the model returns ids that match no gathered evidence,
-   the runtime sets ``invalid_selection=True``, records the failure in the
-   ``investigated`` audit trail, and ships an empty evidence tuple. The
+   the runtime sets ``invalid_selection=True``, records the failure in
+   the ``investigated`` audit trail, and ships an empty evidence tuple. The
    Teacher can see the failure and treat the package honestly.
 
 3. A "stop without any tool calls and no evidence" used to force one
    ``browse_time_window`` call. That fallback stays (it is a real attempt
    to look), but it now contributes to the completion status honestly: if
-   it returns nothing, the status is ``EMPTY``; if it fails, the status
-   is ``PARTIAL``.
+   it returns nothing, the status is ``EMPTY``; if it fails, the status is
+   ``PARTIAL``.
+
+Batched retrieval: when the model selects several *independent* lookups in
+one decision (``ContextModelDecision.batch``), the runtime executes them
+concurrently. This removes serial round trips — the model no longer has to
+wait for lookup one merely to decide on lookup two — while CI keeps full
+authority over relevance. Dependent lookups stay in later decisions.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from uuid import UUID
 
 from waxprep.context.evidence import format_for_model
-from waxprep.context.model import ContextModel, ContextModelRequest
+from waxprep.context.model import (
+    ContextModel,
+    ContextModelDecision,
+    ContextModelRequest,
+    ToolSelection,
+)
 from waxprep.context.models import (
     ContextPackage,
     Evidence,
+    InvestigationLimits,
     InvestigationRequest,
     InvestigationStatus,
 )
 from waxprep.context.system_prompt import CONTEXT_INTELLIGENCE_SYSTEM_PROMPT
 from waxprep.context.tool_definitions import context_tool_definitions
-from waxprep.context.tools import ContextTool, ToolInvocation
+from waxprep.context.tools import ContextTool, ToolInvocation, ToolResult
 
 logger = logging.getLogger(__name__)
+
+
+def _selections_from(decision: ContextModelDecision) -> tuple[ToolSelection, ...]:
+    """Expand a decision into the tool selections to execute.
+
+    A plain decision is its single selection. A batch decision carries
+    additional independent selections chosen in the same round; the
+    primary action joins them unless it is a stop.
+    """
+    primary = ToolSelection(decision.action, decision.arguments, decision.reason)
+    if not decision.batch:
+        return (primary,)
+    if decision.action == "stop":
+        return tuple(decision.batch)
+    return (primary,) + tuple(decision.batch)
 
 
 @dataclass
@@ -188,59 +216,58 @@ class ContextInvestigator:
                 stopped_by_model = True
                 break
 
-            tool = self.tools.get(decision.action)
-            if tool is None:
-                investigated.append(f"missing_tool:{decision.action}")
-                continue
-            tool_calls += 1
-
-            try:
-                result = await tool.execute(
-                    ToolInvocation(
-                        wax_id=request.wax_id,
-                        arguments=decision.arguments,
-                        now=request.now,
-                        trigger_entry_id=request.trigger_entry_id,
-                    )
-                )
-            except Exception as exc:
-                logger.exception("context tool %s failed", decision.action)
-                failed_tool_calls += 1
-                investigated.append(
-                    f"tool_failed:{decision.action}:{type(exc).__name__}"
-                )
-                continue
-            # Surface write-side proposal outcomes in the investigated
-            # audit trail. Read tools return evidence; write tools return
-            # empty results but metadata describing the proposal's
-            # acceptance/rejection and what was created/invalidated.
-            # The Teacher (and any operator) can see what CI proposed
-            # and what the application actually did — the model's claim
-            # of an operation is not sufficient.
-            if result.metadata:
-                accepted = result.metadata.get("accepted")
-                operation = result.metadata.get("operation") or decision.action
-                if accepted is True:
-                    investigated.append(f"proposal_accepted:{operation}")
-                elif accepted is False:
-                    investigated.append(
-                        f"proposal_rejected:{operation}:{result.metadata.get('reason', '')[:80]}"
-                    )
-                # Surface the structural counts so the audit trail is
-                # self-explanatory without re-reading the metadata dict.
-                inv_count = result.metadata.get("invalidated_count")
-                if inv_count:
-                    investigated.append(f"invalidated:{inv_count}")
-                del_id = result.metadata.get("deletion_request_id")
-                if del_id:
-                    investigated.append(f"deletion_request:{del_id}")
-            for item in result.results:
-                if item.id in seen_ids:
+            # Expand the decision into its tool selections. A batch
+            # decision selects several independent lookups together;
+            # the runtime executes them concurrently instead of making
+            # each one wait for a fresh model round.
+            selections = _selections_from(decision)
+            if decision.batch:
+                investigated.append(f"batched_calls:{len(selections)}")
+            runnable: list[tuple[ToolSelection, ContextTool]] = []
+            for selection in selections:
+                tool = self.tools.get(selection.action)
+                if tool is None:
+                    investigated.append(f"missing_tool:{selection.action}")
                     continue
-                seen_ids.add(item.id)
-                evidence.append(item)
-                if len(evidence) >= limits.max_evidence:
-                    break
+                runnable.append((selection, tool))
+            if not runnable:
+                continue
+            remaining = limits.max_tool_calls - tool_calls
+            if len(runnable) > remaining:
+                # Truncate to the mechanical budget; the next loop-top
+                # check records the budget stop honestly.
+                runnable = runnable[:remaining]
+                hit_tool_budget = True
+            tool_calls += len(runnable)
+            outcomes = await asyncio.gather(
+                *(
+                    tool.execute(
+                        ToolInvocation(
+                            wax_id=request.wax_id,
+                            arguments=selection.arguments,
+                            now=request.now,
+                            trigger_entry_id=request.trigger_entry_id,
+                        )
+                    )
+                    for selection, tool in runnable
+                ),
+                return_exceptions=True,
+            )
+            for (selection, _tool), outcome in zip(runnable, outcomes, strict=True):
+                if isinstance(outcome, BaseException):
+                    logger.error(
+                        "context tool %s failed",
+                        selection.action,
+                        exc_info=outcome,
+                    )
+                    failed_tool_calls += 1
+                    investigated.append(
+                        f"tool_failed:{selection.action}:{type(outcome).__name__}"
+                    )
+                    continue
+                self._absorb_result(
+                    outcome, selection, investigated, evidence, seen_ids, limits
+                )
             if len(evidence) >= limits.max_evidence:
                 # Hitting the evidence cap mid-investigation is a
                 # legitimate stop: the runtime is telling the model
@@ -248,6 +275,8 @@ class ContextInvestigator:
                 # the same as hitting the step budget (genuinely out
                 # of room). The status computation distinguishes them.
                 hit_evidence_budget = True
+                break
+            if hit_tool_budget:
                 break
         else:
             # The for-loop fell through without `break`, meaning we hit
@@ -427,6 +456,48 @@ class ContextInvestigator:
             investigation_status=status,
             invalid_selection=invalid_selection,
         )
+
+    def _absorb_result(
+        self,
+        result: ToolResult,
+        selection: ToolSelection,
+        investigated: list[str],
+        evidence: list[Evidence],
+        seen_ids: set[UUID],
+        limits: InvestigationLimits,
+    ) -> None:
+        """Fold one executed tool's outcome into the running state.
+
+        Read tools contribute evidence; write tools contribute metadata
+        describing the proposal's acceptance and what was created or
+        invalidated. The model's claim of an operation is never
+        sufficient — only the application's recorded outcome is.
+        """
+        if result.metadata:
+            accepted = result.metadata.get("accepted")
+            operation = result.metadata.get("operation") or selection.action
+            if accepted is True:
+                investigated.append(f"proposal_accepted:{operation}")
+            elif accepted is False:
+                investigated.append(
+                    f"proposal_rejected:{operation}:"
+                    f"{str(result.metadata.get('reason', ''))[:80]}"
+                )
+            # Surface the structural counts so the audit trail is
+            # self-explanatory without re-reading the metadata dict.
+            inv_count = result.metadata.get("invalidated_count")
+            if inv_count:
+                investigated.append(f"invalidated:{inv_count}")
+            del_id = result.metadata.get("deletion_request_id")
+            if del_id:
+                investigated.append(f"deletion_request:{del_id}")
+        for item in result.results:
+            if item.id in seen_ids:
+                continue
+            seen_ids.add(item.id)
+            evidence.append(item)
+            if len(evidence) >= limits.max_evidence:
+                break
 
 
 def _compute_status(

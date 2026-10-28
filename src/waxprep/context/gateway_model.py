@@ -1,4 +1,4 @@
-# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnnecessaryCast=false
 """Context Intelligence model adapter via Model Gateway."""
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from waxprep.context.model import (
     ContextModelDecision,
     ContextModelFinal,
     ContextModelRequest,
+    ToolSelection,
 )
 from waxprep.model_gateway.gateway import ModelGateway
 from waxprep.model_gateway.models import (
@@ -29,7 +30,10 @@ class GatewayContextModel:
 
     Reasoning effort defaults to medium (override with WAXPREP_REASONING_EFFORT).
     Tool selection remains application-validated; optional native tool_choice
-    is enabled when the provider supports TOOL_CALLING.
+    is enabled when the provider supports TOOL_CALLING. Independent lookups
+    selected together (native multi tool-calls, or the ``actions`` JSON
+    list) are returned as one batched decision so the runtime can execute
+    them concurrently.
     """
 
     def __init__(
@@ -69,11 +73,21 @@ class GatewayContextModel:
             )
         )
         if response.tool_calls:
-            tc = response.tool_calls[0]
+            calls = list(response.tool_calls)
+            primary = calls[0]
+            batch = tuple(
+                ToolSelection(
+                    action=call.name,
+                    arguments=dict(call.arguments),
+                    reason="native_tool_call",
+                )
+                for call in calls[1:]
+            )
             return ContextModelDecision(
-                action=tc.name,
-                arguments=dict(tc.arguments),
+                action=primary.name,
+                arguments=dict(primary.arguments),
                 reason="native_tool_call",
+                batch=batch,
             )
         return self._parse_decision(response.text)
 
@@ -112,7 +126,7 @@ class GatewayContextModel:
     def _decision_prompt(self, request: ContextModelRequest) -> str:
         tools = json.dumps(request.tools, ensure_ascii=True)
         mode = (
-            "You may call a tool via the API tool interface, or return JSON "
+            "You may call tools via the API tool interface, or return JSON "
             "with keys action, arguments, reason."
             if self._use_native_tools
             else "Return a single JSON object with keys action, arguments, reason."
@@ -121,6 +135,11 @@ class GatewayContextModel:
         return (
             f"{mode}\n"
             "action must be one of the tool names or 'stop'.\n"
+            "When several lookups are independent of each other, select them "
+            "together: set action to the first one and add the rest under the "
+            "key 'actions' as a list of {action, arguments, reason} objects. "
+            "Never select together a call whose arguments depend on another "
+            "call's result.\n"
             "Interpret the student's intent from the message and evidence — "
             "do not rely on keyword routing.\n"
             f"Current time (UTC): {request.now.isoformat()}\n"
@@ -186,7 +205,12 @@ class GatewayContextModel:
         if not isinstance(args, dict):
             args = {}
         reason = str(data.get("reason") or "")
-        return ContextModelDecision(action=action, arguments=args, reason=reason)
+        return ContextModelDecision(
+            action=action,
+            arguments=args,
+            reason=reason,
+            batch=_parse_batch(data.get("actions")),
+        )
 
     def _parse_final(self, text: str) -> ContextModelFinal:
         data = _extract_json(text)
@@ -225,6 +249,32 @@ class GatewayContextModel:
             include_exchange=include_exchange,
             include_exchange_reason=reason,
         )
+
+
+def _parse_batch(raw: object) -> tuple[ToolSelection, ...]:
+    """Parse the optional 'actions' list of independent tool calls.
+
+    Anything malformed is skipped — a broken extra selection must never
+    invalidate the primary call the model already made.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[ToolSelection] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "")
+        if not action:
+            continue
+        args = item.get("arguments")
+        out.append(
+            ToolSelection(
+                action=action,
+                arguments=dict(args) if isinstance(args, dict) else {},
+                reason=str(item.get("reason") or ""),
+            )
+        )
+    return tuple(out)
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:

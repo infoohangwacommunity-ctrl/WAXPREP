@@ -34,10 +34,32 @@ class ContextModelRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolSelection:
+    """One tool call chosen inside a decision.
+
+    Independent selections returned together in one decision are
+    executed concurrently by the investigator — fewer serial round
+    trips per turn, while CI keeps full authority over relevance.
+    A selection whose arguments depend on another call's result must
+    not be batched; it belongs in a later decision.
+    """
+
+    action: str
+    arguments: dict[str, Any]
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ContextModelDecision:
     action: str
     arguments: dict[str, Any]
     reason: str
+    batch: tuple[ToolSelection, ...] = ()
+    """Additional independent tool calls selected in the same decision.
+
+    Empty for the ordinary single-call decision. When non-empty, the
+    runtime executes every selection of this decision concurrently.
+    """
 
 
 @dataclass(frozen=True, slots=True)
