@@ -19,14 +19,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from waxprep.channel.contracts import NormalizedInbound, OutboundPayload
+from waxprep.channel.contracts import (
+    CONTENT_KIND_INTERACTIVE_BUTTON,
+    InteractiveSuggestion,
+    NormalizedInbound,
+    OutboundPayload,
+)
 from waxprep.channel.message_queue import MessageQueue, QueuedMessage
 from waxprep.channel.streaming.accumulator import AnswerAccumulator
 from waxprep.channel.streaming.contract import ChannelCapability
 from waxprep.channel.streaming.coordinator import StreamingCoordinator
+from waxprep.channel.streaming.display import ChoicesMarkerFilter
 from waxprep.channel.streaming.observability import StreamingCounters
 from waxprep.channel.streaming.pacing import TELEGRAM_DRAFT_DEFAULT
 from waxprep.channel.streaming.renderers import telegram_capabilities
@@ -36,6 +43,8 @@ from waxprep.domain.identifiers import WaxId, new_wax_id
 from waxprep.domain.models import (
     AuthorKind,
     DerivationJob,
+    InteractiveOffer,
+    InteractiveOfferStatus,
     JobStatus,
     ObjectType,
     new_id,
@@ -63,6 +72,14 @@ class TelegramInboundConfig:
     disabled_instruction: str = (
         "Your account is currently disabled. Please contact support."
     )
+    # Minimum spacing between native draft-preview updates. Draft requests
+    # are real API calls; throttling keeps a fast stream within Telegram's
+    # rate limits. 0 disables throttling.
+    draft_min_interval_seconds: float = 1.0
+    # When a live final send fails, the outbound record is left retryable
+    # and the durable outbox re-sends the stored authoritative reply after
+    # this delay (with exponential backoff on later attempts).
+    send_retry_delay_seconds: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +202,15 @@ class TelegramInboundHandler:
                 "unresolved telegram sender",
                 extra={"sender": msg.provider_sender_id},
             )
+            # Acknowledge button clicks even when the sender is unknown —
+            # Telegram clients show a loading spinner until the callback
+            # query is answered.
+            if msg.content_kind == CONTENT_KIND_INTERACTIVE_BUTTON:
+                await self._answer_callback(
+                    self._callback_query_id(msg),
+                    "Please link your Telegram account to your WAXPREP "
+                    "account first.",
+                )
             return InboundResult(
                 accepted=True,
                 wax_id=None,
@@ -203,6 +229,11 @@ class TelegramInboundHandler:
                     "provider_sender_id": msg.provider_sender_id,
                 },
             )
+            if msg.content_kind == CONTENT_KIND_INTERACTIVE_BUTTON:
+                await self._answer_callback(
+                    self._callback_query_id(msg),
+                    "Your account is currently disabled.",
+                )
             return InboundResult(
                 accepted=True,
                 wax_id=wax_id,
@@ -237,6 +268,84 @@ class TelegramInboundHandler:
                     needs_linking=False,
                     error=None,
                 )
+
+        # Step 3b: One-shot interactive button consume (inline keyboard).
+        # Telegram keeps old inline buttons tappable forever; we reject
+        # stale/already-used clicks at the channel layer and acknowledge
+        # the callback query so the client never hangs on a spinner. The
+        # callback payload (opaque button id) is NEVER treated as
+        # authorization: the one-shot InteractiveOffer for THIS student is
+        # the authorization fact, consumed with a CAS update.
+        if msg.content_kind == CONTENT_KIND_INTERACTIVE_BUTTON:
+            callback_query_id = self._callback_query_id(msg)
+            button_id = str(msg.structured.get("button_id") or "")
+            if not button_id:
+                await self._answer_callback(callback_query_id, None)
+                return InboundResult(
+                    accepted=True,
+                    wax_id=wax_id,
+                    student_entry_id=None,
+                    outbound_delivery_id=None,
+                    needs_linking=False,
+                    error="interactive_click_malformed",
+                )
+            offer = self._storage.find_interactive_offer_by_button_id(
+                wax_id, button_id
+            )
+            if offer is None:
+                logger.info(
+                    "stale or unknown interactive click rejected",
+                    extra={
+                        "wax_id": str(wax_id),
+                        "button_id": button_id,
+                    },
+                )
+                await self._answer_callback(
+                    callback_query_id, "This option is no longer available."
+                )
+                return InboundResult(
+                    accepted=True,
+                    wax_id=wax_id,
+                    student_entry_id=None,
+                    outbound_delivery_id=None,
+                    needs_linking=False,
+                    error="interactive_offer_unavailable",
+                )
+            consumed = self._storage.consume_interactive_offer(
+                wax_id, offer.id, button_id, self._clock.now()
+            )
+            if consumed is None:
+                logger.info(
+                    "interactive offer already consumed or expired",
+                    extra={
+                        "wax_id": str(wax_id),
+                        "offer_id": str(offer.id),
+                        "button_id": button_id,
+                    },
+                )
+                await self._answer_callback(
+                    callback_query_id, "This option was already used."
+                )
+                return InboundResult(
+                    accepted=True,
+                    wax_id=wax_id,
+                    student_entry_id=None,
+                    outbound_delivery_id=None,
+                    needs_linking=False,
+                    error="interactive_offer_consumed",
+                )
+            # Resolve the human title for the opaque id so the click flows
+            # through the normal durable pipeline as an ordinary student
+            # turn ("Practice question" etc.), not as a platform event.
+            title = ""
+            for btn in offer.buttons:
+                if str(btn.get("id")) == button_id:
+                    title = str(btn.get("title") or "").strip()
+                    break
+            msg = replace(msg, text=title or "Selected option")
+            # Acknowledge immediately (no text) — the answer arrives as the
+            # tutor's streamed turn, not as a callback toast.
+            await self._answer_callback(callback_query_id, None)
 
         # Step 4: Durably save the student message
         try:
@@ -395,11 +504,20 @@ class TelegramInboundHandler:
     ) -> InboundResult:
         """Run the CI-first turn with streaming and deliver the reply."""
         turn_text = text if text is not None else (msg.text or "")
+        recipient = msg.provider_sender_id
         on_text_delta: TextDeltaSink | None = None
         last_provider_message_id: str | None = None
         coordinator: StreamingCoordinator | None = None
 
         if self._telegram_client is not None:
+            # Typing indicator at turn start (sendChatAction, best-effort).
+            # The native draft preview (or the coordinator's complete
+            # messages) takes over once generation starts.
+            try:
+                await self._telegram_client.send_typing(recipient)
+            except Exception:
+                logger.debug("turn-start typing action failed", exc_info=True)
+
             caps = self._capabilities
             supports_draft = caps.has(
                 ChannelCapability.NATIVE_TEXT_DRAFT_UPDATES
@@ -407,10 +525,13 @@ class TelegramInboundHandler:
 
             if supports_draft:
                 # Use native Telegram draft streaming (verified capability).
+                # draft_id MUST be a non-zero integer per the Bot API;
+                # reusing it animates the same preview.
                 on_text_delta = self._create_draft_sink(
                     self._telegram_client,
-                    msg.provider_sender_id,
-                    str(uuid4()),
+                    recipient,
+                    draft_id=uuid4().int & ((1 << 62) - 1) | 1,
+                    min_interval_seconds=self._config.draft_min_interval_seconds,
                 )
             else:
                 # Fall back to progressive complete-message streaming via
@@ -418,7 +539,6 @@ class TelegramInboundHandler:
                 accumulator = AnswerAccumulator()
                 accumulator.start()
                 client = self._telegram_client
-                recipient = msg.provider_sender_id
 
                 async def send_update(text: str) -> str | None:
                     await self._send_progressive_chunk(client, recipient, text)
@@ -450,7 +570,9 @@ class TelegramInboundHandler:
                 )
             )
 
-            # Claim outbound before any channel send
+            # Claim outbound before any channel send so the outbox worker
+            # cannot deliver the same tutor text a second time.
+            skip_live_send = False
             if turn_result.outbound_delivery_id is not None:
                 claimed = self._storage.claim_outbound_delivery(
                     wax_id,
@@ -458,17 +580,27 @@ class TelegramInboundHandler:
                     self._clock.now(),
                 )
                 if claimed is None:
+                    # Already claimed/delivered by another path — skip send.
                     logger.info(
-                        "outbound already claimed; skipping send",
+                        "outbound already claimed; skipping live send",
                         extra={
                             "outbound_delivery_id": str(
                                 turn_result.outbound_delivery_id
                             )
                         },
                     )
+                    skip_live_send = True
 
             # Send final message
-            if turn_result.tutor_entry is not None and turn_result.tutor_entry.text:
+            # delivery_ok gates the interactive issue's outbound bookkeeping:
+            # when another replica owns live delivery (claim lost) or a
+            # piece failed, the outbound record must stay retryable.
+            delivery_ok = not skip_live_send
+            if (
+                turn_result.tutor_entry is not None
+                and turn_result.tutor_entry.text
+                and not skip_live_send
+            ):
                 final_text = turn_result.tutor_entry.text
 
                 if coordinator is not None:
@@ -477,33 +609,75 @@ class TelegramInboundHandler:
                     # authoritative complete message is sent below.
                     await coordinator.complete()
 
-                # Send final complete message
+                # Send the complete answer as coherent complete messages
+                # (split only at the platform transport limit). Success is
+                # tracked per piece: the outbound record is marked
+                # delivered ONLY when the platform accepted the whole
+                # answer, otherwise it is left retryable so the durable
+                # outbox recovers it (never silently dropped).
+                delivery_ok = False
                 if self._telegram_client is not None:
-                    result = await self._telegram_client.send_text(
-                        OutboundPayload(
-                            channel=self._config.channel,
-                            wax_id=wax_id,
-                            recipient_external_id=msg.provider_sender_id,
-                            text=final_text,
-                        )
+                    sent_id = await self._send_final_text(
+                        wax_id, recipient, final_text
                     )
-                    if result.success and result.provider_message_id:
-                        last_provider_message_id = result.provider_message_id
+                    delivery_ok = sent_id is not None
+                    if sent_id is not None:
+                        last_provider_message_id = sent_id
 
-                # Mark outbound as delivered
                 if turn_result.outbound_delivery_id is not None:
-                    try:
-                        self._storage.mark_outbound_delivered(
-                            wax_id,
-                            turn_result.outbound_delivery_id,
-                            self._clock.now(),
-                            provider_message_id=last_provider_message_id,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "mark outbound delivered failed",
-                            exc_info=True,
-                        )
+                    if delivery_ok:
+                        try:
+                            self._storage.mark_outbound_delivered(
+                                wax_id,
+                                turn_result.outbound_delivery_id,
+                                self._clock.now(),
+                                provider_message_id=last_provider_message_id,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "mark outbound delivered failed",
+                                exc_info=True,
+                            )
+                    else:
+                        # A live send failed. Leave the outbound record
+                        # retryable: the durable outbox re-sends the
+                        # stored authoritative reply after a short delay
+                        # (with backoff), so the reply is never dropped.
+                        try:
+                            self._storage.mark_outbound_failed(
+                                wax_id,
+                                turn_result.outbound_delivery_id,
+                                self._clock.now(),
+                                error="live_delivery_failed",
+                                retry_at=self._clock.now()
+                                + timedelta(
+                                    seconds=self._config.send_retry_delay_seconds
+                                ),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "mark outbound retryable failed",
+                                exc_info=True,
+                            )
+
+            # Optional interactive presentation (AI-chosen). Opaque ids
+            # only; one button per row; callback_data carries the opaque
+            # id (well under Telegram's 64-byte callback_data limit).
+            if (
+                turn_result.interactive is not None
+                and self._telegram_client is not None
+                and not turn_result.duplicate
+            ):
+                await self._issue_interactive(
+                    wax_id=wax_id,
+                    recipient=recipient,
+                    suggestion=turn_result.interactive,
+                    tutor_entry_id=turn_result.tutor_entry.id
+                    if turn_result.tutor_entry
+                    else None,
+                    outbound_delivery_id=turn_result.outbound_delivery_id,
+                    body_delivered=delivery_ok,
+                )
 
             logger.info(
                 "turn processing completed",
@@ -578,14 +752,59 @@ class TelegramInboundHandler:
                 error=f"processing_failed: {type(exc).__name__}",
             )
 
-    def _create_draft_sink(
-        self, client: TelegramClient, chat_id: str, draft_id: str
-    ) -> TextDeltaSink:
-        """Create a text delta sink that updates Telegram draft messages."""
+    def _callback_query_id(self, msg: NormalizedInbound) -> str:
+        """Extract the callback query id from a normalized button click."""
+        return str(msg.structured.get("callback_query_id") or "")
 
-        async def sink(text: str) -> None:
+    async def _answer_callback(
+        self, callback_query_id: str, text: str | None
+    ) -> None:
+        """Best-effort callback acknowledgement (never raises)."""
+        client = self._telegram_client
+        if client is None or not callback_query_id:
+            return
+        try:
+            await client.answer_callback_query(callback_query_id, text=text)
+        except Exception:
+            logger.debug("answer callback query failed", exc_info=True)
+
+    def _create_draft_sink(
+        self,
+        client: TelegramClient,
+        chat_id: str,
+        *,
+        draft_id: int,
+        min_interval_seconds: float,
+    ) -> TextDeltaSink:
+        """Create a delta sink that updates a native Telegram draft preview.
+
+        The sink ACCUMULATES display-safe text (the interactive-choices
+        trailer is filtered out and never shown in the preview), throttles
+        draft updates to ``min_interval_seconds`` (draft requests are real
+        API calls), and clamps the preview to the API's 4096-character
+        draft limit by showing the latest tail. Send failures never raise
+        into the model stream — the final ``sendMessage`` is authoritative.
+        """
+        marker_filter = ChoicesMarkerFilter()
+        parts: list[str] = []
+        last_sent: datetime | None = None
+
+        async def sink(delta: str) -> None:
+            nonlocal last_sent
+            safe = marker_filter.feed(delta)
+            if safe:
+                parts.append(safe)
+            text = "".join(parts)[-4096:]
             if not text.strip():
                 return
+            now = self._clock.now()
+            if (
+                last_sent is not None
+                and min_interval_seconds > 0
+                and (now - last_sent).total_seconds() < min_interval_seconds
+            ):
+                return
+            last_sent = now
             result = await client.send_message_draft(
                 chat_id=chat_id,
                 text=text,
@@ -601,6 +820,150 @@ class TelegramInboundHandler:
                 self._streaming_counters.record_delta_success()
 
         return sink
+
+    async def _send_final_text(
+        self,
+        wax_id: WaxId,
+        recipient: str,
+        text: str,
+    ) -> str | None:
+        """Send the authoritative answer as complete Telegram messages.
+
+        Splits only at the platform transport limit, sends every piece in
+        order, and returns the LAST provider message id on full success.
+        Returns None when any piece is rejected or raises — the caller then
+        leaves the outbound record retryable so the durable outbox re-sends
+        the stored reply (at-least-once, never silently dropped).
+        """
+        client = self._telegram_client
+        if client is None:
+            return None
+        from waxprep.channel.delivery import split_for_platform
+
+        last_provider_message_id: str | None = None
+        try:
+            for piece in split_for_platform(text, self._config.channel):
+                result = await client.send_text(
+                    OutboundPayload(
+                        channel=self._config.channel,
+                        wax_id=wax_id,
+                        recipient_external_id=recipient,
+                        text=piece,
+                    )
+                )
+                if not result.success:
+                    logger.warning(
+                        "final send rejected by platform; outbox will recover",
+                        extra={
+                            "error_code": result.error_code,
+                            "temporary": result.temporary_failure,
+                        },
+                    )
+                    return None
+                if result.provider_message_id:
+                    last_provider_message_id = result.provider_message_id
+        except Exception:
+            logger.warning(
+                "final send raised; outbox will recover", exc_info=True
+            )
+            return None
+        return last_provider_message_id
+
+    async def _issue_interactive(
+        self,
+        *,
+        wax_id: WaxId,
+        recipient: str,
+        suggestion: InteractiveSuggestion,
+        tutor_entry_id: UUID | None,
+        outbound_delivery_id: UUID | None,
+        body_delivered: bool,
+    ) -> None:
+        """Send optional inline-keyboard buttons and register a one-shot offer.
+
+        Opaque button ids only (well under Telegram's 64-byte
+        callback_data limit), one button per row. The interactive payload
+        is never an authorization fact: the stored one-shot
+        InteractiveOffer for this student authorizes the click. When the
+        body teaching was NOT delivered live (send failed or another
+        replica owns delivery), the outbound record is left alone so the
+        durable outbox still recovers the body.
+        """
+        client = self._telegram_client
+        if client is None or not suggestion.buttons:
+            return
+        now = self._clock.now()
+        issued: list[dict[str, str]] = []
+        for btn in suggestion.buttons[:3]:
+            title = (btn.title or "").strip()[:20]
+            if not title:
+                continue
+            issued.append({"id": str(uuid4()), "title": title})
+        if not issued:
+            return
+        body = (suggestion.body_text or "").strip() or "Choose a next step:"
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": btn["title"], "callback_data": btn["id"]}]
+                for btn in issued
+            ]
+        }
+        try:
+            result = await client.send_text(
+                OutboundPayload(
+                    channel=self._config.channel,
+                    wax_id=wax_id,
+                    recipient_external_id=recipient,
+                    text=body[:4096],
+                ),
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.debug("interactive send raised", exc_info=True)
+            return
+        if not result.success:
+            logger.info(
+                "interactive send failed; body teaching remains available",
+                extra={
+                    "wax_id": str(wax_id),
+                    "error_code": result.error_code,
+                    "temporary": result.temporary_failure,
+                },
+            )
+            return
+        try:
+            self._storage.create_interactive_offer(
+                InteractiveOffer(
+                    id=new_id(),
+                    wax_id=wax_id,
+                    tutor_entry_id=tutor_entry_id,
+                    provider_outbound_message_id=result.provider_message_id,
+                    buttons=tuple(issued),
+                    status=InteractiveOfferStatus.OPEN,
+                    created_at=now,
+                    updated_at=now,
+                    expires_at=now + timedelta(hours=48),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "failed to register interactive offer after successful send",
+                extra={"wax_id": str(wax_id)},
+            )
+        if outbound_delivery_id is not None and result.provider_message_id:
+            if not body_delivered:
+                # The body was not delivered live — leave the outbound
+                # record retryable so the outbox delivers the teaching.
+                return
+            try:
+                self._storage.mark_outbound_delivered(
+                    wax_id,
+                    outbound_delivery_id,
+                    now,
+                    provider_message_id=result.provider_message_id,
+                )
+            except Exception:
+                logger.debug("mark outbound after interactive failed", exc_info=True)
 
     async def _send_progressive_chunk(
         self, client: TelegramClient, chat_id: str, text: str
