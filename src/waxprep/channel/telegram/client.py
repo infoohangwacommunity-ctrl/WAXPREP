@@ -43,8 +43,17 @@ class TelegramClient:
             await self._client.aclose()
             self._client = None
 
-    async def send_text(self, payload: OutboundPayload) -> OutboundResult:
-        """Send a plain-text message (multi-message handled by caller)."""
+    async def send_text(
+        self,
+        payload: OutboundPayload,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> OutboundResult:
+        """Send a plain-text message (multi-message handled by caller).
+
+        ``reply_markup`` may carry an InlineKeyboardMarkup dict for
+        interactive next-step buttons (Bot API ``InlineKeyboardButton``).
+        """
         text = (payload.text or "").strip()
         if not text:
             return OutboundResult(
@@ -55,16 +64,16 @@ class TelegramClient:
                 error_detail="empty text",
             )
         client = await self._http()
+        body: dict[str, Any] = {
+            "chat_id": payload.recipient_external_id,
+            "text": text,
+            # Prefer plain text for tutoring clarity; HTML optional later.
+            "disable_web_page_preview": True,
+        }
+        if reply_markup is not None:
+            body["reply_markup"] = reply_markup
         try:
-            resp = await client.post(
-                self._url("sendMessage"),
-                json={
-                    "chat_id": payload.recipient_external_id,
-                    "text": text,
-                    # Prefer plain text for tutoring clarity; HTML optional later.
-                    "disable_web_page_preview": True,
-                },
-            )
+            resp = await client.post(self._url("sendMessage"), json=body)
             if resp.status_code == 429:
                 return OutboundResult(
                     success=False,
@@ -132,27 +141,52 @@ class TelegramClient:
         except Exception:
             logger.debug("telegram typing failed", exc_info=True)
 
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        *,
+        text: str | None = None,
+    ) -> None:
+        """Acknowledge a callback query (best-effort).
+
+        Telegram REQUIRES answering every callback query, ideally quickly:
+        until answered the client shows a loading spinner. Best-effort —
+        acknowledgement must never block or fail the student's turn.
+        """
+        client = await self._http()
+        body: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text is not None:
+            body["text"] = text[:200]
+        try:
+            await client.post(self._url("answerCallbackQuery"), json=body)
+        except Exception:
+            logger.debug("telegram answer_callback_query failed", exc_info=True)
+
     async def send_message_draft(
         self,
         *,
         chat_id: str,
         text: str,
-        draft_id: str,
+        draft_id: int,
         thread_id: int | None = None,
     ) -> OutboundResult:
         """Send or update a native live-draft message (Telegram Bot API
         ``sendMessageDraft``).
 
+        Per the official Bot API: ``draft_id`` must be a NON-ZERO INTEGER
+        identifying the draft; reusing the same id updates the existing
+        draft (animated preview), a different id creates a new one. The
+        draft is an ephemeral ~30-second preview in the chat and is NOT a
+        message — a permanent ``sendMessage`` must finalize the reply once
+        generation finishes. The API returns ``True`` and carries no
+        message id, so ``provider_message_id`` stays None on success.
+
+        Introduced in Bot API 9.3 (2025-12-31), opened to all bots in
+        Bot API 9.5 (2026-03-01); Bot API 10.0 allows empty text (show a
+        placeholder while the first tokens are pending).
+
         Blueprint §5: the same ``draft_id`` must be reused for updates
-        to the same response. A different ``draft_id`` creates a new
-        draft. The draft is temporary — it expires after ~30 seconds.
-        A permanent final message must be sent once generation finishes.
-
-        Verified: this method exists on the current Telegram Bot API
-        (tested 19 October 2026 against bot @Waxdavidesssaffbot).
-
-        The method returns an ``OutboundResult``; ``provider_message_id``
-        carries the draft's message ID if the API returns one.
+        to the same response.
         """
         client = await self._http()
         body: dict[str, Any] = {
@@ -217,7 +251,9 @@ class TelegramClient:
         client = await self._http()
         body: dict[str, Any] = {
             "url": url,
-            "allowed_updates": ["message"],
+            # callback_query updates MUST be requested explicitly, otherwise
+            # Telegram never delivers button clicks to this webhook.
+            "allowed_updates": ["message", "callback_query"],
             "drop_pending_updates": True,
         }
         if secret_token:
@@ -229,3 +265,4 @@ class TelegramClient:
         client = await self._http()
         resp = await client.get(self._url("getWebhookInfo"))
         return resp.json()
+
