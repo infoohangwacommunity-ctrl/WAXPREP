@@ -32,6 +32,7 @@ from waxprep.channel.contracts import (
     OutboundPayload,
 )
 from waxprep.channel.message_queue import MessageQueue, QueuedMessage
+from waxprep.channel.streaming.display import ChoicesMarkerFilter
 from waxprep.channel.whatsapp.progressive import ProgressiveWhatsAppDelivery
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
@@ -87,6 +88,18 @@ class WhatsAppInboundConfig:
     disabled_instruction: str = (
         "Your account is currently disabled. Please contact support."
     )
+    # Early flush: while the Teacher streams, the FIRST complete
+    # paragraph/sentence unit is delivered once this many display-safe
+    # characters exist, so the student starts seeing the answer within
+    # seconds. Subsequent units wait for ``steady_flush_chars`` so
+    # bubbles stay substantial. Infrastructure pacing constants (size),
+    # never educational rules.
+    early_flush_chars: int = 160
+    steady_flush_chars: int = 1200
+    # When a live send fails, the outbound record is left retryable and the
+    # durable outbox re-sends the stored authoritative reply after this
+    # delay (with exponential backoff on later attempts).
+    send_retry_delay_seconds: float = 2.0
 
 
 class WhatsAppInboundHandler:
@@ -480,14 +493,26 @@ class WhatsAppInboundHandler:
         batches; storage always keeps the exact original messages.
         """
         turn_text = text if text is not None else (msg.text or "")
+        recipient = msg.provider_sender_id
         # When a WhatsApp client is available, wire progressive delivery so
         # the student receives complete message chunks while the model streams.
         progressive: ProgressiveWhatsAppDelivery | None = None
         on_text_delta = None
         last_provider_message_id: str | None = None
+        marker_filter: ChoicesMarkerFilter | None = None
         if self._whatsapp_client is not None:
             client = self._whatsapp_client
-            recipient = msg.provider_sender_id
+
+            # Typing indicator at turn start (best-effort). Meta's Cloud API
+            # typing indicator requires the INBOUND message id; without one
+            # the call is a documented no-op. Auto-dismissed by the reply or
+            # after ~25 seconds.
+            try:
+                await client.send_typing(
+                    recipient, message_id=msg.provider_message_id
+                )
+            except Exception:
+                logger.debug("turn-start typing indicator failed", exc_info=True)
 
             async def _send_chunk(text: str) -> None:
                 nonlocal last_provider_message_id
@@ -503,14 +528,33 @@ class WhatsAppInboundHandler:
                     last_provider_message_id = result.provider_message_id
 
             async def _send_typing() -> None:
-                await client.send_typing(recipient)
+                await client.send_typing(
+                    recipient, message_id=msg.provider_message_id
+                )
 
             progressive = ProgressiveWhatsAppDelivery(
                 send_text=_send_chunk,
                 send_typing=_send_typing,
                 progressive=True,  # Enable progressive delivery
+                # Early flush: complete units leave within seconds instead
+                # of only once the platform soft limit is crossed; steady
+                # units stay substantial (see config).
+                early_flush_chars=self._config.early_flush_chars,
+                steady_flush_chars=self._config.steady_flush_chars,
             )
-            on_text_delta = progressive.on_delta
+
+            # Raw model deltas may contain the interactive-choices trailer,
+            # possibly split across deltas. It must never leak to display:
+            # filter it before progressive delivery sees anything. The
+            # completed reply is parsed by the Teacher itself.
+            marker_filter = ChoicesMarkerFilter()
+
+            async def _on_text_delta(delta: str) -> None:
+                safe = marker_filter.feed(delta)
+                if safe:
+                    await progressive.on_delta(safe)
+
+            on_text_delta = _on_text_delta
 
         try:
             turn_result: TurnResultCiFirst = (
@@ -545,8 +589,19 @@ class WhatsAppInboundHandler:
                     )
                     progressive = None
 
+            # Whether the body teaching was delivered live by THIS path.
+            # Gates outbound bookkeeping (and the interactive issue's mark):
+            # claim lost or failed send ⇒ the record stays retryable.
+            delivery_ok = False
+
             # Flush any remaining progressive buffer after the Teacher finishes.
-            if progressive is not None:
+            if progressive is not None and marker_filter is not None:
+                # Release whatever the marker filter still held at the very
+                # end of the stream (an incomplete marker prefix is ordinary
+                # text once the stream is known-complete).
+                held = marker_filter.flush()
+                if held:
+                    await progressive.on_delta(held)
                 try:
                     await progressive.finish()
                 except Exception:
@@ -565,52 +620,73 @@ class WhatsAppInboundHandler:
                 )
                 final_text = (authoritative or progressive.final_text).strip()
                 if final_text and progressive.progressive_chunks_sent == 0:
-                    # FINAL_ONLY (blueprint §6.1): send the complete
-                    # answer as one coherent final message.
-                    try:
-                        result = await client.send_text(
-                            OutboundPayload(
-                                channel=self._config.channel,
-                                wax_id=wax_id,
-                                recipient_external_id=recipient,
-                                text=final_text,
-                            )
-                        )
-                        if result.success and result.provider_message_id:
-                            last_provider_message_id = result.provider_message_id
-                    except Exception:
-                        logger.debug(
-                            "final-only delivery failed",
-                            exc_info=True,
-                        )
+                    # FINAL_ONLY (blueprint §6.1): send the complete answer
+                    # as one coherent message, split only at the platform
+                    # transport limit. Success is tracked per piece: the
+                    # outbound record is marked delivered ONLY when the
+                    # platform accepted the whole answer, otherwise it is
+                    # left retryable so the durable outbox recovers it.
+                    sent_id = await self._send_final_text(
+                        wax_id, recipient, final_text
+                    )
+                    delivery_ok = sent_id is not None
+                    if sent_id is not None:
+                        last_provider_message_id = sent_id
                 elif final_text:
                     # Progressive chunks were already delivered: flush the
                     # remaining complete units — the never-sent growing
                     # tail, or the whole authoritative answer when
-                    # streaming fell back mid-way.
+                    # streaming fell back mid-way. flush_final raises on a
+                    # failed send so the outbound record stays retryable.
                     try:
                         await progressive.flush_final(final_text)
+                        # The remaining units of the authoritative answer
+                        # were delivered: the live delivery IS the delivery.
+                        delivery_ok = True
                     except Exception:
-                        logger.debug(
-                            "progressive flush failed",
+                        logger.warning(
+                            "progressive flush failed; outbox will recover",
                             exc_info=True,
                         )
-                # Mark the outbound record delivered so the outbox does
-                # not re-send the full text. The progressive delivery (or
-                # the final-only send above) IS the delivery.
-                if turn_result.outbound_delivery_id is not None and final_text:
-                    try:
-                        self._storage.mark_outbound_delivered(
-                            wax_id,
-                            turn_result.outbound_delivery_id,
-                            self._clock.now(),
-                            provider_message_id=last_provider_message_id,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "mark progressive outbound delivered failed",
-                            exc_info=True,
-                        )
+                        delivery_ok = False
+                if turn_result.outbound_delivery_id is not None:
+                    if delivery_ok:
+                        # Mark the outbound record delivered so the outbox
+                        # does not re-send the full text. The live delivery
+                        # IS the delivery.
+                        try:
+                            self._storage.mark_outbound_delivered(
+                                wax_id,
+                                turn_result.outbound_delivery_id,
+                                self._clock.now(),
+                                provider_message_id=last_provider_message_id,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "mark progressive outbound delivered failed",
+                                exc_info=True,
+                            )
+                    else:
+                        # A live send failed. Leave the outbound record
+                        # retryable: the durable outbox re-sends the stored
+                        # authoritative reply after a short delay (with
+                        # backoff), so the reply is never silently dropped.
+                        try:
+                            self._storage.mark_outbound_failed(
+                                wax_id,
+                                turn_result.outbound_delivery_id,
+                                self._clock.now(),
+                                error="live_delivery_failed",
+                                retry_at=self._clock.now()
+                                + timedelta(
+                                    seconds=self._config.send_retry_delay_seconds
+                                ),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "mark outbound retryable failed",
+                                exc_info=True,
+                            )
 
             # Optional interactive presentation (AI-chosen). Opaque ids only.
             if (
@@ -626,6 +702,7 @@ class WhatsAppInboundHandler:
                     if turn_result.tutor_entry
                     else None,
                     outbound_delivery_id=turn_result.outbound_delivery_id,
+                    body_delivered=delivery_ok,
                 )
 
             logger.info(
@@ -705,6 +782,54 @@ class WhatsAppInboundHandler:
                 error=f"processing_failed: {type(exc).__name__}",
             )
 
+    async def _send_final_text(
+        self,
+        wax_id: WaxId,
+        recipient: str,
+        text: str,
+    ) -> str | None:
+        """Send the authoritative answer as complete WhatsApp messages.
+
+        Splits only at the platform transport limit, sends every piece in
+        order, and returns the LAST provider message id on full success.
+        Returns None when any piece is rejected or raises — the caller then
+        leaves the outbound record retryable so the durable outbox re-sends
+        the stored reply (at-least-once, never silently dropped).
+        """
+        client = self._whatsapp_client
+        if client is None:
+            return None
+        from waxprep.channel.delivery import split_for_platform
+
+        last_provider_message_id: str | None = None
+        try:
+            for piece in split_for_platform(text, self._config.channel):
+                result = await client.send_text(
+                    OutboundPayload(
+                        channel=self._config.channel,
+                        wax_id=wax_id,
+                        recipient_external_id=recipient,
+                        text=piece,
+                    )
+                )
+                if not result.success:
+                    logger.warning(
+                        "final send rejected by platform; outbox will recover",
+                        extra={
+                            "error_code": result.error_code,
+                            "temporary": result.temporary_failure,
+                        },
+                    )
+                    return None
+                if result.provider_message_id:
+                    last_provider_message_id = result.provider_message_id
+        except Exception:
+            logger.warning(
+                "final send raised; outbox will recover", exc_info=True
+            )
+            return None
+        return last_provider_message_id
+
     async def _issue_interactive(
         self,
         *,
@@ -713,12 +838,15 @@ class WhatsAppInboundHandler:
         suggestion: InteractiveSuggestion,
         tutor_entry_id: UUID | None,
         outbound_delivery_id: UUID | None,
+        body_delivered: bool,
     ) -> None:
         """Send optional reply buttons and register a one-shot offer.
 
         Opaque button ids only. On WhatsApp rejection (e.g. outside 24h
         window), fall back silently — body teaching was already delivered
-        via progressive or will be delivered by the outbox.
+        via progressive or will be delivered by the outbox. When the body
+        was NOT delivered live, the outbound record is left alone so the
+        durable outbox still recovers the teaching.
         """
         client = self._whatsapp_client
         if client is None or not suggestion.buttons:
@@ -772,6 +900,10 @@ class WhatsAppInboundHandler:
                 extra={"wax_id": str(wax_id)},
             )
         if outbound_delivery_id is not None and result.provider_message_id:
+            if not body_delivered:
+                # The body was not delivered live — leave the outbound
+                # record retryable so the outbox delivers the teaching.
+                return
             try:
                 self._storage.mark_outbound_delivered(
                     wax_id,
