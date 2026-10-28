@@ -102,7 +102,8 @@ async def test_telegram_native_draft_streaming_to_real_chat() -> None:
     from waxprep.channel.telegram.client import TelegramClient
 
     client = TelegramClient(bot_token=_TELEGRAM_BOT_TOKEN)
-    draft_id = str(uuid4())
+    # draft_id MUST be a non-zero integer per the Bot API.
+    draft_id = uuid4().int & ((1 << 62) - 1) | 1
     try:
         # Send initial draft.
         result1 = await client.send_message_draft(

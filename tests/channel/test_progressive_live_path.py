@@ -53,7 +53,12 @@ class FakeWhatsAppClient:
             temporary_failure=False,
         )
 
-    async def send_typing(self, recipient_external_id: str) -> None:
+    async def send_typing(
+        self,
+        recipient_external_id: str,
+        *,
+        message_id: str | None = None,
+    ) -> None:
         self.typing_calls += 1
 
 

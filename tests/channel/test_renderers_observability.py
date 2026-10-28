@@ -186,11 +186,16 @@ def test_plain_renderer_preserves_paragraphs() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_whatsapp_capabilities_no_typing_indicator() -> None:
-    """WhatsApp Cloud API does NOT support a verified typing indicator.
-    The capability must NOT be reported as available (blueprint §6.4)."""
+def test_whatsapp_capabilities_has_typing_indicator() -> None:
+    """WhatsApp Cloud API supports a verified typing indicator.
+
+    Meta documents a typing indicator for the Cloud API: mark the
+    student's inbound message as read together with a typing_indicator
+    object; dismissed by the reply or after ~25 seconds. The capability
+    is reported as available; the handler sends it best-effort.
+    """
     caps = whatsapp_capabilities()
-    assert not caps.has(ChannelCapability.TYPING_INDICATOR)
+    assert caps.has(ChannelCapability.TYPING_INDICATOR)
     assert caps.has(ChannelCapability.COMPLETE_MESSAGE_SEND)
     assert caps.has(ChannelCapability.SUPPORTS_FINAL_PERSISTENT_MESSAGE)
     assert not caps.has(ChannelCapability.NATIVE_TEXT_DRAFT_UPDATES)
@@ -207,21 +212,26 @@ def test_telegram_capabilities_has_native_drafts() -> None:
 
 def test_capability_drives_strategy_selection() -> None:
     """The coordinator selects a strategy from the declared capabilities.
-    WhatsApp → FINAL_ONLY; Telegram → NATIVE_DRAFT."""
+
+    WhatsApp → TYPING_PLUS_FINAL (typing indicator, no native drafts —
+    progressive complete-message delivery runs in the handler, not the
+    coordinator); Telegram → NATIVE_DRAFT."""
     from waxprep.channel.streaming.coordinator import StreamingCoordinator
     from waxprep.channel.streaming.pacing import (
         TELEGRAM_DRAFT_DEFAULT,
         WHATSAPP_DEFAULT,
     )
 
-    # WhatsApp → FINAL_ONLY
+    # WhatsApp → TYPING_PLUS_FINAL (typing indicator, no native drafts)
     whatsapp_coord = StreamingCoordinator(
         accumulator=AnswerAccumulator(),
         capabilities=whatsapp_capabilities(),
         pacing=WHATSAPP_DEFAULT,
         send_update=lambda text: asyncio.sleep(0, result=None),
     )
-    assert whatsapp_coord.strategy is DeliveryStrategy.FINAL_ONLY
+    assert (
+        whatsapp_coord.strategy is DeliveryStrategy.TYPING_PLUS_FINAL
+    )
 
     # Telegram → NATIVE_DRAFT
     telegram_coord = StreamingCoordinator(
