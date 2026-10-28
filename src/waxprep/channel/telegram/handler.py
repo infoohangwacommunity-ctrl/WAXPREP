@@ -289,9 +289,7 @@ class TelegramInboundHandler:
                     needs_linking=False,
                     error="interactive_click_malformed",
                 )
-            offer = self._storage.find_interactive_offer_by_button_id(
-                wax_id, button_id
-            )
+            offer = self._storage.find_interactive_offer_by_button_id(wax_id, button_id)
             if offer is None:
                 logger.info(
                     "stale or unknown interactive click rejected",
@@ -617,9 +615,7 @@ class TelegramInboundHandler:
                 # outbox recovers it (never silently dropped).
                 delivery_ok = False
                 if self._telegram_client is not None:
-                    sent_id = await self._send_final_text(
-                        wax_id, recipient, final_text
-                    )
+                    sent_id = await self._send_final_text(wax_id, recipient, final_text)
                     delivery_ok = sent_id is not None
                     if sent_id is not None:
                         last_provider_message_id = sent_id
@@ -756,9 +752,7 @@ class TelegramInboundHandler:
         """Extract the callback query id from a normalized button click."""
         return str(msg.structured.get("callback_query_id") or "")
 
-    async def _answer_callback(
-        self, callback_query_id: str, text: str | None
-    ) -> None:
+    async def _answer_callback(self, callback_query_id: str, text: str | None) -> None:
         """Best-effort callback acknowledgement (never raises)."""
         client = self._telegram_client
         if client is None or not callback_query_id:
@@ -863,9 +857,7 @@ class TelegramInboundHandler:
                 if result.provider_message_id:
                     last_provider_message_id = result.provider_message_id
         except Exception:
-            logger.warning(
-                "final send raised; outbox will recover", exc_info=True
-            )
+            logger.warning("final send raised; outbox will recover", exc_info=True)
             return None
         return last_provider_message_id
 
@@ -904,8 +896,7 @@ class TelegramInboundHandler:
         body = (suggestion.body_text or "").strip() or "Choose a next step:"
         keyboard = {
             "inline_keyboard": [
-                [{"text": btn["title"], "callback_data": btn["id"]}]
-                for btn in issued
+                [{"text": btn["title"], "callback_data": btn["id"]}] for btn in issued
             ]
         }
         try:
