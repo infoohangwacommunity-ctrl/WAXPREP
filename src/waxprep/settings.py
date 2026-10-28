@@ -110,7 +110,7 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
             name
             for name, val in (
                 ("WHATSAPP_TOKEN", settings.whatsapp_token),
-                ("WHATSAPP_PHONE_NUMBER_ID", settings.whatsapp_phone_number_id"),
+                ("WHATSAPP_PHONE_NUMBER_ID", settings.whatsapp_phone_number_id),
                 ("WHATSAPP_APP_SECRET", settings.whatsapp_app_secret),
                 ("WHATSAPP_VERIFY_TOKEN", settings.whatsapp_verify_token),
             )
