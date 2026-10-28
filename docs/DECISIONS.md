@@ -312,3 +312,66 @@ This closes the gap left by removing the fixed recent-turn window: without
 it, continuity was *possible* but not *guaranteed*, which is the
 case-file feeling the architecture exists to escape. The exchange now
 arrives through the intelligence, not around it.
+
+## D042 — A streamed reply is final only on a completion event
+
+**Status:** Accepted
+
+The Teacher streams progressively, but the streamed text is accepted as the
+final answer only when the provider emits a completion event. A stream that
+ends without one, or yields no usable text, falls back to a single complete
+call for the authoritative answer. A partial fragment is never persisted or
+delivered as the tutor's reply (live incident: truncated replies were saved
+mid-sentence).
+
+## D043 — Turn assembly: resettable quiet period, hard deadline, semantic grouping
+
+**Status:** Accepted
+
+Each student has one turn at a time (strict FIFO). Rapid messages are
+collected by a quiet period that resets on each arrival, bounded by a hard
+collection deadline from the first pending message. A small grouping model
+under its own logical role classifies late arrivals (continuation vs new
+request); there are no keyword rules, any grouper failure or timeout falls
+back to the time window, and grouping can be disabled entirely. Every
+message is saved individually at arrival; only the tutor turn is assembled.
+
+## D044 — Notes of time: per-stage latency events
+
+**Status:** Accepted
+
+Every turn records a `turn_latency` event with stage timings (CI seconds,
+seconds to first streamed delta, first visible, reply saved, end-to-end).
+Marks are forward-only and idempotent, and the recorder never raises:
+latency notes can never break a turn.
+
+## D045 — Judge guidance is advice about tutoring, delivered into the Teacher input
+
+**Status:** Accepted
+
+The Quality Judge assesses context review and delivery with separate bounded
+targets. Accepted guidance is stored as an ACTIVE notebook payload and
+delivered into the Teacher's input on every turn, with confidence and
+freshness. Guidance text lives only in the encrypted notebook payload —
+never in event metadata — and is rendered to the Teacher as advice about its
+own teaching, never a fact about the student and never a command.
+
+## D046 — The embedding provider is optional and honest
+
+**Status:** Accepted
+
+Semantic retrieval is enabled only when both `WAXPREP_EMBEDDING_API_KEY`
+and `WAXPREP_EMBEDDING_MODEL` are set (OpenAI-compatible provider);
+a half-set configuration fails loudly at startup. Unset means lexical-only
+retrieval, reported honestly by the meaning-search tool rather than
+pretending semantic search succeeded.
+
+## D047 — CI may batch independent lookups
+
+**Status:** Accepted
+
+Context Intelligence may select several *independent* lookups in one
+decision (primary action plus an `actions` list, or several native tool
+calls). The runtime executes them concurrently with per-call budget
+accounting, audit lines, and failure reporting. A call whose arguments
+depend on another call's result stays in a later decision.

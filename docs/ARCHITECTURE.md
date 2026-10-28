@@ -19,6 +19,11 @@ Student message arrives
 Save the exact student message (atomic with index jobs)
   |
   v
+Per-student queue collects rapid messages into one turn
+(resettable quiet period + hard collection deadline + optional semantic
+ grouping; every message is saved individually at arrival)
+  |
+  v
 Context Intelligence runs — mandatory, every non-empty message
   |
   v
@@ -28,11 +33,14 @@ CI produces a ContextPackage (evidence + synthesis + uncertainty + status)
 Teacher receives: original student message + ContextPackage
   |
   v
-Teacher produces the final educational response
+Teacher streams the final educational response progressively
+(accepted as final only when the provider completes the stream;
+ a cut-off stream falls back to one complete call)
   |
   v
 Save exactly one tutor reply (linked to the student entry) + outbound delivery
 record (outbox), atomically. A crash between them is repaired on the next retry.
+A turn_latency event records the per-stage timings.
   |
   v
 Channel adapter delivers; on crash, retry sends the same stored reply.
@@ -285,6 +293,73 @@ Candidate generation and ranking are **separate concepts**:
 - Ranking happens before the final evidence limit.
 - The design is replaceable: a real vector index (pgvector, dedicated
   service) can later be introduced without changing the memory architecture.
+
+### Semantic retrieval is optional and honest
+
+`find_by_meaning` needs an embedding provider. Production wires an
+OpenAI-compatible one (`HttpEmbeddingProvider`) only when
+`WAXPREP_EMBEDDING_API_KEY` and `WAXPREP_EMBEDDING_MODEL` are both set;
+without them the system is lexical-only and the meaning-search tool says so
+instead of pretending semantic search succeeded. When configured, the
+background worker also schedules embedding jobs for new entries.
+
+### Batched independent lookups
+
+CI may select several *independent* lookups in one decision (the primary
+`action` plus an `actions` list, or several native tool calls). The runtime
+executes them concurrently and keeps per-call budget accounting, audit
+lines, and failure reporting. A call whose arguments depend on another
+call's result stays in a later decision — the model is told never to batch
+dependent calls.
+
+## Turn assembly (per-student queue)
+
+Each student has one turn at a time, strict FIFO. Rapid messages are
+collected into a single turn:
+
+- a **resettable quiet period** — each new arrival restarts the window —
+  bounded by a **hard collection deadline** from the first pending message
+  (default 12s) so collection always ends;
+- **semantic grouping** (opt-in via `WAXPREP_QUEUE_SEMANTIC`, default on):
+  a small model under the logical `grouping` role classifies an arrival as
+  a continuation (join the open turn) or a new request (split). There are
+  no keyword rules; any grouper failure or timeout falls back to the time
+  window, and the queue works with grouping disabled entirely.
+
+Every message is saved to history individually as it arrives; only the
+tutor turn is assembled.
+
+## Streaming and the truncation guard
+
+The Teacher streams its reply to the channel progressively (early flush,
+typing indicators) so the student sees text quickly. The streamed text is
+accepted as the final answer **only when the provider emits a completion
+event**. A stream that ends without one (connection cut mid-sentence,
+provider error) or yields no usable text falls back to a single complete
+call for the authoritative answer. A partial fragment is therefore never
+persisted as the tutor's reply (live incident: truncated replies were
+saved and delivered mid-sentence; the guard closes that path).
+
+## Per-turn latency notes
+
+Every turn records a `turn_latency` event through the storage layer with
+stage timings: CI seconds, seconds to the first streamed delta, first
+visible text, reply saved, and end-to-end (queue-received to
+turn-completed). Latency marks are forward-only and idempotent — a stage
+records the first time it happens. The recorder never raises: latency
+notes can never break a turn.
+
+## Quality Judge
+
+A judge model under its own logical role periodically assesses the
+tutoring for a student with **separate bounded targets** (context review
+and delivery review, each capped in characters). Accepted guidance is
+stored as an ACTIVE notebook payload and delivered into the next turns'
+Teacher input with its confidence and freshness. Guidance text lives only
+in the encrypted notebook payload — never in event metadata — and the
+Teacher is told it is advice about its own teaching, not a fact about the
+student and not a command.
+
 
 ## Outbound delivery (outbox)
 

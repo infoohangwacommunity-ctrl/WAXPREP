@@ -11,6 +11,15 @@ Each row states what is **already implemented**, what is **partial**, and what
 is **genuinely missing**. Evidence is the file path + line range; "partial"
 means the file exists but does not cover the full workstream contract.
 
+> **Addendum (28 October 2026, post-blueprint hardening):** this audit
+> reflects the repository as of 19 October 2026. Later work added turn
+> assembly with semantic grouping, per-stage `turn_latency` events, the
+> streamed-reply truncation guard, judge guidance delivery into the
+> Teacher input, optional embedding-provider wiring, and CI batched
+> (concurrent) independent lookups — investigator line numbers cited
+> below predate the batching refactor. See docs/ARCHITECTURE.md and
+> docs/DECISIONS.md D042–D047 for current behaviour.
+
 ---
 
 ## §3 Preserve the existing architecture
