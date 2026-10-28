@@ -342,6 +342,7 @@ async def test_whatsapp_delivery_success_marks_outbound_delivered():
         _wa_inbound(wax_id, world.clock.now(), "Explain gravity simply.")
     )
     assert result.accepted
+    assert result.student_entry_id is not None
     tutor = world.storage.find_tutor_reply_to(wax_id, result.student_entry_id)
     assert tutor is not None
     outbound = world.storage.get_outbound_delivery_for_tutor(
