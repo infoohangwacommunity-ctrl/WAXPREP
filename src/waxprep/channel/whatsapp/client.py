@@ -229,23 +229,51 @@ class WhatsAppClient:
             if close:
                 await client.aclose()
 
-    async def send_typing(self, recipient_external_id: str) -> None:
+    async def send_typing(
+        self,
+        recipient_external_id: str,
+        *,
+        message_id: str | None = None,
+    ) -> None:
         """Best-effort typing indicator via WhatsApp Cloud API.
 
-        Blueprint §6.4: the previous implementation sent a "read" status
-        with a fabricated ``message_id="typing-placeholder"`` and called it
-        a typing indicator. A read receipt and a typing signal are different
-        concepts. The fabricated placeholder has been removed.
+        Meta documents a typing indicator for the Cloud API: mark the
+        student's inbound message as read and display a typing indicator
+        by POSTing to the messages endpoint with ``status: "read"``, the
+        INBOUND message id, and a ``typing_indicator`` object. The
+        indicator is dismissed when the reply arrives or after 25
+        seconds, whichever comes first.
 
-        WhatsApp Cloud API does not currently document a general-purpose
-        typing indicator for the Cloud API integration. If a supported
-        typing mechanism is identified and verified, it should be implemented
-        here and the capability reported via ``ChannelCapabilities``. Until
-        then, this method is a documented no-op — it does not fabricate a
-        request.
+        The inbound ``message_id`` is required by the API; without it no
+        request is made (there is nothing to mark as read) and the call
+        is a documented no-op.
         """
-        # No-op: WhatsApp Cloud API does not support a verified typing
-        # indicator for this integration. Do not send a fabricated
-        # placeholder message_id. The capability is reported as
-        # unavailable via ChannelCapabilities.
-        return
+        if not message_id:
+            logger.debug(
+                "typing indicator skipped: no inbound message id available"
+            )
+            return
+        body: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+            "typing_indicator": {"type": "text"},
+        }
+        close = False
+        client = self._client
+        if client is None:
+            client = httpx.AsyncClient(timeout=10.0)
+            close = True
+        try:
+            await client.post(
+                f"{self._base}/{self._phone_number_id}/messages",
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json=body,
+            )
+        except Exception:
+            logger.debug("typing indicator failed", exc_info=True)
+        finally:
+            if close:
+                await client.aclose()
+
+
