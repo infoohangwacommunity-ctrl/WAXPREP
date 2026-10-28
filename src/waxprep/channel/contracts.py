@@ -24,6 +24,13 @@ CONTENT_KIND_INTERACTIVE_BUTTON = "interactive_button"
 CONTENT_KIND_INTERACTIVE_LIST = "interactive_list"
 CONTENT_KIND_UNKNOWN = "unknown"
 
+# Optional interactive-choices trailer the Teacher may append to a reply
+# (``<<<choices>>>`` followed by up to three short next-step lines). The
+# channel layer parses it into tappable buttons and must never display the
+# marker itself. Shared here so the orchestration prompt and the streaming
+# display filter cannot drift apart.
+INTERACTIVE_CHOICES_MARKER = "<<<choices>>>"
+
 
 @dataclass(frozen=True, slots=True)
 class InboundAttachmentDescriptor:
