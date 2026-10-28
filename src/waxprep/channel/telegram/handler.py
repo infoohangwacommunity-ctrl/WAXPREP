@@ -208,8 +208,7 @@ class TelegramInboundHandler:
             if msg.content_kind == CONTENT_KIND_INTERACTIVE_BUTTON:
                 await self._answer_callback(
                     self._callback_query_id(msg),
-                    "Please link your Telegram account to your WAXPREP "
-                    "account first.",
+                    "Please link your Telegram account to your WAXPREP account first.",
                 )
             return InboundResult(
                 accepted=True,
