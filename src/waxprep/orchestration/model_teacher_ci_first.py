@@ -249,10 +249,11 @@ class ModelTeacherCiFirst:
             timeout_seconds=self._timeout_seconds,
             reasoning_effort=self._reasoning_effort,
         )
-        # Prefer streaming accumulation when the gateway/provider supports it.
-        # Final persisted text is always the complete answer — never a partial.
         # Prefer streaming accumulation when the provider advertises STREAMING.
-        # History always stores the final complete text only.
+        # The streamed text is accepted ONLY when the provider sent a
+        # completion event; anything less falls back to one complete call.
+        # History always stores the final complete text only — never a
+        # partial answer.
         from waxprep.channel.streaming.metrics import (
             record_streaming_attempt,
             record_streaming_fallback,
@@ -275,6 +276,7 @@ class ModelTeacherCiFirst:
 
         if use_streaming:
             chunks: list[str] = []
+            completed_cleanly = False
             try:
                 stream_request = replace(request, stream=True)
                 async for event in stream_fn(stream_request):  # type: ignore[attr-defined]
@@ -292,16 +294,29 @@ class ModelTeacherCiFirst:
                                     exc_info=True,
                                     extra={"wax_id": str(request.wax_id)},
                                 )
-                if chunks:
+                    elif getattr(event, "type", None) is StreamEventType.COMPLETED:
+                        completed_cleanly = True
+                    elif getattr(event, "type", None) is StreamEventType.ERROR:
+                        raise RuntimeError(
+                            f"stream error event: {event.error or 'unknown'}"
+                        )
+                if completed_cleanly and chunks:
                     # Record successful streaming
                     record_streaming_success(request.model)
                     return self._parse_reply("".join(chunks))
-                # The stream completed normally but produced zero usable
-                # text deltas. Never return an empty answer: fall back to
-                # a single complete call instead.
+                # The stream ended WITHOUT a completion event (connection
+                # cut mid-sentence, provider error event) or produced zero
+                # usable text deltas. A partial answer must NEVER be
+                # persisted as the final reply — live incident: truncated
+                # replies were saved and delivered mid-sentence. Fall back
+                # to one complete call for the authoritative answer.
                 logger.warning(
-                    "streaming produced no text deltas; falling back to complete",
-                    extra={"model": request.model, "wax_id": str(request.wax_id)},
+                    "stream ended without a completion event; falling back",
+                    extra={
+                        "model": request.model,
+                        "wax_id": str(request.wax_id),
+                        "partial_chars": len("".join(chunks)),
+                    },
                 )
                 use_streaming = False
             except UnsupportedCapabilityError:

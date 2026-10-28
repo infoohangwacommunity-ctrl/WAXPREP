@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -62,14 +63,14 @@ def parse_grouping_decision(text: str | None) -> GroupingDecision:
     """Parse the grouping model's answer leniently.
 
     The model is asked for one word (``join`` / ``new`` /
-    ``uncertain``). Real answers arrive padded, capitalised, or quoted;
-    a lenient word match keeps parsing robust. Anything unrecognised is
-    UNCERTAIN so the queue's time window decides — never a crash,
-    never a stall.
+    ``uncertain``). Real answers arrive padded, capitalised, quoted, or
+    with trailing punctuation; a lenient word match keeps parsing
+    robust. Anything unrecognised is UNCERTAIN so the queue's time
+    window decides — never a crash, never a stall.
     """
     if not text:
         return GroupingDecision.UNCERTAIN
-    words = set(text.strip().lower().replace("_", " ").split())
+    words = set(re.findall(r"[a-z]+", text.lower()))
     if "join" in words or "continue" in words or "same" in words:
         return GroupingDecision.JOIN
     if "new" in words:
@@ -211,7 +212,11 @@ class ModelSemanticGrouper:
             max_output_tokens=self._max_output_tokens,
             timeout_seconds=self._timeout_seconds,
         )
-        response = await self._gateway.complete(request)
+        try:
+            response = await self._gateway.complete(request)
+        except Exception:
+            logger.debug("grouping model call failed; uncertain", exc_info=True)
+            return GroupingDecision.UNCERTAIN
         return parse_grouping_decision(response.text)
 
 
@@ -369,9 +374,7 @@ class MessageQueue:
         self._set_phase(wax_id, TurnPhase.READY)
         return batch
 
-    async def _collect_batch(
-        self, wax_id: WaxId, queue: deque[QueuedMessage]
-    ) -> int:
+    async def _collect_batch(self, wax_id: WaxId, queue: deque[QueuedMessage]) -> int:
         """Collect one turn's batch: resettable quiet period + deadline.
 
         The quiet period re-arms on every arrival; the hard deadline
@@ -387,9 +390,7 @@ class MessageQueue:
         window = self._config.coalesce_window_seconds
         hard_cap = self._config.max_collection_seconds
         grouper = (
-            self._semantic_grouper
-            if self._config.semantic_grouping_enabled
-            else None
+            self._semantic_grouper if self._config.semantic_grouping_enabled else None
         )
         # The first pending message anchors the batch; classifications
         # start with the second arrival.
@@ -432,9 +433,7 @@ class MessageQueue:
             )
         except Exception:
             # The grouper is advisory; the time window decides.
-            logger.debug(
-                "semantic grouping failed; time window applies", exc_info=True
-            )
+            logger.debug("semantic grouping failed; time window applies", exc_info=True)
             return GroupingDecision.UNCERTAIN
 
     async def _run_batch(self, wax_id: WaxId, batch: list[QueuedMessage]) -> None:

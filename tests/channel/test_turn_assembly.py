@@ -150,9 +150,7 @@ async def test_new_request_splits_batch_and_arrival_opens_next_turn() -> None:
         worker_idle_timeout_seconds=1.0,
     )
     runner = _Runner()
-    queue = MessageQueue(
-        _clock(), config, turn_runner=runner, semantic_grouper=grouper
-    )
+    queue = MessageQueue(_clock(), config, turn_runner=runner, semantic_grouper=grouper)
     wax = new_wax_id()
     await _submit(queue, wax, "explain photosynthesis")
     await _submit(queue, wax, "actually, new question")
@@ -179,9 +177,7 @@ async def test_join_decision_keeps_collecting_into_one_turn() -> None:
         worker_idle_timeout_seconds=1.0,
     )
     runner = _Runner()
-    queue = MessageQueue(
-        _clock(), config, turn_runner=runner, semantic_grouper=grouper
-    )
+    queue = MessageQueue(_clock(), config, turn_runner=runner, semantic_grouper=grouper)
     wax = new_wax_id()
     await _submit(queue, wax, "part one")
     await _submit(queue, wax, "part two")
@@ -203,9 +199,7 @@ async def test_grouping_disabled_ignores_wired_grouper() -> None:
         worker_idle_timeout_seconds=1.0,
     )
     runner = _Runner()
-    queue = MessageQueue(
-        _clock(), config, turn_runner=runner, semantic_grouper=grouper
-    )
+    queue = MessageQueue(_clock(), config, turn_runner=runner, semantic_grouper=grouper)
     wax = new_wax_id()
     await _submit(queue, wax, "part one")
     await _submit(queue, wax, "part two")

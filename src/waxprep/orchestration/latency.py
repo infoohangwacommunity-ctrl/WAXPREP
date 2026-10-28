@@ -73,9 +73,13 @@ class TurnLatencyRecord:
 
     def seconds_between(self, start: str, end: str) -> float | None:
         try:
-            return self.marks[end] - self.marks[start]
+            seconds = self.marks[end] - self.marks[start]
         except KeyError:
             return None
+        # Notes are forward-looking. A reversed pair means the stages
+        # were not marked in order — that is a missing note, not a
+        # negative duration.
+        return seconds if seconds >= 0 else None
 
 
 class TurnLatencyRecorder:
