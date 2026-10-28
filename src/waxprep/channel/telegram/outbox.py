@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 
 from waxprep.channel.contracts import OutboundPayload
 from waxprep.channel.delivery import split_for_platform
 from waxprep.channel.telegram.client import TelegramClient
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
-from waxprep.domain.models import OutboundDelivery
+from waxprep.domain.models import OutboundDelivery, OutboundStatus
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,32 @@ class TelegramOutbox:
         return None
 
     async def _deliver(self, delivery: OutboundDelivery) -> None:
+        """Deliver one record with CAS claim, backoff, and at-least-once.
+
+        Mirrors the WhatsApp outbox contract: exactly one worker may claim
+        a pending record; temporary failures (timeouts, 429, 5xx) are
+        retried with exponential backoff up to max_attempts; permanent
+        failures are marked failed. The same stored reply text is sent on
+        every retry (no re-teaching).
+        """
         now = self._clock.now()
+        if delivery.status is OutboundStatus.DELIVERED:
+            return
+        if delivery.status is OutboundStatus.FAILED:
+            return
+
+        # Cross-replica CAS: only one outbox worker may send this delivery.
+        claimed = self._storage.claim_outbound_delivery(
+            delivery.wax_id, delivery.id, now
+        )
+        if claimed is None:
+            logger.info(
+                "outbound claim lost (already claimed or delivered)",
+                extra={"delivery_id": str(delivery.id)},
+            )
+            return
+        delivery = claimed
+
         identity = self._resolve_identity(delivery.wax_id)
         if identity is None:
             self._storage.mark_outbound_failed(
@@ -109,33 +135,84 @@ class TelegramOutbox:
             return
 
         last_mid = None
-        for chunk in split_for_platform(text, "telegram"):
-            result = await self._client.send_text(
-                OutboundPayload(
-                    channel="telegram",
-                    wax_id=delivery.wax_id,
-                    recipient_external_id=identity.external_id,
-                    text=chunk,
-                    tutor_entry_id=delivery.tutor_entry_id,
+        try:
+            for chunk in split_for_platform(text, self._config.channel):
+                result = await self._client.send_text(
+                    OutboundPayload(
+                        channel=self._config.channel,
+                        wax_id=delivery.wax_id,
+                        recipient_external_id=identity.external_id,
+                        text=chunk,
+                        tutor_entry_id=delivery.tutor_entry_id,
+                    )
                 )
+                if not result.success:
+                    self._record_failure(
+                        delivery,
+                        result.temporary_failure,
+                        result.error_detail
+                        or result.error_code
+                        or "send_failed",
+                    )
+                    return
+                last_mid = result.provider_message_id
+        except Exception as exc:
+            self._record_failure(
+                delivery, True, f"send_exception: {type(exc).__name__}"
             )
-            if not result.success:
-                self._storage.mark_outbound_failed(
-                    delivery.wax_id,
-                    delivery.id,
-                    now,
-                    error=result.error_detail or result.error_code or "send_failed",
-                    retry_at=None,
-                )
-                return
-            last_mid = result.provider_message_id
+            return
 
         self._storage.mark_outbound_delivered(
             delivery.wax_id,
             delivery.id,
-            now,
+            self._clock.now(),
             provider_message_id=last_mid,
         )
+
+    def _record_failure(
+        self,
+        delivery: OutboundDelivery,
+        temporary: bool,
+        error: str,
+    ) -> None:
+        """Mark a failed attempt: retryable backoff or permanent failure."""
+        now = self._clock.now()
+        if temporary and delivery.attempts < self._config.max_attempts:
+            next_attempt = delivery.attempts + 1
+            delay = self._config.base_delay_seconds * (
+                self._config.backoff_multiplier ** (next_attempt - 1)
+            )
+            delay = min(delay, self._config.max_delay_seconds)
+            self._storage.mark_outbound_failed(
+                delivery.wax_id,
+                delivery.id,
+                now,
+                error=error,
+                retry_at=now + timedelta(seconds=delay),
+            )
+            logger.info(
+                "telegram delivery temporary failure, will retry",
+                extra={
+                    "delivery_id": str(delivery.id),
+                    "attempt": next_attempt,
+                },
+            )
+        else:
+            self._storage.mark_outbound_failed(
+                delivery.wax_id,
+                delivery.id,
+                now,
+                error=error,
+                retry_at=None,
+            )
+            logger.warning(
+                "telegram delivery permanent failure",
+                extra={
+                    "delivery_id": str(delivery.id),
+                    "attempts": delivery.attempts,
+                    "error": error,
+                },
+            )
 
 
 __all__ = ["TelegramOutbox", "TelegramOutboxConfig"]

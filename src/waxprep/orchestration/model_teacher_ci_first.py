@@ -26,7 +26,11 @@ import logging
 from dataclasses import replace
 from uuid import UUID
 
-from waxprep.channel.contracts import InteractiveButtonSpec, InteractiveSuggestion
+from waxprep.channel.contracts import (
+    INTERACTIVE_CHOICES_MARKER,
+    InteractiveButtonSpec,
+    InteractiveSuggestion,
+)
 from waxprep.context.exchange import format_exchange
 from waxprep.context.models import ContextPackage
 from waxprep.model_gateway.gateway import ModelGateway
@@ -44,7 +48,7 @@ from waxprep.orchestration.contracts_ci_first import (
     TextDeltaSink,
 )
 
-_CHOICES_MARKER = "<<<choices>>>"
+_CHOICES_MARKER = INTERACTIVE_CHOICES_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +160,15 @@ You may optionally end with up to three short next-step choices after
 the marker <<<choices>>> — one per line, max 20 characters each.
 Only use choices when they genuinely help the student decide what to
 do next. Never rely on menus instead of teaching in the body text.
+When you do offer choices, they render as tappable buttons on the
+student's phone (each usable once). Example ending:
+
+<<<choices>>>
+Practice question
+Explain simpler
+Next topic
+
+Most replies should stay plain text with no choices at all.
 """.strip()
 
 

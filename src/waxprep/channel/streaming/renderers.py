@@ -242,9 +242,13 @@ def render_plain(text: str) -> RenderResult:
 def whatsapp_capabilities() -> ChannelCapabilities:
     """WhatsApp Cloud API capabilities as verified for this integration.
 
-    Blueprint §6.4: WhatsApp does NOT support a native typing indicator
-    for the Cloud API integration. The capability is reported as
-    unavailable — do not fabricate it.
+    Meta's Cloud API documents a typing indicator (mark the student's
+    inbound message as read with a ``typing_indicator`` object; it is
+    dismissed when the reply arrives or after ~25 seconds). The handler
+    sends it best-effort at turn start using the inbound message id.
+
+    WhatsApp has NO native live-draft API: streaming is delivered as
+    progressive complete messages (see whatsapp/progressive.py).
     """
     return ChannelCapabilities(
         channel="whatsapp",
@@ -252,6 +256,7 @@ def whatsapp_capabilities() -> ChannelCapabilities:
             {
                 ChannelCapability.COMPLETE_MESSAGE_SEND,
                 ChannelCapability.SUPPORTS_FINAL_PERSISTENT_MESSAGE,
+                ChannelCapability.TYPING_INDICATOR,
                 ChannelCapability.MESSAGE_RECEIPTS,
             }
         ),
@@ -263,9 +268,13 @@ def whatsapp_capabilities() -> ChannelCapabilities:
 def telegram_capabilities() -> ChannelCapabilities:
     """Telegram Bot API capabilities as verified for this integration.
 
-    Blueprint §5: sendMessageDraft and sendRichMessageDraft were verified
-    against the live Bot API on 19 October 2026. The bot is
-    @Waxdavidesssaffbot.
+    ``sendMessageDraft`` (native live-draft preview): introduced in Bot
+    API 9.3 (2025-12-31), opened to all bots in Bot API 9.5 (2026-03-01).
+    ``draft_id`` must be a non-zero integer; the preview is ephemeral
+    (~30 seconds) and must be finalized with ``sendMessage``.
+    ``sendChatAction`` provides the typing indicator; inline keyboards
+    provide interactive buttons with ``callback_query`` updates (1-64
+    byte callback_data, answered via ``answerCallbackQuery``).
     """
     return ChannelCapabilities(
         channel="telegram",
