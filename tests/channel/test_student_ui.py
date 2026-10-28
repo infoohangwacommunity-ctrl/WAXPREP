@@ -403,7 +403,7 @@ async def test_telegram_draft_sink_accumulates_with_integer_draft_id():
     assert len(client.drafts) == 3
     texts = [t for t, _ in client.drafts]
     assert texts[0] == "Tel"
-    assert texts[2] == "Tel egram accumulates the full text. "
+    assert texts[2] == "Telegram accumulates the full text. "
     # draft_id: non-zero integer, reused for updates to the same draft.
     ids = {i for _, i in client.drafts}
     assert len(ids) == 1
@@ -459,9 +459,7 @@ async def test_telegram_button_click_runs_turn_then_second_click_rejected():
         )
     )
 
-    result = await handler.handle_message(
-        _tg_callback(wax_id, now, button_id, "cbq-1")
-    )
+    result = await handler.handle_message(_tg_callback(wax_id, now, button_id, "cbq-1"))
     assert result.accepted
     assert result.error is None
     # The click became an ordinary student turn carrying the button title.

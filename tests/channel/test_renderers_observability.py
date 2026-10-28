@@ -229,9 +229,7 @@ def test_capability_drives_strategy_selection() -> None:
         pacing=WHATSAPP_DEFAULT,
         send_update=lambda text: asyncio.sleep(0, result=None),
     )
-    assert (
-        whatsapp_coord.strategy is DeliveryStrategy.TYPING_PLUS_FINAL
-    )
+    assert whatsapp_coord.strategy is DeliveryStrategy.TYPING_PLUS_FINAL
 
     # Telegram → NATIVE_DRAFT
     telegram_coord = StreamingCoordinator(
