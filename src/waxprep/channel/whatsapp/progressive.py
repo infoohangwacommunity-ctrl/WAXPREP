@@ -200,9 +200,7 @@ class ProgressiveWhatsAppDelivery:
 
         if self._early_flush_chars is not None:
             steady = self._steady_flush_chars or self._early_flush_chars
-            min_chars = (
-                self._early_flush_chars if self._sent_upto == 0 else steady
-            )
+            min_chars = self._early_flush_chars if self._sent_upto == 0 else steady
             await self._maybe_send_early(text, min_chars)
             return
 

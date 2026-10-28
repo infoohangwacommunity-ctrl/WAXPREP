@@ -150,9 +150,7 @@ class TelegramOutbox:
                     self._record_failure(
                         delivery,
                         result.temporary_failure,
-                        result.error_detail
-                        or result.error_code
-                        or "send_failed",
+                        result.error_detail or result.error_code or "send_failed",
                     )
                     return
                 last_mid = result.provider_message_id

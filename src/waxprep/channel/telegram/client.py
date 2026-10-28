@@ -265,4 +265,3 @@ class TelegramClient:
         client = await self._http()
         resp = await client.get(self._url("getWebhookInfo"))
         return resp.json()
-

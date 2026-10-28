@@ -249,9 +249,7 @@ class WhatsAppClient:
         is a documented no-op.
         """
         if not message_id:
-            logger.debug(
-                "typing indicator skipped: no inbound message id available"
-            )
+            logger.debug("typing indicator skipped: no inbound message id available")
             return
         body: dict[str, Any] = {
             "messaging_product": "whatsapp",
@@ -275,5 +273,3 @@ class WhatsAppClient:
         finally:
             if close:
                 await client.aclose()
-
-

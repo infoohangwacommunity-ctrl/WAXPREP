@@ -58,9 +58,7 @@ def _normalize_callback_query(
             occurred_at=occurred_at,
             text=None,
             content_kind=CONTENT_KIND_INTERACTIVE_BUTTON,
-            reply_to_provider_id=(
-                str(message_id) if message_id is not None else None
-            ),
+            reply_to_provider_id=(str(message_id) if message_id is not None else None),
             structured={
                 "button_id": str(data),
                 "callback_query_id": str(cq_id),
