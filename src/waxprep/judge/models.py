@@ -42,6 +42,7 @@ MAX_LIST_ITEMS = 4
 MAX_UNCERTAINTY_ITEMS = 4
 MAX_ITEM_CHARS = 200
 MAX_GUIDANCE_CHARS = 600
+MAX_TARGET_CHARS = 300
 
 
 class JudgeConfidence(StrEnum):
@@ -67,6 +68,12 @@ class TutorQualityAssessment:
     tutor_guidance: str
     uncertainty: tuple[str, ...]
     confidence: JudgeConfidence
+    # Separate evaluation targets (optional, bounded): what the window
+    # shows about Context Intelligence serving the exchange, and about
+    # the end-to-end delivery experience. Empty when the model or the
+    # window supports no judgment.
+    ci_review: str = ""
+    delivery_review: str = ""
 
     def to_notebook_payload(
         self,
@@ -94,6 +101,8 @@ class TutorQualityAssessment:
             "strengths": list(self.strengths),
             "focus_areas": list(self.focus_areas),
             "tutor_guidance": self.tutor_guidance,
+            "ci_review": self.ci_review,
+            "delivery_review": self.delivery_review,
             "window_turns": window_turns,
             "window_first_id": str(window_first_id),
             "window_last_id": str(window_last_id),
@@ -167,6 +176,14 @@ def parse_assessment(raw: object) -> TutorQualityAssessment:
         confidence = JudgeConfidence(str(confidence_raw))
     except ValueError:
         raise JudgeOutputError("confidence must be one of: low, medium, high") from None
+
+    def _target_text(value: object, what: str) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise JudgeOutputError(f"{what} must be text")
+        return value.strip()[:MAX_TARGET_CHARS]
+
     return TutorQualityAssessment(
         overall=overall,
         categories=categories,
@@ -175,6 +192,8 @@ def parse_assessment(raw: object) -> TutorQualityAssessment:
         tutor_guidance=guidance.strip()[:MAX_GUIDANCE_CHARS],
         uncertainty=uncertainty,
         confidence=confidence,
+        ci_review=_target_text(raw.get("ci_review"), "ci_review"),
+        delivery_review=_target_text(raw.get("delivery_review"), "delivery_review"),
     )
 
 
@@ -224,6 +243,23 @@ that is evidence about the tutoring, not a verdict on the student.
 - feedback_response: When the student signals confusion, correction, or
   frustration, does the tutor adjust?
 
+## Separate targets — two short reviews, judged only from what the
+## window shows
+
+- "ci_review": Evidence in the window that context was NOT serving the
+  exchange — the tutor visibly missing something the earlier turns
+  contain, repeating an introduction the student already received,
+  contradicting itself, or wrongly saying it lacks notes on something
+  the window shows it was told. This reviews Context Intelligence's
+  work, not the tutor's writing.
+- "delivery_review": Evidence of a poor end-to-end experience — replies
+  that arrive cut off mid-sentence, visibly repeated or duplicated
+  messages, or a student left waiting or confused by delivery. This
+  reviews the interaction the student actually experienced.
+
+Both reviews must cite what the window shows. When the window supports
+no judgment, use an empty string. Never speculate beyond the window.
+
 ## Output — JSON only, no markdown fences
 
 {
@@ -234,6 +270,8 @@ that is evidence about the tutoring, not a verdict on the student.
   "focus_areas": [<up to 4 short, actionable strings>],
   "tutor_guidance": "<one compact paragraph for the tutor of this student:
                      what to keep doing and what to change next>",
+  "ci_review": "<up to 300 characters, or empty string>",
+  "delivery_review": "<up to 300 characters, or empty string>",
   "uncertainty": [<up to 4 short strings: what the window could not
                    support>],
   "confidence": "low" | "medium" | "high"

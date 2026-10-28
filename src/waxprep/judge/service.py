@@ -55,6 +55,7 @@ from waxprep.judge.models import (
     parse_assessment,
     trend_label,
 )
+from waxprep.orchestration.contracts_ci_first import TutorGuidance
 from waxprep.storage.protocol import Storage
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,54 @@ class QualityJudgeService:
             )
         )
         return True
+
+    def current_tutor_guidance(self, wax_id: WaxId) -> TutorGuidance | None:
+        """The newest accepted tutor guidance for this student's tutor.
+
+        Reads the active assessment notebook entry directly — the same
+        compact encrypted record CI retrieves — so the current accepted
+        guidance reaches the Teacher on every turn, not only when CI
+        happens to select the entry. Fairness holds by construction:
+        low-confidence and rejected assessments never enter the
+        notebook, so they can never become guidance. The event stream
+        stays operational-only (no model text in event metadata).
+        Never raises: guidance is advisory and must never fail a turn.
+        """
+        try:
+            notebook = self._storage.get_notebook(wax_id)
+            if notebook is None:
+                return None
+            for entry in reversed(
+                self._storage.list_notebook_entries(wax_id, notebook.id)
+            ):
+                payload = entry.payload
+                if payload.get("kind") != NOTEBOOK_KIND:
+                    continue
+                if entry.status.value != "active":
+                    continue
+                text = payload.get("tutor_guidance")
+                if not isinstance(text, str) or not text.strip():
+                    return None
+                return TutorGuidance(
+                    text=text.strip(),
+                    confidence=str(payload.get("confidence") or "unknown"),
+                    assessed_at=self._assessed_at(payload, entry.created_at),
+                    source=EVENT_SOURCE,
+                )
+        except Exception:
+            logger.warning("tutor guidance lookup failed", exc_info=True)
+        return None
+
+    @staticmethod
+    def _assessed_at(payload: Mapping[str, Any], fallback: datetime) -> datetime:
+        """When the assessment was made (payload ``as_of``), or a fallback."""
+        raw = payload.get("as_of")
+        if isinstance(raw, str):
+            try:
+                return datetime.fromisoformat(raw)
+            except ValueError:
+                return fallback
+        return fallback
 
     def _already_scheduled(self, wax_id: WaxId, window_end: UUID) -> bool:
         """True when a job for this exact window end is already queued.

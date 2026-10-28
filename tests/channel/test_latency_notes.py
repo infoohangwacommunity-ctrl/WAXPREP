@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
 import pytest
 
+from waxprep.domain.identifiers import new_wax_id
 from waxprep.orchestration.latency import (
     STAGE_CI_END,
     STAGE_CI_START,
@@ -22,7 +22,6 @@ from waxprep.orchestration.latency import (
     STAGE_REPLY_SAVED,
     STAGE_TEACHER_FIRST_DELTA,
     STAGE_TURN_END,
-    STAGE_TURN_START,
     TurnLatencyRecord,
     TurnLatencyRecorder,
 )
@@ -48,7 +47,7 @@ class _Clock:
 
 
 def test_mark_is_idempotent_first_write_wins() -> None:
-    record = TurnLatencyRecord(wax_id=uuid4(), channel="whatsapp")
+    record = TurnLatencyRecord(wax_id=new_wax_id(), channel="whatsapp")
     record.mark(STAGE_QUEUE_RECEIVED, when=2.0)
     record.mark(STAGE_QUEUE_RECEIVED, when=5.0)
     assert record.marks[STAGE_QUEUE_RECEIVED] == 2.0
@@ -56,7 +55,7 @@ def test_mark_is_idempotent_first_write_wins() -> None:
 
 
 def test_seconds_between_computes_deltas_and_missing_is_none() -> None:
-    record = TurnLatencyRecord(wax_id=uuid4())
+    record = TurnLatencyRecord(wax_id=new_wax_id())
     record.mark(STAGE_QUEUE_RECEIVED, when=1.0)
     record.mark(STAGE_REPLY_SAVED, when=9.5)
     assert record.seconds_between(STAGE_QUEUE_RECEIVED, STAGE_REPLY_SAVED) == 8.5
@@ -67,7 +66,7 @@ def test_seconds_between_computes_deltas_and_missing_is_none() -> None:
 def test_flush_appends_one_durable_event() -> None:
     storage = _Storage()
     recorder = TurnLatencyRecorder(storage, _Clock())  # type: ignore[arg-type]
-    wax_id = uuid4()
+    wax_id = new_wax_id()
     record = recorder.start(wax_id, channel="telegram")
     record.mark(STAGE_QUEUE_RECEIVED, when=1.0)
     recorder.flush(record)
@@ -86,7 +85,7 @@ def test_flush_appends_one_durable_event() -> None:
 def test_flush_populates_stage_deltas() -> None:
     storage = _Storage()
     recorder = TurnLatencyRecorder(storage, _Clock())  # type: ignore[arg-type]
-    record = recorder.start(uuid4(), channel="whatsapp")
+    record = recorder.start(new_wax_id(), channel="whatsapp", when=5.0)
     record.ci_steps = 4
     record.ci_tool_calls = 7
     record.mark(STAGE_CI_START, when=10.0)
@@ -94,18 +93,17 @@ def test_flush_populates_stage_deltas() -> None:
     record.mark(STAGE_TEACHER_FIRST_DELTA, when=14.0)
     record.mark(STAGE_FIRST_VISIBLE, when=14.5)
     record.mark(STAGE_REPLY_SAVED, when=16.0)
+    # Pre-mark the end so the whole record is deterministic.
+    record.mark(STAGE_TURN_END, when=20.0)
     recorder.flush(record)
     metadata = storage.events[0].metadata
     assert metadata["ci_steps"] == 4
     assert metadata["ci_tool_calls"] == 7
     assert metadata["ci_seconds"] == 3.0
-    turn_start = record.marks[STAGE_TURN_START]
-    assert metadata["seconds_to_first_delta"] == pytest.approx(14.0 - turn_start)
-    assert metadata["seconds_to_first_visible"] == pytest.approx(14.5 - turn_start)
-    assert metadata["seconds_to_reply_saved"] == pytest.approx(16.0 - turn_start)
-    assert metadata["seconds_end_to_end"] == pytest.approx(
-        record.marks[STAGE_TURN_END] - turn_start
-    )
+    assert metadata["seconds_to_first_delta"] == pytest.approx(14.0 - 5.0)
+    assert metadata["seconds_to_first_visible"] == pytest.approx(14.5 - 5.0)
+    assert metadata["seconds_to_reply_saved"] == pytest.approx(16.0 - 5.0)
+    assert metadata["seconds_end_to_end"] == pytest.approx(20.0 - 5.0)
 
 
 def test_flush_never_raises_on_storage_failure() -> None:
@@ -114,13 +112,13 @@ def test_flush_never_raises_on_storage_failure() -> None:
             raise RuntimeError("storage down")
 
     recorder = TurnLatencyRecorder(_Broken(), _Clock())  # type: ignore[arg-type]
-    record = recorder.start(uuid4())
+    record = recorder.start(new_wax_id())
     record.mark(STAGE_QUEUE_RECEIVED, when=1.0)
     recorder.flush(record)  # must not raise
 
 
 def test_flush_without_storage_is_noop() -> None:
     recorder = TurnLatencyRecorder(None, _Clock())
-    record = recorder.start(uuid4())
+    record = recorder.start(new_wax_id())
     record.mark(STAGE_QUEUE_RECEIVED, when=1.0)
     recorder.flush(record)  # must not raise

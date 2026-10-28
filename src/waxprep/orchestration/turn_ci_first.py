@@ -360,6 +360,11 @@ class TurnServiceCiFirst:
                 original_message=student_entry,
                 context_package=context_package,
                 now=now,
+                tutor_guidance=(
+                    self._judge.current_tutor_guidance(wax_id)
+                    if self._judge is not None
+                    else None
+                ),
             )
             outcome: TeacherOutcomeCiFirst = await self._teacher.teach(
                 teacher_input,

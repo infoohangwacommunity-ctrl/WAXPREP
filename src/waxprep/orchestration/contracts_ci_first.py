@@ -49,6 +49,22 @@ TextDeltaSink = Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
+class TutorGuidance:
+    """The judge's accepted guidance for the tutor of this student.
+
+    Meta-level guidance about the tutor's own recent teaching — never
+    a fact about the student (student facts travel through CI's
+    evidence selection). Bounded text, with provenance and freshness
+    recorded so the Teacher can weigh it, not obey it.
+    """
+
+    text: str
+    confidence: str
+    assessed_at: datetime
+    source: str = "quality_judge"
+
+
+@dataclass(frozen=True, slots=True)
 class TeacherInput:
     """Everything the Teacher receives in CI-first architecture.
 
@@ -56,6 +72,7 @@ class TeacherInput:
     - The exact student message (never rewritten)
     - A complete ContextPackage from CI
     - The current time
+    - Optionally, the judge's current accepted tutor guidance
 
     The Teacher does NOT receive a consultation capability because
     CI has already completed its investigation.
@@ -66,12 +83,19 @@ class TeacherInput:
     inside the ContextPackage when CI judges the Teacher needs it in
     order to be inside the exchange. The Teacher uses CI's findings, not
     a window of history it picked for itself.
+
+    Tutor guidance has a second, guaranteed path: the notebook keeps
+    the compact assessment for CI to retrieve, but retrieval is not
+    guaranteed on every turn — so the orchestration layer also hands
+    the current accepted guidance to the Teacher directly, bounded,
+    with its provenance and freshness.
     """
 
     wax_id: WaxId
     original_message: HistoryEntry
     context_package: ContextPackage
     now: datetime
+    tutor_guidance: TutorGuidance | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,4 +143,5 @@ __all__ = [
     "TeacherInput",
     "TeacherOutcome",
     "TextDeltaSink",
+    "TutorGuidance",
 ]

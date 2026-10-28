@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from waxprep.domain.identifiers import WaxId
 from waxprep.domain.models import Event, new_id
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ class TurnLatencyRecord:
     idempotent (the first wins) so hooks can fire speculatively.
     """
 
-    wax_id: UUID
+    wax_id: WaxId
     turn_id: UUID = field(default_factory=uuid4)
     channel: str | None = None
     trigger_entry_id: UUID | None = None
@@ -97,15 +98,17 @@ class TurnLatencyRecorder:
 
     def start(
         self,
-        wax_id: UUID,
+        wax_id: WaxId,
         *,
         channel: str | None = None,
         trigger_entry_id: UUID | None = None,
+        when: float | None = None,
     ) -> TurnLatencyRecord:
+        """Open one turn's record; ``when`` overrides the start mark (tests)."""
         record = TurnLatencyRecord(
             wax_id=wax_id, channel=channel, trigger_entry_id=trigger_entry_id
         )
-        record.mark(STAGE_TURN_START)
+        record.mark(STAGE_TURN_START, when=when)
         return record
 
     def flush(self, record: TurnLatencyRecord) -> None:
