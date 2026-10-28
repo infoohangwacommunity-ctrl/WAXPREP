@@ -508,9 +508,7 @@ class WhatsAppInboundHandler:
             # the call is a documented no-op. Auto-dismissed by the reply or
             # after ~25 seconds.
             try:
-                await client.send_typing(
-                    recipient, message_id=msg.provider_message_id
-                )
+                await client.send_typing(recipient, message_id=msg.provider_message_id)
             except Exception:
                 logger.debug("turn-start typing indicator failed", exc_info=True)
 
@@ -528,9 +526,7 @@ class WhatsAppInboundHandler:
                     last_provider_message_id = result.provider_message_id
 
             async def _send_typing() -> None:
-                await client.send_typing(
-                    recipient, message_id=msg.provider_message_id
-                )
+                await client.send_typing(recipient, message_id=msg.provider_message_id)
 
             progressive = ProgressiveWhatsAppDelivery(
                 send_text=_send_chunk,
@@ -626,9 +622,7 @@ class WhatsAppInboundHandler:
                     # outbound record is marked delivered ONLY when the
                     # platform accepted the whole answer, otherwise it is
                     # left retryable so the durable outbox recovers it.
-                    sent_id = await self._send_final_text(
-                        wax_id, recipient, final_text
-                    )
+                    sent_id = await self._send_final_text(wax_id, recipient, final_text)
                     delivery_ok = sent_id is not None
                     if sent_id is not None:
                         last_provider_message_id = sent_id
@@ -824,9 +818,7 @@ class WhatsAppInboundHandler:
                 if result.provider_message_id:
                     last_provider_message_id = result.provider_message_id
         except Exception:
-            logger.warning(
-                "final send raised; outbox will recover", exc_info=True
-            )
+            logger.warning("final send raised; outbox will recover", exc_info=True)
             return None
         return last_provider_message_id
 
