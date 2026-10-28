@@ -544,11 +544,15 @@ class WhatsAppInboundHandler:
             # filter it before progressive delivery sees anything. The
             # completed reply is parsed by the Teacher itself.
             marker_filter = ChoicesMarkerFilter()
+            # Bind the (non-None) delivery to a local: ``progressive`` is
+            # reassigned to None below when the outbox claim is lost, and
+            # the closure must not observe that reset while streaming.
+            delivery = progressive
 
             async def _on_text_delta(delta: str) -> None:
                 safe = marker_filter.feed(delta)
                 if safe:
-                    await progressive.on_delta(safe)
+                    await delivery.on_delta(safe)
 
             on_text_delta = _on_text_delta
 
