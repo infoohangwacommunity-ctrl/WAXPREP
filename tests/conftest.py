@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Iterator
 from typing import Any
@@ -88,3 +89,36 @@ def pytest_terminal_summary(
     extra = len(_UNRAISABLE_DETAILS) - _UNRAISABLE_SHOW
     if extra > 0:
         terminalreporter.write_line(f"UNRAISABLE DETAIL: ... {extra} more")
+    for line in _FAILURE_CONTEXTS[:_CONTEXT_MAX]:
+        terminalreporter.write_line("UNRAISABLE CONTEXT: " + line[:400])
+
+
+# When a test fails with an "unraisable exception warnings" group, the
+# full report (``longrepr``) carries the real sub-exception messages and
+# creation frames, but CI log tails only keep the short summary. Capture
+# the relevant lines here so the terminal summary (which CI does keep)
+# shows what actually leaked and where it was created.
+
+_FAILURE_CONTEXTS: list[str] = []
+_CONTEXT_MAX = 30
+_RELEVANT = re.compile(
+    r"(Error|Warning|coroutine|Task|event loop|async gen)", re.IGNORECASE
+)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: Any, call: Any) -> Any:
+    outcome = yield
+    report: Any = outcome.get_result()
+    if not report.failed:
+        return
+    text = str(report.longrepr)
+    if "unraisable" not in text.lower():
+        return
+    _FAILURE_CONTEXTS.append("FAILED " + item.nodeid)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not _RELEVANT.search(stripped):
+            continue
+        if len(_FAILURE_CONTEXTS) < _CONTEXT_MAX:
+            _FAILURE_CONTEXTS.append(stripped[:300])
