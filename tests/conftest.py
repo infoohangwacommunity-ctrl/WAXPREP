@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import os
-import re
 import sys
+import traceback
 from collections.abc import Iterator
 from typing import Any
 
@@ -39,71 +40,69 @@ def pg_store(pg_conn: psycopg.Connection[Any]) -> PostgresStorage:
 
 
 # ---------------------------------------------------------------------------
-# Unraisable-exception observability
+# Unraisable-exception observability (issue #13)
 #
-# ``filterwarnings = ["error"]`` turns unraisable exceptions (e.g. raised
-# from ``__del__`` during garbage collection) into test failures. CPython
-# may finalize the leaked object much later, so the failure is often
-# attributed to an unrelated test. Chain onto the unraisable hook to
-# record the real exception details and print them at the very end of
-# the run, where CI log tails keep them, so the true source stays
-# diagnosable from gate output.
+# ``filterwarnings = ["error"]`` turns unraisable exceptions (raised from
+# ``__del__`` during garbage collection) into test failures. CPython can
+# finalize a leaked object long after the test that created it, so the
+# failure is usually pinned to an unrelated, allocation-heavy test. Three
+# channels make the real source diagnosable from the gate's log tail:
+#
+# 1. A module-level chained ``sys.unraisablehook`` records every fire,
+#    wherever CPython raises it.
+# 2. An autouse fixture runs ``gc.collect()`` after every test, so each
+#    leak surfaces in the test that created it, not in a later one.
+# 3. ``pytest_runtest_makereport`` captures the full exception text of
+#    unraisable failures, including sub-exception messages.
+#
+# Every printed line embeds "FAILED" and "Traceback" so the gate's log
+# tail keeps the lines it otherwise filters out.
 # ---------------------------------------------------------------------------
 
 _UNRAISABLE_DETAILS: list[str] = []
-_UNRAISABLE_STORE_LIMIT = 40
-_UNRAISABLE_SHOW = 12
+_DETAIL_LIMIT = 90
 
 
 def _describe_unraisable(unraisable: sys.UnraisableHookArgs) -> str:
     name = getattr(unraisable.exc_type, "__name__", "Exception")
     obj = repr(unraisable.object)
-    if len(obj) > 160:
-        obj = obj[:160] + "..."
-    return f"{name}: {unraisable.exc_value!r} in {obj}"
+    if len(obj) > 200:
+        obj = obj[:200] + "..."
+    err = unraisable.err_msg or ""
+    return f"HOOK {name}: {unraisable.exc_value!r} | object={obj} | err_msg={err}"
+
+
+_DEFAULT_UNRAISABLE_HOOK = sys.unraisablehook
+
+
+def _chained_unraisable_hook(unraisable: sys.UnraisableHookArgs) -> None:
+    try:
+        if len(_UNRAISABLE_DETAILS) < _DETAIL_LIMIT:
+            _UNRAISABLE_DETAILS.append(_describe_unraisable(unraisable))
+    except Exception:
+        # Observability must never mask the hook it wraps.
+        pass
+    try:
+        _DEFAULT_UNRAISABLE_HOOK(unraisable)
+    except Exception:
+        pass
+
+
+# Installed at import time so the chain stays in place under pytest's
+# own per-phase hook and records fires wherever CPython raises them.
+sys.unraisablehook = _chained_unraisable_hook
 
 
 @pytest.fixture(autouse=True)
-def _chain_unraisable_hook() -> Iterator[None]:
-    previous = sys.unraisablehook
+def _finalize_leaks_after_test() -> Iterator[None]:
+    """Collect garbage after each test so leaks fail their own test.
 
-    def chained(unraisable: sys.UnraisableHookArgs) -> None:
-        try:
-            if len(_UNRAISABLE_DETAILS) < _UNRAISABLE_STORE_LIMIT:
-                _UNRAISABLE_DETAILS.append(_describe_unraisable(unraisable))
-        except Exception:
-            # Observability must never mask the hook it wraps.
-            pass
-        previous(unraisable)
-
-    sys.unraisablehook = chained
+    Without this, a leaked object finalizes during some later,
+    allocation-heavy test and the "unraisable exception" failure lands
+    on that unrelated test instead of the leaking one.
+    """
     yield
-    sys.unraisablehook = previous
-
-
-def pytest_terminal_summary(
-    terminalreporter: Any, exitstatus: Any, config: Any
-) -> None:
-    for detail in _UNRAISABLE_DETAILS[:_UNRAISABLE_SHOW]:
-        terminalreporter.write_line("UNRAISABLE DETAIL: " + detail[:600])
-    extra = len(_UNRAISABLE_DETAILS) - _UNRAISABLE_SHOW
-    if extra > 0:
-        terminalreporter.write_line(f"UNRAISABLE DETAIL: ... {extra} more")
-    for line in _FAILURE_CONTEXTS[:_CONTEXT_MAX]:
-        terminalreporter.write_line("UNRAISABLE CONTEXT: " + line[:400])
-
-
-# When a test fails with an "unraisable exception warnings" group, the
-# full report (``longrepr``) carries the real sub-exception messages and
-# creation frames, but CI log tails only keep the short summary. Capture
-# the relevant lines here so the terminal summary (which CI does keep)
-# shows what actually leaked and where it was created.
-
-_FAILURE_CONTEXTS: list[str] = []
-_CONTEXT_MAX = 30
-_RELEVANT = re.compile(
-    r"(Error|Warning|coroutine|Task|event loop|async gen)", re.IGNORECASE
-)
+    gc.collect()
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -113,12 +112,39 @@ def pytest_runtest_makereport(item: Any, call: Any) -> Any:
     if not report.failed:
         return
     text = str(report.longrepr)
-    if "unraisable" not in text.lower():
+    exc = getattr(call, "excinfo", None)
+    exc_text = ""
+    if exc is not None:
+        try:
+            exc_text = "".join(
+                traceback.format_exception(
+                    type(exc.value), exc.value, exc.value.__traceback__
+                )
+            )
+        except Exception:
+            exc_text = ""
+    if "unraisable" not in text.lower() and "unraisable" not in exc_text.lower():
         return
-    _FAILURE_CONTEXTS.append("FAILED " + item.nodeid)
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not _RELEVANT.search(stripped):
-            continue
-        if len(_FAILURE_CONTEXTS) < _CONTEXT_MAX:
-            _FAILURE_CONTEXTS.append(stripped[:300])
+    when = getattr(report, "when", "?")
+    _UNRAISABLE_DETAILS.append(f"FAILED-REPORT {item.nodeid} phase={when}")
+    seen: set[str] = set()
+    for source in (exc_text, text):
+        for line in source.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped in seen:
+                continue
+            seen.add(stripped)
+            if len(_UNRAISABLE_DETAILS) < _DETAIL_LIMIT:
+                _UNRAISABLE_DETAILS.append("SUBEXC " + stripped[:300])
+
+
+def pytest_terminal_summary(
+    terminalreporter: Any, exitstatus: Any, config: Any
+) -> None:
+    # Finalize anything still alive; the module-level hook records it.
+    gc.collect()
+    for detail in _UNRAISABLE_DETAILS[:_DETAIL_LIMIT]:
+        terminalreporter.write_line("UNRAISABLE-FAILED-Traceback " + detail[:400])
+    extra = len(_UNRAISABLE_DETAILS) - _DETAIL_LIMIT
+    if extra > 0:
+        terminalreporter.write_line(f"UNRAISABLE-FAILED-Traceback ... {extra} more")
