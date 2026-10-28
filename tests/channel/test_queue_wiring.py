@@ -73,12 +73,21 @@ def _tg_msg() -> NormalizedInbound:
 
 
 class RecordingTelegramClient(TelegramClient):
-    """Test double that records sends; no network is ever touched."""
+    """Test double that records sends; no network is ever touched.
+
+    EVERY method the handler can reach is overridden. The real client
+    lazily creates an httpx.AsyncClient on first use; a missed override
+    would open a REAL socket (e.g. sendChatAction on turn start) that
+    nobody closes, and its leaked transport resurfaces later as an
+    unraisable ResourceWarning inside an unrelated test.
+    """
 
     def __init__(self) -> None:
         super().__init__("test-token")
         self.sent_texts: list[str] = []
         self.drafts: list[str] = []
+        self.typing_calls: list[str] = []
+        self.callback_answers: list[tuple[str, str | None]] = []
 
     async def send_text(self, payload: OutboundPayload) -> OutboundResult:
         self.sent_texts.append(payload.text or "")
@@ -102,6 +111,17 @@ class RecordingTelegramClient(TelegramClient):
             provider_message_id=f"draft-{len(self.drafts)}",
             temporary_failure=False,
         )
+
+    async def send_typing(self, chat_id: str) -> None:
+        self.typing_calls.append(chat_id)
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        *,
+        text: str | None = None,
+    ) -> None:
+        self.callback_answers.append((callback_query_id, text))
 
 
 @pytest.mark.asyncio
@@ -193,6 +213,10 @@ async def test_telegram_native_handler_streams_and_sends_final() -> None:
     # silently leaving the tutor reply missing.
     assert result.error is None, f"telegram turn failed: {result.error}"
     assert result.student_entry_id is not None
+
+    # The turn starts with a best-effort typing indicator — recorded,
+    # never a real sendChatAction request.
+    assert tg_client.typing_calls == ["777000"]
 
     entries = world.storage.list_history(wax, limit=50)
     tutors = [e for e in entries if e.author_kind is AuthorKind.TUTOR]
