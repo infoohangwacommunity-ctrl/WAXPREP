@@ -31,6 +31,13 @@ class Settings:
     voice_provider: str | None = None  # "gemini" | "grok" | None
     gemini_api_key: str | None = None
     xai_api_key: str | None = None
+    # OpenAI-compatible embedding provider (meaning search). Both the
+    # key and the model must be set together to enable semantic
+    # retrieval; unset means lexical-only, reported honestly.
+    embedding_api_key: str | None = None
+    embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_model: str | None = None
+    embedding_dimensions: int | None = None
     whatsapp_enabled: bool = False
     whatsapp_token: str | None = None
     whatsapp_phone_number_id: str | None = None
@@ -73,6 +80,16 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         voice_provider=(env.get("WAXPREP_VOICE_PROVIDER") or None),
         gemini_api_key=env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY"),
         xai_api_key=env.get("XAI_API_KEY"),
+        embedding_api_key=env.get("WAXPREP_EMBEDDING_API_KEY"),
+        embedding_base_url=env.get(
+            "WAXPREP_EMBEDDING_BASE_URL", "https://api.openai.com/v1"
+        ),
+        embedding_model=env.get("WAXPREP_EMBEDDING_MODEL"),
+        embedding_dimensions=(
+            int(env["WAXPREP_EMBEDDING_DIMENSIONS"])
+            if env.get("WAXPREP_EMBEDDING_DIMENSIONS")
+            else None
+        ),
         whatsapp_enabled=wa_enabled,
         whatsapp_token=env.get("WHATSAPP_TOKEN") or env.get("WAXPREP_WHATSAPP_TOKEN"),
         whatsapp_phone_number_id=env.get("WHATSAPP_PHONE_NUMBER_ID"),
@@ -93,7 +110,7 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
             name
             for name, val in (
                 ("WHATSAPP_TOKEN", settings.whatsapp_token),
-                ("WHATSAPP_PHONE_NUMBER_ID", settings.whatsapp_phone_number_id),
+                ("WHATSAPP_PHONE_NUMBER_ID", settings.whatsapp_phone_number_id"),
                 ("WHATSAPP_APP_SECRET", settings.whatsapp_app_secret),
                 ("WHATSAPP_VERIFY_TOKEN", settings.whatsapp_verify_token),
             )
@@ -115,4 +132,8 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         raise ValueError("WAXPREP_VOICE_PROVIDER=gemini requires GEMINI_API_KEY")
     if settings.voice_provider == "grok" and not settings.xai_api_key:
         raise ValueError("WAXPREP_VOICE_PROVIDER=grok requires XAI_API_KEY")
+    if settings.embedding_model and not settings.embedding_api_key:
+        raise ValueError("WAXPREP_EMBEDDING_MODEL requires WAXPREP_EMBEDDING_API_KEY")
+    if settings.embedding_api_key and not settings.embedding_model:
+        raise ValueError("WAXPREP_EMBEDDING_API_KEY requires WAXPREP_EMBEDDING_MODEL")
     return settings

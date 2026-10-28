@@ -25,7 +25,9 @@ from waxprep.channel.whatsapp.handler import (
 from waxprep.channel.whatsapp.outbox import OutboxConfig, WhatsAppOutbox
 from waxprep.clock import SystemClock
 from waxprep.domain.identifiers import WaxId
-from waxprep.settings import load_settings
+from waxprep.embeddings.protocol import EmbeddingProvider
+from waxprep.orchestration.latency import TurnLatencyRecorder
+from waxprep.settings import Settings, load_settings
 from waxprep.storage.protocol import Storage
 from waxprep.wiring import build_services
 
@@ -131,6 +133,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         gateway = build_gateway(settings)
         context_model = build_context_model(settings)
         judge_model = GatewayJudgeModel(gateway)
+        # Meaning search: the provider is optional; when configured it
+        # turns on semantic retrieval and background embedding jobs.
+        embedder = build_embedder(settings)
         services = build_services(
             storage=storage,
             cipher=cipher,
@@ -139,6 +144,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             teacher=None,
             gateway=gateway,
             judge_model=judge_model,
+            embedder=embedder,
+            # Notes of time: per-stage latency events flow through each
+            # composition's own connection (webhook here, worker below).
+            latency_recorder=TurnLatencyRecorder(storage, clock),
         )
         worker_services = build_services(
             storage=worker_storage,
@@ -148,6 +157,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             teacher=None,
             gateway=gateway,
             judge_model=judge_model,
+            embedder=embedder,
+            latency_recorder=TurnLatencyRecorder(worker_storage, clock),
         )
         active_storage = storage
         _services = active_storage
@@ -521,6 +532,28 @@ def build_gateway(settings: Any):
             )
         )
     return ModelGateway(registry)
+
+
+def build_embedder(settings: Settings) -> EmbeddingProvider | None:
+    """Optional OpenAI-compatible embedding provider for meaning search.
+
+    The semantic retrieval capability already exists (``find_by_meaning``);
+    wiring a provider here turns it on in production, including the
+    background embedding jobs the indexer schedules. Unset means
+    lexical-only retrieval, which the meaning-search tool reports
+    honestly instead of pretending semantic search succeeded.
+    """
+    if settings.embedding_api_key is None or settings.embedding_model is None:
+        return None
+    from waxprep.embeddings.http import HttpEmbeddingProvider
+
+    return HttpEmbeddingProvider(
+        api_key=settings.embedding_api_key,
+        model=settings.embedding_model,
+        base_url=settings.embedding_base_url,
+        dimensions=settings.embedding_dimensions,
+        timeout_seconds=settings.media_limits.request_timeout_seconds,
+    )
 
 
 def build_whatsapp_client(settings: Any):
