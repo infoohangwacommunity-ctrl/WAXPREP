@@ -63,6 +63,7 @@ from waxprep.orchestration.contracts_ci_first import (
 from waxprep.orchestration.contracts_ci_first import (
     Teacher as TeacherProtocol,
 )
+from waxprep.orchestration.latency import TurnLatencyRecorder
 from waxprep.orchestration.model_teacher_ci_first import ModelTeacherCiFirst
 from waxprep.orchestration.turn_ci_first import TurnServiceCiFirst as TurnService
 from waxprep.security.cipher import FieldCipher
@@ -102,6 +103,7 @@ def build_services(
     artifact_processor: ArtifactProcessor | None = None,
     ci_limits: InvestigationLimits | None = None,
     judge_model: JudgeModel | None = None,
+    latency_recorder: TurnLatencyRecorder | None = None,
 ) -> WaxPrepServices:
     """Build the unified service graph.
 
@@ -195,6 +197,7 @@ def build_services(
         clock,
         ci_limits=ci_limits,
         judge=judge,
+        latency_recorder=latency_recorder,
     )
     # Blueprint Part IV §16-17: the deletion workflow is wired into the
     # worker so pending requests are actually processed by the running

@@ -80,6 +80,15 @@ from waxprep.orchestration.contracts_ci_first import (
     TextDeltaSink,
 )
 from waxprep.orchestration.errors import InvalidTeacherOutcomeError
+from waxprep.orchestration.latency import (
+    STAGE_CI_END,
+    STAGE_CI_START,
+    STAGE_FIRST_VISIBLE,
+    STAGE_REPLY_SAVED,
+    STAGE_TEACHER_FIRST_DELTA,
+    TurnLatencyRecord,
+    TurnLatencyRecorder,
+)
 from waxprep.orchestration.post_turn import PostTurnQualityRecord, PostTurnReview
 from waxprep.storage.protocol import Storage
 
@@ -123,6 +132,7 @@ class TurnServiceCiFirst:
         ci_limits: InvestigationLimits | None = None,
         context_model_name: str = "context",
         judge: QualityJudgeService | None = None,
+        latency_recorder: TurnLatencyRecorder | None = None,
     ) -> None:
         self._storage = storage
         self._history = history
@@ -132,6 +142,7 @@ class TurnServiceCiFirst:
         self._ci_limits = ci_limits or InvestigationLimits()
         self._context_model_name = context_model_name
         self._judge = judge
+        self._latency = latency_recorder
 
     async def handle_student_message(
         self,
@@ -170,6 +181,15 @@ class TurnServiceCiFirst:
             thread_ref=thread_ref,
             occurred_at=occurred_at,
         )
+
+        # Per-turn timing notes ("notes of time"): best-effort, never
+        # blocks or fails the turn. Only turns that actually teach get
+        # an event; duplicate redeliveries are cheap no-ops and skip.
+        record: TurnLatencyRecord | None = None
+        if self._latency is not None:
+            record = self._latency.start(
+                wax_id, channel=channel, trigger_entry_id=student_entry.id
+            )
 
         # 2. Duplicate delivery handling.
         if not created:
@@ -288,9 +308,17 @@ class TurnServiceCiFirst:
                 limits=self._ci_limits,
                 exchange=exchange,
             )
+            if record is not None:
+                record.mark(STAGE_CI_START)
             context_package: ContextPackage = await self._investigator.investigate(
                 ci_request
             )
+            if record is not None:
+                record.mark(STAGE_CI_END)
+                if context_package is not None:
+                    # investigation actions; tool calls are not
+                    # separately reported by the package today.
+                    record.ci_steps = len(context_package.investigated)
 
             # Persist the investigation audit row. In CI-first mode this is
             # the *only* audit trail for what CI did and what package it
@@ -335,7 +363,7 @@ class TurnServiceCiFirst:
             )
             outcome: TeacherOutcomeCiFirst = await self._teacher.teach(
                 teacher_input,
-                on_text_delta=on_text_delta,
+                on_text_delta=self._tracked_delta(on_text_delta, record),
             )
 
             # Handle empty Teacher response explicitly.
@@ -419,6 +447,9 @@ class TurnServiceCiFirst:
                             )
                             outbound_id = repaired.id if repaired else None
 
+            if record is not None:
+                record.mark(STAGE_REPLY_SAVED)
+
             # Post-response quality record (structured event, no plaintext body).
             try:
                 investigated = (
@@ -485,6 +516,34 @@ class TurnServiceCiFirst:
         finally:
             if lock_held:
                 self._storage.release_turn_lock(wax_id, student_entry.id)
+            if record is not None and self._latency is not None:
+                # Notes of time: flush best-effort after the student's
+                # work is done; a failure here must never break the
+                # turn that already succeeded.
+                self._latency.flush(record)
+
+    def _tracked_delta(
+        self, on_text_delta: TextDeltaSink | None, record: TurnLatencyRecord | None
+    ) -> TextDeltaSink | None:
+        """Wrap the channel delta sink to mark first-token timing notes.
+
+        The first streamed delta marks the teacher's first token; the
+        first delta the channel sink accepts without raising marks the
+        first text the student can actually see.
+        """
+
+        if on_text_delta is None:
+            return None
+        sink = on_text_delta
+
+        async def _sink(text: str) -> None:
+            if record is not None:
+                record.mark(STAGE_TEACHER_FIRST_DELTA)
+            await sink(text)
+            if record is not None:
+                record.mark(STAGE_FIRST_VISIBLE)
+
+        return _sink
 
     async def process_turn_job(self, job: DerivationJob) -> TurnResultCiFirst:
         """Recover a saved student message by re-running the full CI-first path.

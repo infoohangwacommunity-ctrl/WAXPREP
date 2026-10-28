@@ -12,7 +12,11 @@ from fastapi import FastAPI
 
 from waxprep import __version__
 from waxprep.channel.contracts import NormalizedInbound
-from waxprep.channel.message_queue import MessageQueue, QueueConfig
+from waxprep.channel.message_queue import (
+    MessageQueue,
+    ModelSemanticGrouper,
+    QueueConfig,
+)
 from waxprep.channel.whatsapp.handler import (
     InboundResult,
     WhatsAppInboundConfig,
@@ -159,10 +163,13 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             return provision_channel_student(active_storage, clock, channel, sender)
 
         # Shared per-student queue: rapid message bursts are coalesced by a
-        # short time window into single tutor turns (arrival cadence only —
-        # never keyword matching). One turn per student at a time, strict
-        # FIFO order. Handlers are singletons so per-message idempotency
-        # locks actually serialize webhook deliveries process-wide.
+        # resettable quiet period plus a hard collection deadline into
+        # single tutor turns. Opt-in small-model semantic grouping
+        # classifies arrivals (continuation vs new request); the time
+        # window stays the default fallback. One turn per student at a
+        # time, strict FIFO order. Handlers are singletons so
+        # per-message idempotency locks actually serialize webhook
+        # deliveries process-wide.
         queue_handlers: dict[str, Any] = {}
 
         async def _queue_turn_runner(wax_id: WaxId, batch: list[Any]) -> None:
@@ -178,10 +185,21 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 return
             await handler.run_queued_turn(wax_id, batch)
 
+        queue_config = build_queue_config()
+        semantic_grouper: ModelSemanticGrouper | None = None
+        if queue_config.semantic_grouping_enabled:
+            # Cheap classification model under its own logical role so
+            # operators can point it at a small endpoint. Any failure
+            # inside falls back to the time window.
+            try:
+                semantic_grouper = ModelSemanticGrouper(gateway, model_name="grouping")
+            except Exception:
+                logger.exception("semantic grouper unavailable; time window only")
         message_queue = MessageQueue(
             clock,
-            build_queue_config(),
+            queue_config,
             turn_runner=_queue_turn_runner,
+            semantic_grouper=semantic_grouper,
         )
 
         if settings.whatsapp_enabled:
@@ -483,6 +501,7 @@ def build_gateway(settings: Any):
         ("teacher", ModelRole.TEACHER),
         ("context", ModelRole.CONTEXT),
         ("judge", ModelRole.JUDGE),
+        ("grouping", ModelRole.GROUPING),
     ):
         registry.register_model(
             ModelConfig(
@@ -520,6 +539,12 @@ def build_queue_config() -> QueueConfig:
     WAXPREP_QUEUE_COALESCE  — "0"/"1" time-window coalescing (default on)
     WAXPREP_QUEUE_WINDOW    — coalescing window seconds (default 2.0)
     WAXPREP_QUEUE_MAX_BATCH — max messages coalesced per turn (default 5)
+    WAXPREP_QUEUE_MAX_COLLECTION — hard collection deadline seconds from
+    the first pending message (default 12)
+    WAXPREP_QUEUE_SEMANTIC — "0"/"1" small-model semantic grouping
+    (default on; falls back to the time window whenever the model fails)
+    WAXPREP_QUEUE_GROUPING_TIMEOUT — semantic grouping call budget
+    seconds (default 1.5)
     """
 
     def _flag(name: str, default: bool) -> bool:
@@ -548,4 +573,7 @@ def build_queue_config() -> QueueConfig:
         coalesce_window_seconds=_positive_float("WAXPREP_QUEUE_WINDOW", 2.0),
         max_batch_messages=_positive_int("WAXPREP_QUEUE_MAX_BATCH", 5),
         max_concurrent_per_student=1,
+        max_collection_seconds=_positive_float("WAXPREP_QUEUE_MAX_COLLECTION", 12.0),
+        semantic_grouping_enabled=_flag("WAXPREP_QUEUE_SEMANTIC", True),
+        grouping_timeout_seconds=_positive_float("WAXPREP_QUEUE_GROUPING_TIMEOUT", 1.5),
     )

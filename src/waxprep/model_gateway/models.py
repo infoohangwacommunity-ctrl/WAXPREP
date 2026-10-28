@@ -28,6 +28,10 @@ class ModelRole(StrEnum):
     # judge at a different model than the teacher (self-preference
     # bias is a known LLM-as-a-judge failure mode).
     JUDGE = "judge"
+    # Turn-assembly grouping: a cheap model that decides whether a new
+    # arrival continues the turn being collected. Its own role so a
+    # small/cheap endpoint can serve it without touching the teacher.
+    GROUPING = "grouping"
 
 
 class ContentType(StrEnum):
