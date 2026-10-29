@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from waxprep.channel.contracts import (
+    CONTENT_KIND_AUDIO,
     CONTENT_KIND_INTERACTIVE_BUTTON,
     CONTENT_KIND_TEXT,
     CONTENT_KIND_UNKNOWN,
@@ -102,6 +103,7 @@ def normalize_telegram_update(payload: dict[str, Any]) -> list[NormalizedInbound
 
     text = msg.get("text") or msg.get("caption")
     content_kind = CONTENT_KIND_TEXT
+    structured_extra: dict[str, Any] = {}
     if text is None:
         # Non-text (sticker, photo without caption, etc.)
         content_kind = CONTENT_KIND_UNKNOWN
@@ -110,14 +112,40 @@ def normalize_telegram_update(payload: dict[str, Any]) -> list[NormalizedInbound
         elif msg.get("document"):
             text = "[document]"
         elif msg.get("voice") or msg.get("audio"):
+            content_kind = CONTENT_KIND_AUDIO
+            voice = msg.get("voice") or msg.get("audio") or {}
             text = "[audio]"
+            if isinstance(voice, dict) and voice.get("file_id"):
+                structured_extra = {
+                    "telegram_file_id": voice.get("file_id"),
+                    "duration": voice.get("duration"),
+                    "mime_type": voice.get("mime_type") or "audio/ogg",
+                }
         elif msg.get("sticker"):
             text = "[sticker]"
         else:
             text = "[unsupported message]"
+    elif msg.get("voice") or msg.get("audio"):
+        # Caption present with audio
+        content_kind = CONTENT_KIND_AUDIO
+        voice = msg.get("voice") or msg.get("audio") or {}
+        if isinstance(voice, dict) and voice.get("file_id"):
+            structured_extra = {
+                "telegram_file_id": voice.get("file_id"),
+                "duration": voice.get("duration"),
+                "mime_type": voice.get("mime_type") or "audio/ogg",
+            }
 
     reply = msg.get("reply_to_message") or {}
     reply_to = str(reply["message_id"]) if reply.get("message_id") is not None else None
+
+    structured = {
+        "telegram_user_id": from_user.get("id"),
+        "username": from_user.get("username"),
+        "first_name": from_user.get("first_name"),
+        "chat_type": chat.get("type"),
+        **structured_extra,
+    }
 
     return [
         NormalizedInbound(
@@ -129,12 +157,7 @@ def normalize_telegram_update(payload: dict[str, Any]) -> list[NormalizedInbound
             text=text,
             content_kind=content_kind,
             reply_to_provider_id=reply_to,
-            structured={
-                "telegram_user_id": from_user.get("id"),
-                "username": from_user.get("username"),
-                "first_name": from_user.get("first_name"),
-                "chat_type": chat.get("type"),
-            },
+            structured=structured,
         )
     ]
 
