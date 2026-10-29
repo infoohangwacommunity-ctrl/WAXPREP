@@ -26,6 +26,7 @@ from waxprep.channel.whatsapp.outbox import OutboxConfig, WhatsAppOutbox
 from waxprep.clock import SystemClock
 from waxprep.domain.identifiers import WaxId
 from waxprep.embeddings.protocol import EmbeddingProvider
+from waxprep.media.processors.gemini_stt import build_speech_to_text
 from waxprep.orchestration.latency import TurnLatencyRecorder
 from waxprep.settings import Settings, load_settings
 from waxprep.storage.protocol import Storage
@@ -225,6 +226,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 config=WhatsAppInboundConfig(channel="whatsapp"),
                 whatsapp_client=client,
                 message_queue=message_queue,
+                speech_to_text=build_speech_to_text(settings),
             )
             queue_handlers["whatsapp"] = wa_handler
 

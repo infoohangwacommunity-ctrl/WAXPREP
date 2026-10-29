@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from waxprep.channel.contracts import (
+    CONTENT_KIND_AUDIO,
     CONTENT_KIND_INTERACTIVE_BUTTON,
     CONTENT_KIND_INTERACTIVE_LIST,
     InteractiveSuggestion,
@@ -54,6 +55,7 @@ from waxprep.storage.protocol import Storage
 
 if TYPE_CHECKING:
     from waxprep.channel.whatsapp.client import WhatsAppClient
+    from waxprep.media.processors.stt import SpeechToText
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,7 @@ class WhatsAppInboundHandler:
         config: WhatsAppInboundConfig | None = None,
         whatsapp_client: WhatsAppClient | None = None,
         message_queue: MessageQueue | None = None,
+        speech_to_text: SpeechToText | None = None,
     ) -> None:
         self._storage = storage
         self._history = history
@@ -142,6 +145,9 @@ class WhatsAppInboundHandler:
         # Optional per-student queue coordinating rapid message bursts
         # into single tutor turns (time-window coalescing only).
         self._message_queue = message_queue
+        # Optional live voice-note transcription (Step 3c): when set,
+        # voice notes are transcribed inline before the tutor turn.
+        self._speech_to_text = speech_to_text
         self._message_locks: dict[str, asyncio.Lock] = {}
         self._message_locks_guard = asyncio.Lock()
 
@@ -325,6 +331,43 @@ class WhatsAppInboundHandler:
                         needs_linking=False,
                         error="interactive_offer_consumed",
                     )
+
+        # Step 3c: live voice-note transcription. Without usable text a
+        # voice note would run the turn on an empty placeholder, so when
+        # an STT backend is configured the audio is transcribed BEFORE the
+        # turn and the student's actual words drive CI and the Teacher.
+        # Best-effort: any failure keeps the turn alive with whatever text
+        # existed (background ingest_media remains the durable path).
+        if (
+            msg.content_kind == CONTENT_KIND_AUDIO
+            and not (msg.text or "").strip()
+            and self._speech_to_text is not None
+            and self._whatsapp_client is not None
+            and msg.attachments
+        ):
+            try:
+                attachment = msg.attachments[0]
+                audio, mime_type = await self._whatsapp_client.download_media(
+                    attachment.provider_media_id
+                )
+                transcript = await self._speech_to_text.transcribe(
+                    audio, mime_type=mime_type
+                )
+                transcribed = (transcript.text or "").strip()
+                if transcribed:
+                    msg = replace(msg, text=f"[voice note] {transcribed}")
+                    logger.info(
+                        "voice note transcribed inline",
+                        extra={
+                            "wax_id": str(wax_id),
+                            "characters": len(transcribed),
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "inline voice transcription failed; continuing",
+                    exc_info=True,
+                )
 
         # Step 4: Durably save the student message
         # Use provider_message_id as channel_ref for idempotency
