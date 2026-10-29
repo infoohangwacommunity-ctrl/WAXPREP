@@ -30,6 +30,8 @@ class Settings:
     reasoning_effort: str = "medium"
     voice_provider: str | None = None  # "gemini" | "grok" | None
     gemini_api_key: str | None = None
+    groq_api_key: str | None = None
+    voice_model: str | None = None
     xai_api_key: str | None = None
     # OpenAI-compatible embedding provider (meaning search). Both the
     # key and the model must be set together to enable semantic
@@ -79,6 +81,8 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         ).lower(),
         voice_provider=(env.get("WAXPREP_VOICE_PROVIDER") or None),
         gemini_api_key=env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY"),
+        groq_api_key=env.get("GROQ_API_KEY") or env.get("WAXPREP_GROQ_API_KEY"),
+        voice_model=env.get("WAXPREP_VOICE_MODEL"),
         xai_api_key=env.get("XAI_API_KEY"),
         embedding_api_key=env.get("WAXPREP_EMBEDDING_API_KEY"),
         embedding_base_url=env.get(
@@ -123,15 +127,17 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
             )
     if settings.telegram_enabled and not settings.telegram_bot_token:
         raise ValueError("Telegram is enabled but TELEGRAM_BOT_TOKEN is missing")
-    if settings.voice_provider not in (None, "gemini", "grok"):
+    if settings.voice_provider not in (None, "gemini", "grok", "groq"):
         raise ValueError(
-            f"WAXPREP_VOICE_PROVIDER must be 'gemini', 'grok', or unset; "
+            f"WAXPREP_VOICE_PROVIDER must be 'gemini', 'grok', 'groq', or unset; "
             f"got {settings.voice_provider!r}"
         )
     if settings.voice_provider == "gemini" and not settings.gemini_api_key:
         raise ValueError("WAXPREP_VOICE_PROVIDER=gemini requires GEMINI_API_KEY")
     if settings.voice_provider == "grok" and not settings.xai_api_key:
         raise ValueError("WAXPREP_VOICE_PROVIDER=grok requires XAI_API_KEY")
+    if settings.voice_provider == "groq" and not settings.groq_api_key:
+        raise ValueError("WAXPREP_VOICE_PROVIDER=groq requires GROQ_API_KEY")
     if settings.embedding_model and not settings.embedding_api_key:
         raise ValueError("WAXPREP_EMBEDDING_MODEL requires WAXPREP_EMBEDDING_API_KEY")
     if settings.embedding_api_key and not settings.embedding_model:
