@@ -25,7 +25,7 @@ CONTENT_KIND_INTERACTIVE_LIST = "interactive_list"
 CONTENT_KIND_UNKNOWN = "unknown"
 
 # Optional interactive-choices trailer the Teacher may append to a reply
-# (``<<<choices>>>`` followed by up to three short next-step lines). The
+# (``<<<choices>>>`` followed by up to ten short next-step lines). The
 # channel layer parses it into tappable buttons and must never display the
 # marker itself. Shared here so the orchestration prompt and the streaming
 # display filter cannot drift apart.
@@ -76,8 +76,16 @@ class InteractiveButtonSpec:
 class InteractiveSuggestion:
     """Optional interactive presentation chosen by the Teacher.
 
-    Body teaching always lives in reply_text. Buttons are optional UX only.
-    Max 3 reply buttons; titles should be short (Meta limit 20 chars).
+    Body teaching always lives in reply_text. Choices are optional UX only —
+    the Teacher may omit them entirely. Titles should be short (WhatsApp
+    reply-button limit is 20 characters). Count rules are enforced at the
+    channel layer, not by the Teacher:
+
+    * 1–3 choices → WhatsApp reply buttons / Telegram inline keyboard
+    * 4–10 choices → WhatsApp list message / Telegram inline keyboard (up to 10)
+
+    Opaque button ids are assigned at send time so product code never
+    invents semantic button ontology.
     """
 
     body_text: str
