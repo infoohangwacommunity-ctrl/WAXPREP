@@ -885,14 +885,20 @@ class TelegramInboundHandler:
             return
         now = self._clock.now()
         issued: list[dict[str, str]] = []
-        for btn in suggestion.buttons[:3]:
+        for btn in suggestion.buttons[:10]:
             title = (btn.title or "").strip()[:20]
             if not title:
                 continue
             issued.append({"id": str(uuid4()), "title": title})
         if not issued:
             return
-        body = (suggestion.body_text or "").strip() or "Choose a next step:"
+        # When the teaching body was already delivered live, re-sending
+        # the full text would duplicate the answer — anchor the keyboard
+        # with a short prompt instead.
+        if body_delivered:
+            body = "Pick one 👇"
+        else:
+            body = (suggestion.body_text or "").strip() or "Choose a next step:"
         keyboard = {
             "inline_keyboard": [
                 [{"text": btn["title"], "callback_data": btn["id"]}] for btn in issued

@@ -892,20 +892,33 @@ class WhatsAppInboundHandler:
             return
         now = self._clock.now()
         issued: list[dict[str, str]] = []
-        for btn in suggestion.buttons[:3]:
+        for btn in suggestion.buttons[:10]:
             title = (btn.title or "").strip()[:20]
             if not title:
                 continue
             issued.append({"id": str(uuid4()), "title": title})
         if not issued:
             return
-        body = (suggestion.body_text or "").strip() or "Choose a next step:"
+        # The teaching body was already delivered live (progressive) or
+        # will be delivered by the durable outbox — re-sending the full
+        # text here duplicated the answer. Anchor the choices with a
+        # short prompt instead.
+        body = "Pick one 👇"
         try:
-            result = await client.send_interactive_buttons(
-                recipient_external_id=recipient,
-                body_text=body[:1024],
-                buttons=issued,
-            )
+            if len(issued) > 3 and hasattr(client, "send_interactive_list"):
+                # More than 3 choices (quiz / topic menu): WhatsApp reply
+                # buttons cap at 3, so render the full set as a list.
+                result = await client.send_interactive_list(
+                    recipient_external_id=recipient,
+                    body_text=body[:1024],
+                    rows=issued,
+                )
+            else:
+                result = await client.send_interactive_buttons(
+                    recipient_external_id=recipient,
+                    body_text=body[:1024],
+                    buttons=issued[:3],
+                )
         except Exception:
             logger.debug("interactive send raised", exc_info=True)
             return

@@ -229,6 +229,115 @@ class WhatsAppClient:
             if close:
                 await client.aclose()
 
+    async def send_interactive_list(
+        self,
+        *,
+        recipient_external_id: str,
+        body_text: str,
+        rows: list[dict[str, str]],
+        button_text: str = "Options",
+    ) -> OutboundResult:
+        """Send a list interactive message (up to 10 rows, one section).
+
+        Row dicts must have 'id' and 'title' (24-char Meta limit); an
+        optional 'description' (72 chars) is passed through. Used when
+        the teacher offers more choices than the 3-button reply limit.
+        """
+        if not rows:
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=False,
+                error_code="no_rows",
+                error_detail="interactive list requires at least one row",
+            )
+        action_rows = []
+        for r in rows[:10]:
+            title = (r.get("title") or "")[:24]
+            rid = r.get("id") or ""
+            if not rid or not title:
+                continue
+            row: dict[str, Any] = {"id": rid, "title": title}
+            description = (r.get("description") or "").strip()
+            if description:
+                row["description"] = description[:72]
+            action_rows.append(row)
+        if not action_rows:
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=False,
+                error_code="invalid_rows",
+                error_detail="no valid row id/title pairs",
+            )
+        body: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "to": recipient_external_id,
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {"text": body_text or ""},
+                "action": {
+                    "button": (button_text or "Options")[:20],
+                    "sections": [{"title": "Choices", "rows": action_rows}],
+                },
+            },
+        }
+        close = False
+        client = self._client
+        if client is None:
+            client = httpx.AsyncClient(timeout=30.0)
+            close = True
+        try:
+            resp = await client.post(
+                f"{self._base}/{self._phone_number_id}/messages",
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json=body,
+            )
+            if resp.status_code == 429:
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=True,
+                    error_code="429",
+                    error_detail="provider rate limited; retry after backoff",
+                )
+            if resp.status_code >= 500:
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=True,
+                    error_code=str(resp.status_code),
+                    error_detail="provider_5xx",
+                )
+            if resp.status_code >= 400:
+                return OutboundResult(
+                    success=False,
+                    provider_message_id=None,
+                    temporary_failure=False,
+                    error_code=str(resp.status_code),
+                    error_detail=resp.text[:200],
+                )
+            data = resp.json()
+            messages = data.get("messages") or []
+            mid = messages[0].get("id") if messages else None
+            return OutboundResult(
+                success=True,
+                provider_message_id=mid,
+                temporary_failure=False,
+            )
+        except httpx.TimeoutException:
+            return OutboundResult(
+                success=False,
+                provider_message_id=None,
+                temporary_failure=True,
+                error_code="timeout",
+                error_detail="request timed out; delivery outcome uncertain",
+            )
+        finally:
+            if close:
+                await client.aclose()
+
     async def send_typing(
         self,
         recipient_external_id: str,
