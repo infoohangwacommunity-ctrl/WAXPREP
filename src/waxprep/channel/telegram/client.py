@@ -216,12 +216,11 @@ class TelegramClient:
                     error_code=str(data.get("error_code") or resp.status_code),
                     error_detail=desc,
                 )
-            result = data.get("result") or {}
-            mid = (
-                str(result.get("message_id"))
-                if result.get("message_id") is not None
-                else None
-            )
+            # Bot API returns result=true for drafts (boolean), not a message object.
+            result = data.get("result")
+            mid = None
+            if isinstance(result, dict) and result.get("message_id") is not None:
+                mid = str(result.get("message_id"))
             return OutboundResult(
                 success=True,
                 provider_message_id=mid,
