@@ -24,11 +24,13 @@ from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from waxprep.channel.contracts import (
+    CONTENT_KIND_AUDIO,
     CONTENT_KIND_INTERACTIVE_BUTTON,
     InteractiveSuggestion,
     NormalizedInbound,
     OutboundPayload,
 )
+from waxprep.media.processors.stt import SpeechToText
 from waxprep.channel.message_queue import MessageQueue, QueuedMessage
 from waxprep.channel.streaming.accumulator import AnswerAccumulator
 from waxprep.channel.streaming.contract import ChannelCapability
@@ -122,6 +124,7 @@ class TelegramInboundHandler:
         config: TelegramInboundConfig | None = None,
         telegram_client: TelegramClient | None = None,
         message_queue: MessageQueue | None = None,
+        speech_to_text: SpeechToText | None = None,
     ) -> None:
         self._storage = storage
         self._history = history
@@ -129,6 +132,7 @@ class TelegramInboundHandler:
         self._clock = clock
         self._config = config or TelegramInboundConfig()
         self._telegram_client = telegram_client
+        self._speech_to_text = speech_to_text
         # Optional per-student queue coordinating rapid message bursts
         # into single tutor turns (time-window coalescing only).
         self._message_queue = message_queue
@@ -343,6 +347,51 @@ class TelegramInboundHandler:
             # Acknowledge immediately (no text) — the answer arrives as the
             # tutor's streamed turn, not as a callback toast.
             await self._answer_callback(callback_query_id, None)
+
+
+        # Step 3c: live voice-note transcription (parity with WhatsApp).
+        # Telegram normalize stores CONTENT_KIND_AUDIO with telegram_file_id.
+        # Transcribe BEFORE durable history so CI and the Teacher see the
+        # student's words, marked clearly as audio-derived.
+        # Best-effort: failure keeps the turn alive on the placeholder.
+        if (
+            msg.content_kind == CONTENT_KIND_AUDIO
+            and self._speech_to_text is not None
+            and self._telegram_client is not None
+        ):
+            file_id = str((msg.structured or {}).get("telegram_file_id") or "").strip()
+            existing = (msg.text or "").strip()
+            # Skip only if we already have real words (not a placeholder).
+            placeholder = not existing or existing in ("[audio]", "[voice]")
+            if file_id and placeholder:
+                try:
+                    audio, mime_type = await self._telegram_client.download_file(file_id)
+                    mime = mime_type or str(
+                        (msg.structured or {}).get("mime_type") or "audio/ogg"
+                    )
+                    transcript = await self._speech_to_text.transcribe(
+                        audio, mime_type=mime
+                    )
+                    transcribed = (transcript.text or "").strip()
+                    if transcribed:
+                        # Crumb: Teacher/CI must see this came from audio.
+                        msg = replace(
+                            msg,
+                            text=f"[voice note] {transcribed}",
+                            content_kind=CONTENT_KIND_AUDIO,
+                        )
+                        logger.info(
+                            "telegram voice note transcribed inline",
+                            extra={
+                                "wax_id": str(wax_id),
+                                "characters": len(transcribed),
+                            },
+                        )
+                except Exception:
+                    logger.warning(
+                        "telegram inline voice transcription failed; continuing",
+                        exc_info=True,
+                    )
 
         # Step 4: Durably save the student message
         try:
