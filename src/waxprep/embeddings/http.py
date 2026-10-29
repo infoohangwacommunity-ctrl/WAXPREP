@@ -1,5 +1,13 @@
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnnecessaryCast=false
-"""OpenAI-compatible HTTP embedding provider (no SDK)."""
+"""OpenAI-compatible HTTP embedding provider (no SDK).
+
+Voyage AI (api.voyageai.com) accepts the same /embeddings path and Bearer
+auth as OpenAI-compatible providers, but rejects the OpenAI-only
+``dimensions`` request field. For Voyage hosts we omit that field and let
+the model return its default dimensionality (1024 for voyage-4-lite).
+Optional ``WAXPREP_EMBEDDING_DIMENSIONS`` is still applied as a response
+length check after a successful call.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +20,11 @@ from waxprep.embeddings.similarity import validate_embedding
 
 class EmbeddingHTTPError(RuntimeError):
     """Raised when a live embedding request fails."""
+
+
+def _is_voyage_host(base_url: str) -> bool:
+    host = base_url.lower()
+    return "voyageai.com" in host or "voyage.ai" in host
 
 
 class HttpEmbeddingProvider:
@@ -37,6 +50,7 @@ class HttpEmbeddingProvider:
         self._dimensions = dimensions
         self._timeout = timeout_seconds
         self._client = client
+        self._voyage = _is_voyage_host(self._base_url)
 
     @property
     def model(self) -> str:
@@ -59,7 +73,10 @@ class HttpEmbeddingProvider:
             if not t.strip():
                 raise ValueError("cannot embed empty text")
         payload: dict[str, Any] = {"model": self._model, "input": texts}
-        if self._dimensions is not None:
+        # OpenAI-compatible providers accept ``dimensions``. Voyage rejects it
+        # with HTTP 400 ("Argument 'dimensions' is not supported by our API").
+        # Do not send the field to Voyage; default model dim is used instead.
+        if self._dimensions is not None and not self._voyage:
             payload["dimensions"] = self._dimensions
 
         owns = self._client is None
@@ -101,7 +118,10 @@ class HttpEmbeddingProvider:
             if not isinstance(raw, list):
                 raise EmbeddingHTTPError("missing embedding vector")
             floats = [float(cast(Any, x)) for x in cast(list[Any], raw)]
-            vec = validate_embedding(floats, expected_dims=self._dimensions)
+            # For Voyage, config dimensions is advisory expected length only
+            # after the response arrives (never forced into the request).
+            expected = self._dimensions
+            vec = validate_embedding(floats, expected_dims=expected)
             if self._dimensions is None:
                 self._dimensions = len(vec)
             vectors.append(vec)
