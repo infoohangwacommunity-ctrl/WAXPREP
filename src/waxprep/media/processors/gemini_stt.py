@@ -100,22 +100,30 @@ class GeminiSpeechToText:
                 await client.aclose()
 
 
-def build_speech_to_text(settings: Settings) -> GeminiSpeechToText | None:
+def build_speech_to_text(settings: Settings):
     """Compose the configured STT backend, or None when unavailable.
 
-    WAXPREP_VOICE_PROVIDER=gemini plus GEMINI_API_KEY enables Gemini
-    transcription; WAXPREP_VOICE_MODEL overrides the model (default
-    gemini-flash-latest). Any other or unset provider keeps inline voice
-    transcription off — the durable ingest_media path stays the fallback
-    and the handler never blocks on STT.
+    Supported explicit providers (no silent failover between paid APIs):
+
+    * ``gemini`` + ``GEMINI_API_KEY`` → GeminiSpeechToText
+    * ``groq`` + ``GROQ_API_KEY`` → GroqWhisperSpeechToText (Whisper)
+
+    ``WAXPREP_VOICE_MODEL`` overrides the model when set. Unset or unknown
+    provider keeps inline voice transcription off; the handler never blocks
+    on STT failures.
     """
     provider = (getattr(settings, "voice_provider", None) or "").strip().lower()
+    if not provider:
+        return None
+    if provider == "groq":
+        from waxprep.media.processors.groq_stt import build_groq_speech_to_text
+
+        return build_groq_speech_to_text(settings)
     if provider != "gemini":
-        if provider:
-            logger.info(
-                "voice transcription unsupported for provider %r; staying off",
-                provider,
-            )
+        logger.info(
+            "voice transcription unsupported for provider %r; staying off",
+            provider,
+        )
         return None
     api_key = getattr(settings, "gemini_api_key", None)
     if not api_key:
@@ -126,7 +134,8 @@ def build_speech_to_text(settings: Settings) -> GeminiSpeechToText | None:
         return None
     return GeminiSpeechToText(
         api_key,
-        model=os.environ.get("WAXPREP_VOICE_MODEL"),
+        model=getattr(settings, "voice_model", None)
+        or os.environ.get("WAXPREP_VOICE_MODEL"),
     )
 
 
