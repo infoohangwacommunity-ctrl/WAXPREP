@@ -244,6 +244,40 @@ class TelegramClient:
                 error_detail=type(exc).__name__,
             )
 
+    async def download_file(self, file_id: str) -> tuple[bytes, str | None]:
+        """Download a Telegram file by file_id (voice notes, audio, docs).
+
+        Returns (bytes, mime_type_hint). Raises on failure so callers can
+        decide whether to continue the turn without a transcript.
+        """
+        if not file_id.strip():
+            raise ValueError("file_id is required")
+        client = await self._http()
+        meta_resp = await client.post(self._url("getFile"), json={"file_id": file_id})
+        meta_resp.raise_for_status()
+        meta = meta_resp.json()
+        if not meta.get("ok"):
+            raise RuntimeError(str(meta.get("description") or "getFile failed")[:200])
+        result = meta.get("result") or {}
+        file_path = result.get("file_path")
+        if not file_path:
+            raise RuntimeError("getFile returned no file_path")
+        # file_path is relative to https://api.telegram.org/file/bot<token>/
+        url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+        file_resp = await client.get(url)
+        file_resp.raise_for_status()
+        mime = None
+        path_l = str(file_path).lower()
+        if path_l.endswith(".oga") or path_l.endswith(".ogg"):
+            mime = "audio/ogg"
+        elif path_l.endswith(".mp3"):
+            mime = "audio/mpeg"
+        elif path_l.endswith(".m4a"):
+            mime = "audio/mp4"
+        elif path_l.endswith(".wav"):
+            mime = "audio/wav"
+        return file_resp.content, mime
+
     async def set_webhook(
         self, url: str, *, secret_token: str | None = None
     ) -> dict[str, Any]:
