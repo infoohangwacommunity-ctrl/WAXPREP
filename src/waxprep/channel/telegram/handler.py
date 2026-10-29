@@ -30,7 +30,6 @@ from waxprep.channel.contracts import (
     NormalizedInbound,
     OutboundPayload,
 )
-from waxprep.media.processors.stt import SpeechToText
 from waxprep.channel.message_queue import MessageQueue, QueuedMessage
 from waxprep.channel.streaming.accumulator import AnswerAccumulator
 from waxprep.channel.streaming.contract import ChannelCapability
@@ -53,6 +52,7 @@ from waxprep.domain.models import (
 )
 from waxprep.history.service import HistoryService
 from waxprep.index.indexer import JOB_INGEST_MEDIA, JOB_PROCESS_TURN
+from waxprep.media.processors.stt import SpeechToText
 from waxprep.orchestration.contracts_ci_first import TextDeltaSink
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
 from waxprep.storage.protocol import Storage
@@ -348,7 +348,6 @@ class TelegramInboundHandler:
             # tutor's streamed turn, not as a callback toast.
             await self._answer_callback(callback_query_id, None)
 
-
         # Step 3c: live voice-note transcription (parity with WhatsApp).
         # Telegram normalize stores CONTENT_KIND_AUDIO with telegram_file_id.
         # Transcribe BEFORE durable history so CI and the Teacher see the
@@ -365,7 +364,9 @@ class TelegramInboundHandler:
             placeholder = not existing or existing in ("[audio]", "[voice]")
             if file_id and placeholder:
                 try:
-                    audio, mime_type = await self._telegram_client.download_file(file_id)
+                    audio, mime_type = await self._telegram_client.download_file(
+                        file_id
+                    )
                     mime = mime_type or str(
                         (msg.structured or {}).get("mime_type") or "audio/ogg"
                     )
