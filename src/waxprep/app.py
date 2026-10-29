@@ -570,7 +570,7 @@ def build_queue_config() -> QueueConfig:
     """Per-student queue knobs from the environment (all optional).
 
     WAXPREP_QUEUE_COALESCE  — "0"/"1" time-window coalescing (default on)
-    WAXPREP_QUEUE_WINDOW    — coalescing window seconds (default 2.0)
+    WAXPREP_QUEUE_WINDOW    — coalescing window seconds (default 5.0)
     WAXPREP_QUEUE_MAX_BATCH — max messages coalesced per turn (default 5)
     WAXPREP_QUEUE_MAX_COLLECTION — hard collection deadline seconds from
     the first pending message (default 12)
@@ -603,7 +603,7 @@ def build_queue_config() -> QueueConfig:
     return QueueConfig(
         enforce_fifo=True,
         coalesce_enabled=_flag("WAXPREP_QUEUE_COALESCE", True),
-        coalesce_window_seconds=_positive_float("WAXPREP_QUEUE_WINDOW", 2.0),
+        coalesce_window_seconds=_positive_float("WAXPREP_QUEUE_WINDOW", 5.0),
         max_batch_messages=_positive_int("WAXPREP_QUEUE_MAX_BATCH", 5),
         max_concurrent_per_student=1,
         max_collection_seconds=_positive_float("WAXPREP_QUEUE_MAX_COLLECTION", 12.0),
