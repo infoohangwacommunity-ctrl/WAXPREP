@@ -276,11 +276,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
                 history=services.history,
                 turn_service=services.turns,
                 clock=clock,
-                config=TelegramInboundConfig(,
-                speech_to_text=build_speech_to_text(settings),
-            ),
+                config=TelegramInboundConfig(),
                 telegram_client=tg_client,
                 message_queue=message_queue,
+                speech_to_text=build_speech_to_text(settings),
             )
             queue_handlers["telegram"] = tg_handler
 
