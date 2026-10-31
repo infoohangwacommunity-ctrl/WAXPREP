@@ -164,15 +164,25 @@ def test_build_gateway_passes_a_shared_client_to_the_provider() -> None:
     saved_env = os.environ.get("WAXPREP_UPSTAGE_API_KEY")
     os.environ["WAXPREP_UPSTAGE_API_KEY"] = "test-key-for-latency"
     try:
-        with patch.object(httpx, "AsyncClient", _counting_init), \
-             patch.object(upstage_mod.UpstageResponsesProvider, "__init__", _capturing_init):
+        with (
+            patch.object(httpx, "AsyncClient", _counting_init),
+            patch.object(
+                upstage_mod.UpstageResponsesProvider, "__init__", _capturing_init
+            ),
+        ):
             from waxprep.app import build_gateway
 
-            gateway = build_gateway(type("S", (), {
-                "upstage_api_key": "test-key",
-                "upstage_base_url": "https://api.upstage.ai/v1",
-                "upstage_model": "solar-pro4",
-            })())
+            gateway = build_gateway(
+                type(
+                    "S",
+                    (),
+                    {
+                        "upstage_api_key": "test-key",
+                        "upstage_base_url": "https://api.upstage.ai/v1",
+                        "upstage_model": "solar-pro4",
+                    },
+                )()
+            )
             # At least one client was constructed during wiring.
             assert construction_count >= 1, (
                 "build_gateway constructed zero httpx.AsyncClient instances — "
@@ -210,9 +220,7 @@ async def test_ci_fast_path_runs_single_model_call_for_simple_greeting() -> None
 
     world = make_world()
     wax = add_student(world)
-    await world.services.turns.handle_student_message(
-        wax, "hi", channel="test"
-    )
+    await world.services.turns.handle_student_message(wax, "hi", channel="test")
     # The mock model records every decide() and finalize() call.
     # For a simple greeting the fast-path runs exactly one decide()
     # (and one finalize()). If the count is much higher, the

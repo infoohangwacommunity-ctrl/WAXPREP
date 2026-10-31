@@ -2406,8 +2406,7 @@ class PostgresStorage:
     ) -> OutboundDelivery | None:
         row = self._one(
             wax_id,
-            "SELECT * FROM outbound_deliveries "
-            "WHERE wax_id = %s AND id = %s",
+            "SELECT * FROM outbound_deliveries WHERE wax_id = %s AND id = %s",
             (wax_id, delivery_id),
         )
         return self._outbound(row) if row else None

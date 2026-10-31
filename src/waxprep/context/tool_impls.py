@@ -90,7 +90,9 @@ def _drop_trigger(
     """
     if trigger_entry_id is None:
         return results
-    return tuple(r for r in results if getattr(r, "source_id", None) != trigger_entry_id)
+    return tuple(
+        r for r in results if getattr(r, "source_id", None) != trigger_entry_id
+    )
 
 
 class FindExactTool:
@@ -348,9 +350,7 @@ class ListHistoryPaginatedTool:
             page_size=page_size,
             newest_first=newest_first,
         )
-        results = tuple(
-            history_evidence(e, "paginated history walk") for e in page
-        )
+        results = tuple(history_evidence(e, "paginated history walk") for e in page)
         metadata: dict[str, Any] = {
             "page_size": page_size,
             "returned": len(page),
@@ -392,9 +392,7 @@ class SearchHistoryByKeywordTool:
         )
         return ToolResult(
             name=self.name,
-            results=tuple(
-                history_evidence(e, "keyword search match") for e in matches
-            ),
+            results=tuple(history_evidence(e, "keyword search match") for e in matches),
             metadata={"query_length": len(query), "match_count": len(matches)},
         )
 
@@ -415,9 +413,7 @@ class SearchHistoryByTimeRangeTool:
         end = _when(a.get("end_ts")) or _when(a.get("until"))
         if start is None or end is None:
             return ToolResult(name=self.name, results=())
-        limit = max(
-            1, min(int(a.get("limit", TIME_RANGE_SEARCH_LIMIT)), 500)
-        )
+        limit = max(1, min(int(a.get("limit", TIME_RANGE_SEARCH_LIMIT)), 500))
         matches = self._storage.search_history_by_time_range(
             invocation.wax_id,
             start_ts=start,

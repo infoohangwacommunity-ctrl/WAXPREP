@@ -334,9 +334,8 @@ class ContextInvestigator:
         # update is justified. The model may still stop; we do not force a write.
         # SKIPPED on the fast-path: a simple message that did not warrant
         # investigation also does not warrant a stewardship round.
-        if (
-            not fast_path_taken
-            and not any(x.startswith("proposal_accepted:") for x in investigated)
+        if not fast_path_taken and not any(
+            x.startswith("proposal_accepted:") for x in investigated
         ):
             if tool_calls < limits.max_tool_calls and not hit_step_budget:
                 visible = format_for_model(

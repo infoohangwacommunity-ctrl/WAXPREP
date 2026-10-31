@@ -303,13 +303,15 @@ class InMemoryStorage:
                 rows = [
                     e
                     for e in rows
-                    if (e.occurred_at, self._history_seq[(wax_id, e.id)]) < (cur_time, cur_seq)
+                    if (e.occurred_at, self._history_seq[(wax_id, e.id)])
+                    < (cur_time, cur_seq)
                 ]
             else:
                 rows = [
                     e
                     for e in rows
-                    if (e.occurred_at, self._history_seq[(wax_id, e.id)]) > (cur_time, cur_seq)
+                    if (e.occurred_at, self._history_seq[(wax_id, e.id)])
+                    > (cur_time, cur_seq)
                 ]
         page = rows[:page_size]
         if not page:
@@ -411,9 +413,7 @@ class InMemoryStorage:
             if similarity <= 0:
                 continue
             scored.append(
-                ScoredMatch(
-                    r.object_type, r.object_id, r.object_time, similarity
-                )
+                ScoredMatch(r.object_type, r.object_id, r.object_time, similarity)
             )
         scored.sort(key=lambda s: s.score, reverse=True)
         return tuple(scored[:limit])
