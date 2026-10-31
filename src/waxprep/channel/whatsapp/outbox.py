@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from waxprep.channel.contracts import OutboundPayload
+from waxprep.channel.streaming.renderers import render_whatsapp
 from waxprep.channel.whatsapp.client import WhatsAppClient
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
@@ -292,6 +293,11 @@ class WhatsAppOutbox:
         Long replies are sent as successive complete messages (progressive
         delivery). Only the last provider message id is retained for status
         callbacks. History already holds the full final text.
+
+        The stored tutor text is raw model markdown; it is rendered to
+        WhatsApp syntax (*bold*, _italic_, ```code```) before splitting so
+        the durable retry path delivers the SAME formatted text as the live
+        send path (blueprint §7.4, §6.7).
         """
         try:
             typing = getattr(self._client, "send_typing", None)
@@ -303,7 +309,11 @@ class WhatsAppOutbox:
                 except Exception:
                     logger.debug("typing indicator failed", exc_info=True)
 
-            chunks = split_text_for_delivery(payload.text or "")
+            # Render markdown → WhatsApp syntax before splitting so a span
+            # never straddles a transport piece. The stored tutor reply is
+            # raw markdown; the live send path renders at send time too.
+            rendered_text = render_whatsapp(payload.text or "").text
+            chunks = split_text_for_delivery(rendered_text)
             if not chunks:
                 return DeliveryAttempt(
                     success=False,

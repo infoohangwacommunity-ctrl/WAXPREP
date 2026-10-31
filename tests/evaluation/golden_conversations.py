@@ -292,7 +292,13 @@ NEW_FACT_CREATES_ENTRY = GoldenScenario(
         uncertainty=(),
         stopped_reason="model_finalized",
     ),
-    expected_status=InvestigationStatus.SUCCESSFUL,
+    # The trigger message is the CURRENT message, not prior context —
+    # the runner's _drop_trigger excludes it from the evidence set
+    # (impl-qa.md: trigger is no longer counted as Evidence). The
+    # baseline browse returns nothing relevant prior to the trigger,
+    # so the package carries zero evidence items even though the
+    # proposal was accepted. Status is EMPTY, not SUCCESSFUL.
+    expected_status=InvestigationStatus.EMPTY,
     expected_proposal=ExpectedProposal(
         operation="add_notebook_entry",
         payload={"payload": {"exam_date": "Friday", "subject": "unspecified"}},
@@ -384,12 +390,14 @@ NO_OP_WHEN_SUFFICIENT = GoldenScenario(
         uncertainty=(),
         stopped_reason="model_finalized",
     ),
-    # The runtime forces a baseline browse (the trigger message is in
-    # history). The package carries the trigger as evidence. Status is
-    # SUCCESSFUL — the investigation completed and found at least the
-    # trigger. The 'no notebook change' contract is verified by
-    # expects_no_notebook_change=True, not by the status.
-    expected_status=InvestigationStatus.SUCCESSFUL,
+    # The trigger message is the CURRENT message, not prior context.
+    # The runner's _drop_trigger excludes the trigger from the
+    # evidence set (impl-qa.md: trigger is no longer counted as
+    # Evidence). The baseline browse returns nothing relevant prior
+    # to the trigger, so the package carries zero evidence items.
+    # Status is EMPTY, not SUCCESSFUL — the 'no notebook change'
+    # contract is verified by expects_no_notebook_change=True.
+    expected_status=InvestigationStatus.EMPTY,
     expects_no_notebook_change=True,
     must_not_propose=True,
 )
@@ -819,12 +827,15 @@ INSUFFICIENT_EVIDENCE_ABSTAINS = GoldenScenario(
         uncertainty=("no relevant evidence found in recent history",),
         stopped_reason="model_finalized",
     ),
-    # The runtime forces a baseline browse; the trigger message is in
-    # history. The browse returns it. Status is SUCCESSFUL — the
-    # investigation completed with evidence (the trigger itself). The
-    # 'no relevant prior context' contract is captured in the
-    # uncertainty tuple, not in the status.
-    expected_status=InvestigationStatus.SUCCESSFUL,
+    # The trigger message is the CURRENT message, not prior context.
+    # The runner's _drop_trigger excludes the trigger from the evidence
+    # set (impl-qa.md: trigger is no longer counted as Evidence). The
+    # baseline browse returns nothing relevant prior to the trigger
+    # (the student has no dog in history), so the package carries zero
+    # evidence items. Status is EMPTY, not SUCCESSFUL — the 'no
+    # relevant prior context' contract is captured in the uncertainty
+    # tuple AND in the status, not just the status text.
+    expected_status=InvestigationStatus.EMPTY,
     expects_uncertainty=True,
     expects_no_notebook_change=True,
     must_not_propose=True,
@@ -1088,7 +1099,16 @@ TOOL_FAILURE_SURFACES_HONESTLY = GoldenScenario(
         uncertainty=("one tool call rejected as missing_tool",),
         stopped_reason="model_finalized",
     ),
-    expected_status=InvestigationStatus.SUCCESSFUL,
+    # The trigger message is the CURRENT message, not prior context.
+    # The runner's _drop_trigger excludes the trigger from the
+    # evidence set (impl-qa.md: trigger is no longer counted as
+    # Evidence). The baseline browse returns nothing relevant prior
+    # to the trigger, so the package carries zero evidence items
+    # even though the baseline browse "ran successfully". Status is
+    # EMPTY, not SUCCESSFUL — the 'tool failed honestly' contract is
+    # verified by the audit trail recording missing_tool, not by
+    # the status.
+    expected_status=InvestigationStatus.EMPTY,
     expects_uncertainty=True,
     expects_no_notebook_change=True,
 )

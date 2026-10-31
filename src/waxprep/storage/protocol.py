@@ -58,6 +58,31 @@ class TokenStats:
     document_frequency: dict[bytes, int]
 
 
+@dataclass(frozen=True, slots=True)
+class ScoredMatch:
+    """One similarity-search hit, scored against a query vector.
+
+    Returned by ``Storage.find_by_meaning``. ``score`` is cosine
+    similarity in ``[-1.0, 1.0]`` (1.0 == identical direction). When
+    pgvector is available the score is computed in SQL by the ``<=>``
+    operator (cosine distance); otherwise it is computed by the
+    Python fallback ``cosine_similarity`` against each decrypted
+    embedding.
+    """
+
+    object_type: ObjectType
+    object_id: UUID
+    object_time: datetime
+    score: float
+
+
+# Cursor for cursor-paginated history reads. The tuple is
+# ``(occurred_at, seq)`` of the last row returned by the previous
+# page; combined with ``wax_id`` it uniquely identifies a position in
+# the history stream. ``None`` means "from the beginning".
+HistoryCursor = tuple[datetime, int] | None
+
+
 class Storage(Protocol):
     """Student-scoped persistence. Cross-student access must fail."""
 
@@ -135,6 +160,114 @@ class Storage(Protocol):
     def list_unsummarized_history(
         self, wax_id: WaxId, *, before: datetime, limit: int
     ) -> tuple[HistoryEntry, ...]: ...
+
+    def list_history_paginated(
+        self,
+        wax_id: WaxId,
+        *,
+        before: HistoryCursor = None,
+        page_size: int = 25,
+        newest_first: bool = True,
+    ) -> tuple[tuple[HistoryEntry, ...], HistoryCursor]:
+        """Return one page of history plus a cursor for the next page.
+
+        ``before`` is the cursor returned by the previous call (the
+        ``(occurred_at, seq)`` of the last row returned). Pass ``None``
+        for the first page. ``newest_first=True`` walks the stream in
+        reverse chronological order (the dominant access pattern for
+        history UIs and the context retriever's browse_window). When
+        the returned cursor is ``None`` the end of the stream has been
+        reached.
+
+        Uses the ``idx_history_wax_occurred_desc`` B-tree index from
+        migration 016 for an index-only forward scan when
+        ``newest_first=True``.
+
+        RLS: enforced by ``assume_app_role`` + ``set_current_wax_id``
+        on the underlying connection; the SQL never filters by
+        ``wax_id`` directly — the policy does.
+        """
+        ...
+
+    def search_history_by_keyword(
+        self, wax_id: WaxId, query: str, *, limit: int = 50
+    ) -> tuple[HistoryEntry, ...]:
+        """Substring search over decrypted history text.
+
+        ``history_entries.text_encrypted`` is AES-GCM ciphertext, so
+        ILIKE cannot run server-side. This method fetches candidates
+        in deterministic time order, decrypts each row, and applies
+        a case-insensitive substring test in Python. Pagination stops
+        as soon as ``limit`` matches are found or the stream is
+        exhausted. For exact-word matches prefer
+        ``find_by_tokens`` (blind HMAC index, server-side).
+
+        RLS: ``assume_app_role`` + ``set_current_wax_id``. Only the
+        rows the calling student owns are decrypted; the encryption
+        key is derived per-student so even a key compromise of one
+        student cannot read another's text.
+        """
+        ...
+
+    def search_history_by_time_range(
+        self,
+        wax_id: WaxId,
+        *,
+        start_ts: datetime,
+        end_ts: datetime,
+        limit: int = 200,
+    ) -> tuple[HistoryEntry, ...]:
+        """All history in ``[start_ts, end_ts)`` for one student.
+
+        Uses ``idx_history_wax_time_range`` (migration 016) for an
+        index-only scan. ``limit`` caps the result size so a
+        misconfigured range cannot trigger unbounded memory use.
+
+        RLS: enforced by ``assume_app_role`` +
+        ``set_current_wax_id``; the SQL filters by ``occurred_at``
+        range only.
+        """
+        ...
+
+    def has_pgvector(self) -> bool:
+        """Return True iff the ``vector`` extension is loaded AND
+        the ``search_embeddings.vector_plain`` column exists.
+
+        When True, ``find_by_meaning`` uses pgvector's ``<=>`` ANN
+        search (HNSW if the index was created, sequential scan
+        otherwise). When False, the Python-side cosine fallback
+        paginates the encrypted embeddings and decrypts each blob —
+        the pre-pgvector behaviour.
+        """
+        ...
+
+    def find_by_meaning(
+        self,
+        wax_id: WaxId,
+        query_vector: tuple[float, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        limit: int = 8,
+    ) -> tuple[ScoredMatch, ...]:
+        """Semantic similarity search over one student's embeddings.
+
+        Returns at most ``limit`` matches ranked by descending
+        similarity to ``query_vector``. When ``has_pgvector()`` is
+        True the ranking is computed in SQL by ``1 - (vector_plain
+        <=> query)`` ordered by distance with ``LIMIT``. When
+        False, the method paginates ``list_embeddings_page`` and
+        computes ``cosine_similarity`` in Python — identical
+        ranking, slower per-row cost.
+
+        RLS: ``assume_app_role`` + ``set_current_wax_id`` scope
+        every row the query reads to the calling student. The
+        pgvector path reads only the plaintext ``vector_plain``
+        column (no decryption needed); the fallback path decrypts
+        each ``vector_encrypted`` blob with the per-student key.
+        """
+        ...
 
     # --- attachments ----------------------------------------------------
     def create_attachment(self, attachment: Attachment) -> Attachment: ...
@@ -439,6 +572,12 @@ class Storage(Protocol):
         self, wax_id: WaxId, tutor_entry_id: UUID, channel: str | None
     ) -> OutboundDelivery | None: ...
 
+    def get_outbound_delivery(
+        self, wax_id: WaxId, delivery_id: UUID
+    ) -> OutboundDelivery | None:
+        """Fetch a single outbound delivery by id (read-only)."""
+        ...
+
     def list_due_outbound_deliveries(
         self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]: ...
@@ -470,7 +609,18 @@ class Storage(Protocol):
         delivery_id: UUID,
         now: datetime,
         provider_message_id: str | None = None,
-    ) -> None: ...
+    ) -> bool:
+        """Atomically mark a delivery delivered.
+
+        Returns ``True`` iff this call transitioned the row to delivered
+        (``delivered_at`` was ``NULL``); ``False`` if the row was already
+        delivered. The CAS guard ``delivered_at IS NULL`` makes the live
+        progressive-delivery path and the durable outbox worker idempotent
+        w.r.t. each other — fixes the double-message race where the outbox
+        re-sent the full tutor text after progressive delivery had already
+        pushed chunks to the student.
+        """
+        ...
 
     def mark_outbound_failed(
         self,
@@ -479,7 +629,13 @@ class Storage(Protocol):
         now: datetime,
         error: str,
         retry_at: datetime | None,
-    ) -> None: ...
+    ) -> None:
+        """Mark a delivery failed. When ``retry_at`` is not None the row
+        reverts to ``pending`` for retry and ``delivered_at`` is cleared so
+        the row is internally consistent (the live progressive path may have
+        optimistically marked delivered before progressive.finish raised).
+        """
+        ...
 
     # --- interactive offers (one-shot buttons) --------------------------------------
     def create_interactive_offer(self, offer: InteractiveOffer) -> InteractiveOffer: ...
@@ -583,4 +739,10 @@ class Storage(Protocol):
         ...
 
 
-__all__ = ["Storage", "TokenMatch", "TokenStats"]
+__all__ = [
+    "HistoryCursor",
+    "ScoredMatch",
+    "Storage",
+    "TokenMatch",
+    "TokenStats",
+]

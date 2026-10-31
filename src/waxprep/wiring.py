@@ -48,7 +48,6 @@ from waxprep.context.models import InvestigationLimits
 from waxprep.context.retrieval import Retriever
 from waxprep.context.tool_impls import build_default_tools
 from waxprep.derive.artifacts import ArtifactProcessor, ArtifactUnderstandingService
-from waxprep.derive.consolidation import ConsolidationModel, ConsolidationService
 from waxprep.derive.worker import DerivationWorker
 from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.history.service import HistoryService
@@ -84,9 +83,15 @@ class WaxPrepServices:
     turns: TurnService
     worker: DerivationWorker
     deletion: DeletionService
-    consolidation: ConsolidationService | None
     artifacts: ArtifactUnderstandingService | None
     judge: QualityJudgeService | None
+    # NOTE: ``ConsolidationService`` is RETIRED (founder's brief, "the
+    # summary worker is dead code"). The notebook is now the easy-access
+    # summary source. The consolidation module stays importable for
+    # backward-compat with existing tests that exercise its pure
+    # behaviour, but no live wiring constructs or schedules it. Removing
+    # the wiring (rather than the class) keeps the type stable for any
+    # downstream code that imports ``WaxPrepServices``.
 
 
 def build_services(
@@ -99,7 +104,6 @@ def build_services(
     gateway: ModelGateway | None = None,
     teacher_model_name: str = DEFAULT_TEACHER_MODEL_NAME,
     embedder: EmbeddingProvider | None = None,
-    consolidation_model: ConsolidationModel | None = None,
     artifact_processor: ArtifactProcessor | None = None,
     ci_limits: InvestigationLimits | None = None,
     judge_model: JudgeModel | None = None,
@@ -126,6 +130,15 @@ def build_services(
         ValueError: If neither ``teacher`` nor ``gateway`` is provided, so
             a misconfigured composition fails at startup instead of
             silently teaching without a Teacher.
+
+    Note:
+        ``ConsolidationService`` is RETIRED (founder's brief: "the summary
+        worker is in your code but not connected — it's dead code"). The
+        notebook is now the easy-access summary source. The
+        ``consolidation_model=`` parameter has been removed; legacy callers
+        that still pass it will get a ``TypeError`` so the retirement is
+        visible. Existing tests of ``ConsolidationService`` construct the
+        service directly without going through ``build_services``.
     """
     if teacher is None:
         if gateway is None:
@@ -184,11 +197,11 @@ def build_services(
         if artifact_processor is not None
         else None
     )
-    consolidation = (
-        ConsolidationService(storage, evolution, indexer, consolidation_model, clock)
-        if consolidation_model is not None
-        else None
-    )
+    # ConsolidationService is RETIRED (founder's brief). The notebook
+    # is now the easy-access summary source — the runtime exposes it
+    # to CI through the ``inspect_notebook`` tool, and CI decides when
+    # to consult it. The old ``ConsolidationService`` wiring that
+    # scheduled periodic summary jobs is gone.
     turns = TurnService(
         storage,
         history,
@@ -224,7 +237,6 @@ def build_services(
         turns=turns,
         worker=worker,
         deletion=deletion,
-        consolidation=consolidation,
         artifacts=artifacts,
         judge=judge,
     )

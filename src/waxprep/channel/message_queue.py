@@ -101,17 +101,25 @@ class QueueConfig:
     arrival re-arms it. ``max_collection_seconds`` is the hard deadline
     measured from the FIRST pending message of the batch — the turn
     always starts by then.
+
+    Latency fix (founder's brief): the dataclass defaults now match
+    the production wiring in ``app.build_queue_config`` — 0.5s for the
+    coalesce window and 3.0s for the hard collection cap. The previous
+    2.0s/12.0s defaults made every fast-path turn wait two seconds
+    before the queue even decided to fire. The new defaults drop the
+    queue-induced wait to ~0.5s for a single-message turn while still
+    letting a rapid burst coalesce into one tutor reply.
     """
 
     enforce_fifo: bool = True
     coalesce_enabled: bool = True
-    coalesce_window_seconds: float = 2.0
+    coalesce_window_seconds: float = 0.5
     max_batch_messages: int = 5
     max_concurrent_per_student: int = 1
     rate_limit_per_student_per_second: float = 10.0
     worker_idle_timeout_seconds: float = 120.0
     # Hard cap on collection (from the first pending message).
-    max_collection_seconds: float = 12.0
+    max_collection_seconds: float = 3.0
     # Opt-in small-model semantic grouping. Time-based assembly remains
     # the default; a grouper must ALSO be wired for this to do anything.
     semantic_grouping_enabled: bool = False

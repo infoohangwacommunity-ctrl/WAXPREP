@@ -494,7 +494,20 @@ def build_context_model(settings: Any = None):
 
 
 def build_gateway(settings: Any):
-    """Register Upstage provider + logical teacher/context models."""
+    """Register Upstage provider + logical teacher/context models.
+
+    Latency fix (founder's brief): one shared ``httpx.AsyncClient`` is
+    constructed at wiring time and passed to every provider that talks
+    HTTP. Each provider used to call ``httpx.AsyncClient()`` per
+    request — paying the TCP-setup cost every time. The shared client
+    keeps connections alive across requests and across models (teacher,
+    context, judge) so a typical turn's three model calls reuse the
+    same warm connection pool. The provider NEVER closes the shared
+    client after a call (only its own per-request client, when one was
+    created — which is now the rare fallback path).
+    """
+    import httpx
+
     from waxprep.model_gateway.gateway import ModelGateway
     from waxprep.model_gateway.models import ModelCapability, ModelRole
     from waxprep.model_gateway.providers.upstage import UpstageResponsesProvider
@@ -507,7 +520,15 @@ def build_gateway(settings: Any):
     base_url = (
         getattr(settings, "upstage_base_url", None) or "https://api.upstage.ai/v1"
     )
-    provider = UpstageResponsesProvider(api_key=api_key or "missing", base_url=base_url)
+    # ONE shared client across every Upstage call (teacher, context,
+    # judge, grouping). Connection pool stays warm for the lifetime of
+    # the gateway; the provider never closes it.
+    shared_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
+    provider = UpstageResponsesProvider(
+        api_key=api_key or "missing",
+        base_url=base_url,
+        client=shared_client,
+    )
     registry.register_provider(provider)
     endpoint = getattr(settings, "upstage_model", None) or "solar-pro4"
     caps = provider.capabilities(endpoint)
@@ -545,17 +566,25 @@ def build_embedder(settings: Settings) -> EmbeddingProvider | None:
     background embedding jobs the indexer schedules. Unset means
     lexical-only retrieval, which the meaning-search tool reports
     honestly instead of pretending semantic search succeeded.
+
+    Latency fix (founder's brief): when an embedding provider is wired,
+    it receives the SAME shared ``httpx.AsyncClient`` used by the
+    model gateway so embedding calls reuse the warm connection pool.
     """
     if settings.embedding_api_key is None or settings.embedding_model is None:
         return None
+    import httpx
+
     from waxprep.embeddings.http import HttpEmbeddingProvider
 
+    shared_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
     return HttpEmbeddingProvider(
         api_key=settings.embedding_api_key,
         model=settings.embedding_model,
         base_url=settings.embedding_base_url,
         dimensions=settings.embedding_dimensions,
         timeout_seconds=settings.media_limits.request_timeout_seconds,
+        client=shared_client,
     )
 
 
@@ -573,10 +602,11 @@ def build_queue_config() -> QueueConfig:
     """Per-student queue knobs from the environment (all optional).
 
     WAXPREP_QUEUE_COALESCE  — "0"/"1" time-window coalescing (default on)
-    WAXPREP_QUEUE_WINDOW    — coalescing window seconds (default 5.0)
+    WAXPREP_QUEUE_WINDOW    — coalescing window seconds (default 0.5; founder's
+    latency target drops queue-induced wait to ~0.5s for fast-path turns)
     WAXPREP_QUEUE_MAX_BATCH — max messages coalesced per turn (default 5)
     WAXPREP_QUEUE_MAX_COLLECTION — hard collection deadline seconds from
-    the first pending message (default 12)
+    the first pending message (default 3.0; balances batching vs latency)
     WAXPREP_QUEUE_SEMANTIC — "0"/"1" small-model semantic grouping
     (default on; falls back to the time window whenever the model fails)
     WAXPREP_QUEUE_GROUPING_TIMEOUT — semantic grouping call budget
@@ -606,10 +636,10 @@ def build_queue_config() -> QueueConfig:
     return QueueConfig(
         enforce_fifo=True,
         coalesce_enabled=_flag("WAXPREP_QUEUE_COALESCE", True),
-        coalesce_window_seconds=_positive_float("WAXPREP_QUEUE_WINDOW", 5.0),
+        coalesce_window_seconds=_positive_float("WAXPREP_QUEUE_WINDOW", 0.5),
         max_batch_messages=_positive_int("WAXPREP_QUEUE_MAX_BATCH", 5),
         max_concurrent_per_student=1,
-        max_collection_seconds=_positive_float("WAXPREP_QUEUE_MAX_COLLECTION", 12.0),
+        max_collection_seconds=_positive_float("WAXPREP_QUEUE_MAX_COLLECTION", 3.0),
         semantic_grouping_enabled=_flag("WAXPREP_QUEUE_SEMANTIC", True),
         grouping_timeout_seconds=_positive_float("WAXPREP_QUEUE_GROUPING_TIMEOUT", 1.5),
     )

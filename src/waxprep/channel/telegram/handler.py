@@ -30,7 +30,6 @@ from waxprep.channel.contracts import (
     NormalizedInbound,
     OutboundPayload,
 )
-from waxprep.media.processors.stt import SpeechToText
 from waxprep.channel.message_queue import MessageQueue, QueuedMessage
 from waxprep.channel.streaming.accumulator import AnswerAccumulator
 from waxprep.channel.streaming.contract import ChannelCapability
@@ -38,7 +37,7 @@ from waxprep.channel.streaming.coordinator import StreamingCoordinator
 from waxprep.channel.streaming.display import ChoicesMarkerFilter
 from waxprep.channel.streaming.observability import StreamingCounters
 from waxprep.channel.streaming.pacing import TELEGRAM_DRAFT_DEFAULT
-from waxprep.channel.streaming.renderers import telegram_capabilities
+from waxprep.channel.streaming.renderers import render_telegram, telegram_capabilities
 from waxprep.channel.telegram.client import TelegramClient
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId, new_wax_id
@@ -49,10 +48,12 @@ from waxprep.domain.models import (
     InteractiveOfferStatus,
     JobStatus,
     ObjectType,
+    OutboundStatus,
     new_id,
 )
 from waxprep.history.service import HistoryService
 from waxprep.index.indexer import JOB_INGEST_MEDIA, JOB_PROCESS_TURN
+from waxprep.media.processors.stt import SpeechToText
 from waxprep.orchestration.contracts_ci_first import TextDeltaSink
 from waxprep.orchestration.turn_ci_first import TurnResultCiFirst, TurnServiceCiFirst
 from waxprep.storage.protocol import Storage
@@ -411,7 +412,7 @@ class TelegramInboundHandler:
                 extra={
                     "wax_id": str(wax_id),
                     "entry_id": str(student_entry.id),
-                    "created": created,
+                    "saved_at": created,
                 },
             )
 
@@ -613,13 +614,42 @@ class TelegramInboundHandler:
                     thread_ref=msg.reply_to_provider_id,
                     occurred_at=msg.occurred_at,
                     on_text_delta=on_text_delta,
+                    # Double-message race fix (founder's brief, 3b):
+                    # ``live_delivery=True`` creates the outbound delivery
+                    # row in ``IN_PROGRESS`` inside the turn service's
+                    # transaction. The outbox's CAS only transitions
+                    # PENDING→IN_PROGRESS, so it cannot claim a live-owned
+                    # row. The live path then owns the delivery and is
+                    # responsible for ``mark_outbound_delivered`` (success)
+                    # or ``mark_outbound_failed`` with ``retry_at``
+                    # (release to PENDING so the outbox retries).
+                    live_delivery=True,
                 )
             )
 
             # Claim outbound before any channel send so the outbox worker
             # cannot deliver the same tutor text a second time.
-            skip_live_send = False
+            #
+            # When ``live_delivery=True`` was used, the turn service
+            # creates the outbound row in ``IN_PROGRESS`` state. The
+            # outbox worker's ``claim_outbound_delivery`` CAS only
+            # transitions ``PENDING → IN_PROGRESS``, so it CANNOT claim
+            # a live-owned row. The live path owns the outbound when the
+            # row is ``IN_PROGRESS`` (regardless of the ``duplicate``
+            # flag, which refers to the student message, not the
+            # outbound row).
+            live_owns_delivery = False
             if turn_result.outbound_delivery_id is not None:
+                _existing = self._storage.get_outbound_delivery(
+                    wax_id, turn_result.outbound_delivery_id
+                )
+                if _existing is not None and _existing.status is OutboundStatus.IN_PROGRESS:
+                    live_owns_delivery = True
+            skip_live_send = False
+            if (
+                turn_result.outbound_delivery_id is not None
+                and not live_owns_delivery
+            ):
                 claimed = self._storage.claim_outbound_delivery(
                     wax_id,
                     turn_result.outbound_delivery_id,
@@ -876,15 +906,24 @@ class TelegramInboundHandler:
         Returns None when any piece is rejected or raises — the caller then
         leaves the outbound record retryable so the durable outbox re-sends
         the stored reply (at-least-once, never silently dropped).
+
+        The raw model markdown is rendered to Telegram HTML (<b>, <i>,
+        <code>, <pre>) BEFORE splitting; ``send_text`` is invoked with
+        ``parse_mode="HTML"`` so the Bot API interprets the tags
+        (blueprint §7.5).
         """
         client = self._telegram_client
         if client is None:
             return None
         from waxprep.channel.delivery import split_for_platform
 
+        # Render the full answer once, then split the rendered HTML. This
+        # guarantees a markdown span (e.g. **bold**) is never split across
+        # transport pieces, which would produce unbalanced HTML tags.
+        rendered_text = render_telegram(text).text
         last_provider_message_id: str | None = None
         try:
-            for piece in split_for_platform(text, self._config.channel):
+            for piece in split_for_platform(rendered_text, self._config.channel):
                 result = await client.send_text(
                     OutboundPayload(
                         channel=self._config.channel,
@@ -1013,15 +1052,21 @@ class TelegramInboundHandler:
     async def _send_progressive_chunk(
         self, client: TelegramClient, chat_id: str, text: str
     ) -> None:
-        """Send a progressive chunk as a complete message."""
+        """Send a progressive chunk as a complete message.
+
+        The chunk is rendered to Telegram HTML at the leaf send;
+        ``send_text`` defaults to ``parse_mode="HTML"`` so the Bot API
+        interprets the tags (blueprint §7.5).
+        """
         if not text.strip():
             return
+        rendered_body = render_telegram(text).text
         result = await client.send_text(
             OutboundPayload(
                 channel=self._config.channel,
                 wax_id=new_wax_id(),  # placeholder - the client ignores it
                 recipient_external_id=chat_id,
-                text=text,
+                text=rendered_body,
             )
         )
         if not result.success:

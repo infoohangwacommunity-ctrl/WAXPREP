@@ -141,6 +141,18 @@ class ContextInvestigator:
         # hand) from INCOMPLETE (step/tool budget reached before the
         # model finished).
         hit_evidence_budget = False
+        # Latency fast-path (founder's brief: "stop running 3-10 AI calls
+        # before the main tutor answers"). When the model's FIRST decide()
+        # returns ``stop`` with no evidence, the message is simple enough
+        # that CI does not need to investigate further. We accept the
+        # model's stop, skip the baseline-browse force and the
+        # stewardship check, and ship an EMPTY package honestly. The
+        # decision is the model's, NOT a keyword match — the model decides
+        # whether the message warrants investigation by returning ``stop``
+        # on its own first call. This collapses the common case
+        # (one-word openers, simple acknowledgements) to ONE model round
+        # instead of three.
+        fast_path_taken = False
 
         def model_request(visible: str) -> ContextModelRequest:
             return ContextModelRequest(
@@ -165,11 +177,44 @@ class ContextInvestigator:
             decision = await self.model.decide(model_request(visible))
             investigated.append(f"{decision.action}: {decision.reason}")
 
+            # Fast-path: the model's FIRST decision is "stop" with no
+            # prior evidence. The model has decided this message does
+            # not warrant investigation (e.g. a one-word message that
+            # carries no durable context). Skip the baseline-browse
+            # force and the stewardship check — they would add two more
+            # model rounds for no educational value. The package is
+            # honestly EMPTY: no tools ran, no evidence was gathered,
+            # the model looked and decided nothing was worth retrieving.
+            # The Teacher can branch on EMPTY status.
+            #
+            # Only take the fast-path when the baseline browse tool IS
+            # available — when CI is properly wired. If the tool is
+            # missing (broken wiring, test simulates this with
+            # ``tools={}``), fall through to the existing baseline-browse
+            # force below; it records ``missing_tool:browse_time_window``
+            # and the runtime honestly reports FAILED. The fast-path is
+            # a latency optimisation for the COMMON case, not a way to
+            # hide broken CI wiring.
+            if (
+                decision.action == "stop"
+                and tool_calls == 0
+                and not evidence
+                and _step == 0
+                and self.tools.get("browse_time_window") is not None
+            ):
+                fast_path_taken = True
+                stopped_by_model = True
+                investigated.append("fast_path:simple_message_no_investigation")
+                break
+
             # GUARANTEE: CI must perform at least one contextual inspection.
             # If CI tries to stop without any tool calls and no evidence,
             # force at least one browse_time_window to check recent history.
             # This is the *only* place the application overrides the model,
             # and it is documented in the system prompt as a baseline check.
+            # NOTE: the fast-path above skips this force on the FIRST decide
+            # for simple messages; the force only fires on later stops or
+            # when the model has already gathered evidence mid-investigation.
             if decision.action == "stop" and tool_calls == 0 and len(evidence) == 0:
                 logger.debug(
                     "CI attempted to stop without inspection; "
@@ -287,7 +332,12 @@ class ContextInvestigator:
         # Optional notebook stewardship step: if CI never proposed a lifecycle
         # change, give one more decision focused on whether a durable notebook
         # update is justified. The model may still stop; we do not force a write.
-        if not any(x.startswith("proposal_accepted:") for x in investigated):
+        # SKIPPED on the fast-path: a simple message that did not warrant
+        # investigation also does not warrant a stewardship round.
+        if (
+            not fast_path_taken
+            and not any(x.startswith("proposal_accepted:") for x in investigated)
+        ):
             if tool_calls < limits.max_tool_calls and not hit_step_budget:
                 visible = format_for_model(
                     evidence, request.now, limits.max_context_characters
@@ -408,6 +458,7 @@ class ContextInvestigator:
             failed_tool_calls=failed_tool_calls,
             evidence_count=len(selected),
             invalid_selection=invalid_selection,
+            fast_path_taken=fast_path_taken,
         )
 
         # The investigated audit log carries enough to tell a future
@@ -510,6 +561,7 @@ def _compute_status(
     failed_tool_calls: int,
     evidence_count: int,
     invalid_selection: bool,
+    fast_path_taken: bool = False,
 ) -> InvestigationStatus:
     """Decide the package's investigation status from runtime facts.
 
@@ -532,7 +584,20 @@ def _compute_status(
     5. SUCCESSFUL: the model finalised and at least one piece of evidence
        survived selection. This includes the case where the evidence cap
        was reached — that is a successful "enough evidence" stop.
+
+    Fast-path: when the model's FIRST decide() returns ``stop`` for a
+    simple message, the runtime skips the baseline-browse force and the
+    stewardship round (latency fix). The package is honestly EMPTY —
+    the model looked and decided nothing was worth retrieving.
     """
+    # Fast-path: the model decided on its first call that no investigation
+    # was warranted (e.g. a one-word opener). We respect that decision —
+    # the package is honestly EMPTY, NOT FAILED. The model DID look;
+    # it just decided nothing was worth retrieving. This is the latency
+    # fix: one model call instead of three for the common simple case.
+    if fast_path_taken:
+        return InvestigationStatus.EMPTY
+
     # Hitting the evidence cap is a successful stop, *provided* we have
     # at least one piece of evidence in hand (which the cap implies)
     # AND the model's final selection did not invalidate the result.
