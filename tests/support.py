@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from waxprep.clock import FakeClock
 from waxprep.context.mock_model import MockContextModel
 from waxprep.derive.artifacts import ArtifactProcessor
-from waxprep.derive.consolidation import ConsolidationModel
 from waxprep.domain.identifiers import WaxId, new_wax_id
 from waxprep.domain.models import Student, StudentStatus
 from waxprep.embeddings.protocol import EmbeddingProvider
@@ -102,7 +101,6 @@ def make_world(
     embedder: EmbeddingProvider | None = None,
     context_model: MockContextModel | None = None,
     teacher: RecordingTeacher | None = None,
-    consolidation_model: ConsolidationModel | None = None,
     artifact_processor: ArtifactProcessor | None = None,
     start: datetime = START,
 ) -> World:
@@ -117,7 +115,6 @@ def make_world(
         context_model=model,
         teacher=tutor,
         embedder=embedder,
-        consolidation_model=consolidation_model,
         artifact_processor=artifact_processor,
     )
     return World(store, clock, services, model, tutor)

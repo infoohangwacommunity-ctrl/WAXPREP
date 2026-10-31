@@ -9,6 +9,7 @@ from datetime import timedelta
 
 from waxprep.channel.contracts import OutboundPayload
 from waxprep.channel.delivery import split_for_platform
+from waxprep.channel.streaming.renderers import render_telegram
 from waxprep.channel.telegram.client import TelegramClient
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
@@ -91,6 +92,12 @@ class TelegramOutbox:
         retried with exponential backoff up to max_attempts; permanent
         failures are marked failed. The same stored reply text is sent on
         every retry (no re-teaching).
+
+        The stored tutor text is raw model markdown; it is rendered to
+        Telegram HTML (<b>, <i>, <code>, <pre>) before splitting so the
+        durable retry path delivers the SAME formatted text as the live
+        send path. ``send_text`` defaults to ``parse_mode="HTML"``
+        (blueprint §7.5, §6.7).
         """
         now = self._clock.now()
         if delivery.status is OutboundStatus.DELIVERED:
@@ -134,9 +141,13 @@ class TelegramOutbox:
             )
             return
 
+        # Render markdown → Telegram HTML before splitting so a markdown
+        # span never straddles a transport piece (which would produce
+        # unbalanced HTML tags). ``send_text`` defaults to parse_mode=HTML.
+        rendered_text = render_telegram(text).text
         last_mid = None
         try:
-            for chunk in split_for_platform(text, self._config.channel):
+            for chunk in split_for_platform(rendered_text, self._config.channel):
                 result = await self._client.send_text(
                     OutboundPayload(
                         channel=self._config.channel,

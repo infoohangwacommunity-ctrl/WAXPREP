@@ -18,6 +18,12 @@ if TYPE_CHECKING:
     from waxprep.context.evolution import EvolutionResult, EvolutionService
 
 MAX_RESULTS = 8
+# Memory redesign (founder's brief): the model can page through complete
+# history. These caps protect the database round-trip — they are NOT
+# relevance rules. The model decides how far back to walk.
+PAGINATED_HISTORY_PAGE_SIZE = 25
+KEYWORD_SEARCH_LIMIT = 50
+TIME_RANGE_SEARCH_LIMIT = 200
 
 
 def _limit(arguments: dict[str, Any], default: int = MAX_RESULTS) -> int:
@@ -64,6 +70,27 @@ def _type_or_none(value: object) -> ObjectType | None:
         return ObjectType(str(value)) if value else None
     except ValueError:
         return None
+
+
+def _drop_trigger(
+    results: tuple[Any, ...], trigger_entry_id: UUID | None
+) -> tuple[Any, ...]:
+    """Filter the trigger entry out of baseline-browse evidence.
+
+    The trigger message (the current student message that triggered this
+    investigation) is NOT prior context. It is what CI was asked to
+    investigate. Treating it as Evidence let the runtime report
+    SUCCESSFUL when no prior context existed — a trigger-as-evidence
+    pattern that masked honest "no prior history" packages as success.
+
+    Applied only to the baseline ``browse_time_window`` call so the
+    trigger does not pretend to be evidence of prior context. Explicit
+    keyword / time-range / paginated searches keep the trigger if it
+    matches — those are deliberate searches, not baseline browses.
+    """
+    if trigger_entry_id is None:
+        return results
+    return tuple(r for r in results if getattr(r, "source_id", None) != trigger_entry_id)
 
 
 class FindExactTool:
@@ -138,6 +165,13 @@ class BrowseTimeWindowTool:
             limit=_limit(a),
             newest_first=bool(a.get("newest_first", True)),
         )
+        # Baseline browse: the trigger entry (the student's current
+        # message) is NOT prior context. It is what CI was asked to
+        # investigate, so it must not pose as Evidence of prior history.
+        # Explicit searches (find_exact, search_history_by_keyword,
+        # search_history_by_time_range, list_history_paginated) keep the
+        # trigger when it matches — those are deliberate searches.
+        results = _drop_trigger(results, invocation.trigger_entry_id)
         return ToolResult(name=self.name, results=results)
 
 
@@ -268,6 +302,187 @@ class ReadArtifactTool:
             if item is not None:
                 evidence.append(item)
         return ToolResult(name=self.name, results=tuple(evidence))
+
+
+class ListHistoryPaginatedTool:
+    """Cursor-paginated walk through the student's complete history.
+
+    Memory redesign (founder's brief: "confused at 30-50 messages"):
+    the previous ``max_exchange_entries`` cap hid older turns from the
+    Teacher. The cap is GONE — the model can now page through complete
+    history with this tool. The page size is a DB-round-trip protection,
+    NOT a relevance rule.
+    """
+
+    name = "list_history_paginated"
+
+    def __init__(self, storage: Storage) -> None:
+        self._storage = storage
+
+    async def execute(self, invocation: ToolInvocation) -> ToolResult:
+        from waxprep.context.evidence import history_evidence
+        from waxprep.storage.protocol import HistoryCursor
+
+        a = invocation.arguments
+        wax_id = invocation.wax_id
+        page_size = max(
+            1, min(int(a.get("page_size", PAGINATED_HISTORY_PAGE_SIZE)), 100)
+        )
+        newest_first = bool(a.get("newest_first", True))
+        raw_cursor = a.get("before")
+        cursor: HistoryCursor
+        if isinstance(raw_cursor, dict):
+            try:
+                occurred_at_str = str(raw_cursor.get("occurred_at") or "")
+                seq = int(raw_cursor.get("seq") or 0)
+                cursor = (datetime.fromisoformat(occurred_at_str), seq)
+            except (ValueError, TypeError):
+                cursor = None
+        elif raw_cursor is None:
+            cursor = None
+        else:
+            cursor = None
+        page, next_cursor = self._storage.list_history_paginated(
+            wax_id,
+            before=cursor,
+            page_size=page_size,
+            newest_first=newest_first,
+        )
+        results = tuple(
+            history_evidence(e, "paginated history walk") for e in page
+        )
+        metadata: dict[str, Any] = {
+            "page_size": page_size,
+            "returned": len(page),
+            "has_more": next_cursor is not None,
+        }
+        if next_cursor is not None:
+            metadata["next_cursor"] = {
+                "occurred_at": next_cursor[0].isoformat(),
+                "seq": next_cursor[1],
+            }
+        return ToolResult(name=self.name, results=results, metadata=metadata)
+
+
+class SearchHistoryByKeywordTool:
+    """Substring search over decrypted history text.
+
+    ``history_entries.text_encrypted`` is AES-GCM ciphertext, so server-side
+    ILIKE cannot run on the column. The storage layer fetches candidates
+    in deterministic time order, decrypts each row in Python, and applies
+    a case-insensitive substring test. Stops as soon as ``limit`` matches
+    are found or the stream is exhausted.
+    """
+
+    name = "search_history_by_keyword"
+
+    def __init__(self, storage: Storage) -> None:
+        self._storage = storage
+
+    async def execute(self, invocation: ToolInvocation) -> ToolResult:
+        from waxprep.context.evidence import history_evidence
+
+        a = invocation.arguments
+        query = str(a.get("query") or "")
+        if not query.strip():
+            return ToolResult(name=self.name, results=())
+        limit = max(1, min(int(a.get("limit", KEYWORD_SEARCH_LIMIT)), 200))
+        matches = self._storage.search_history_by_keyword(
+            invocation.wax_id, query, limit=limit
+        )
+        return ToolResult(
+            name=self.name,
+            results=tuple(
+                history_evidence(e, "keyword search match") for e in matches
+            ),
+            metadata={"query_length": len(query), "match_count": len(matches)},
+        )
+
+
+class SearchHistoryByTimeRangeTool:
+    """All history in ``[start_ts, end_ts)`` for one student."""
+
+    name = "search_history_by_time_range"
+
+    def __init__(self, storage: Storage) -> None:
+        self._storage = storage
+
+    async def execute(self, invocation: ToolInvocation) -> ToolResult:
+        from waxprep.context.evidence import history_evidence
+
+        a = invocation.arguments
+        start = _when(a.get("start_ts")) or _when(a.get("since"))
+        end = _when(a.get("end_ts")) or _when(a.get("until"))
+        if start is None or end is None:
+            return ToolResult(name=self.name, results=())
+        limit = max(
+            1, min(int(a.get("limit", TIME_RANGE_SEARCH_LIMIT)), 500)
+        )
+        matches = self._storage.search_history_by_time_range(
+            invocation.wax_id,
+            start_ts=start,
+            end_ts=end,
+            limit=limit,
+        )
+        return ToolResult(
+            name=self.name,
+            results=tuple(
+                history_evidence(e, "history in time range") for e in matches
+            ),
+            metadata={
+                "start_ts": start.isoformat(),
+                "end_ts": end.isoformat(),
+                "match_count": len(matches),
+            },
+        )
+
+
+class InspectNotebookTool:
+    """Read the student's notebook — the easy-access summary source.
+
+    Per the founder's brief, the notebook is the easy-access summary
+    source (NOT a mandatory one). CI may consult it when relevant; when
+    it is empty, the package honestly reports "no notebook entries yet"
+    instead of fabricating context.
+    """
+
+    name = "inspect_notebook"
+
+    def __init__(self, storage: Storage) -> None:
+        self._storage = storage
+
+    async def execute(self, invocation: ToolInvocation) -> ToolResult:
+        wax_id = invocation.wax_id
+        notebook = self._storage.get_notebook(wax_id)
+        if notebook is None:
+            return ToolResult(
+                name=self.name,
+                results=(),
+                metadata={"notebook_exists": False, "entry_count": 0},
+            )
+        entries = self._storage.list_notebook_entries(
+            wax_id, notebook.id, include_superseded=False
+        )
+        evidence = []
+        for entry in entries:
+            item = hydrate(
+                self._storage,
+                wax_id,
+                ObjectType.NOTEBOOK,
+                entry.id,
+                "notebook entry (easy-access summary)",
+            )
+            if item is not None:
+                evidence.append(item)
+        return ToolResult(
+            name=self.name,
+            results=tuple(evidence),
+            metadata={
+                "notebook_exists": True,
+                "entry_count": len(evidence),
+                "notebook_id": str(notebook.id),
+            },
+        )
 
 
 class ProposeLifecycleChangeTool:
@@ -401,6 +616,17 @@ def build_default_tools(
         CheckCurrencyTool(retriever),
         FollowRelationshipsTool(retriever),
         ReadArtifactTool(storage),
+        # Memory redesign (founder's brief: "confused at 30-50 messages"):
+        # the model can page through complete history with cursor
+        # pagination, keyword search, and time-range search. These tools
+        # are NOT mandatory — the model decides when older context is
+        # worth retrieving.
+        ListHistoryPaginatedTool(storage),
+        SearchHistoryByKeywordTool(storage),
+        SearchHistoryByTimeRangeTool(storage),
+        # Notebook: easy-access summary source (per founder's vision).
+        # Optional consultation — the model uses it when relevant.
+        InspectNotebookTool(storage),
     ]
     if evolution is not None:
         tools.append(ProposeLifecycleChangeTool(evolution))

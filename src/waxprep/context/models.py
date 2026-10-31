@@ -184,6 +184,29 @@ class InvestigationLimits:
     These exist to prevent runaway work, not to predict the student's
     needs. Hitting a limit is a *mechanical* event and maps to the
     ``INCOMPLETE`` investigation status. It is never treated as success.
+
+    Note on memory design (founder's brief, "confused at 30-50 messages"):
+    the previous ``max_exchange_entries`` field capped the live exchange
+    at 12 turns. That was a *relevance rule in disguise*: any message
+    older than 12 turns was invisible to the Teacher unless CI retrieved
+    it through tools. The cap is GONE. The two budgets that remain are:
+
+    - ``max_history_scan_rows``: a DATABASE ROUND-TRIP protection — how
+      many recent history rows the application loads in one query to
+      assemble exchange material. It is NOT a relevance rule: when the
+      page is full, CI can still paginate further back through the
+      ``list_history_paginated`` tool, or search by keyword/time range.
+      A flag is logged when this scan truncates so operators can see
+      when a student's history grew past one page.
+    - ``max_exchange_characters``: a DISPLAY budget for the exchange
+      material handed to the model. Older turns are trimmed first; the
+      recent end of the exchange is what a follow-up refers to. This
+      shapes what fits in the model's context window — it does not
+      decide that an old turn is irrelevant.
+
+    The model — not the application — decides whether older context
+    matters. When it does, CI uses the pagination / keyword / time-range
+    retrieval tools to walk the full history.
     """
 
     max_steps: int = 8
@@ -191,10 +214,20 @@ class InvestigationLimits:
     max_evidence: int = 12
     max_context_characters: int = 12000
     max_model_output_tokens: int = 1000
-    max_exchange_entries: int = 12
-    """How many recent history entries the application may hand to CI as
-    exchange material. A *supply* budget, not a relevance rule: the
-    application never chooses which of these turns matter, CI does."""
+    max_history_scan_rows: int = 500
+    """Maximum number of recent history rows the application loads in a
+    single ``list_history`` query to assemble exchange material.
+
+    This is a DB-round-trip protection, NOT a relevance rule. The
+    exchange that reaches the Teacher is trimmed only by the character
+    budget below. When this scan truncates (more rows exist than the
+    page), CI can still paginate further back through the
+    ``list_history_paginated`` retrieval tool, or use
+    ``search_history_by_keyword`` / ``search_history_by_time_range`` to
+    reach older material the model decides is relevant. The runtime
+    records an ``exchange_scan_truncated`` flag in the audit trail when
+    the page is full so the operator can see when a student's history
+    grew past one page."""
 
     max_exchange_characters: int = 4000
     """Character budget for the supplied exchange material. When the

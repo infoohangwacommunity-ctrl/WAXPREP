@@ -134,6 +134,97 @@ def context_tool_definitions() -> list[dict[str, Any]]:
             {"version_id": {"type": "string"}},
             ["version_id"],
         ),
+        # --- memory redesign tools (founder's brief: "confused at 30-50
+        # messages") — give CI the ability to walk the COMPLETE history
+        # when older context matters. These are NOT mandatory calls;
+        # the model decides when to reach beyond the recent exchange. -----
+        _tool(
+            "list_history_paginated",
+            "Walk the student's complete history one page at a time. Use "
+            "when the recent exchange (which you already have) is not "
+            "enough and you need to reach older context. The cursor in "
+            "the metadata lets you ask for the next page. The page size "
+            "is a database round-trip protection, not a relevance rule.",
+            {
+                "before": {
+                    "type": "object",
+                    "description": (
+                        "Cursor returned by the previous page's metadata "
+                        "(occurred_at + seq). Omit on the first page."
+                    ),
+                    "properties": {
+                        "occurred_at": {"type": "string"},
+                        "seq": {"type": "integer"},
+                    },
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "How many rows to fetch per page (default 25).",
+                },
+                "newest_first": {
+                    "type": "boolean",
+                    "description": "True (default) walks newest-to-oldest.",
+                },
+            },
+            [],
+        ),
+        _tool(
+            "search_history_by_keyword",
+            "Substring search over the student's decrypted history text. "
+            "Use when the student references a specific word, name, or "
+            "phrase and you want to find every history entry that "
+            "contains it. Case-insensitive. Stops after `limit` matches.",
+            {
+                "query": {
+                    "type": "string",
+                    "description": "Substring to search for.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Maximum matches to return (default 50).",
+                },
+            },
+            ["query"],
+        ),
+        _tool(
+            "search_history_by_time_range",
+            "List every history entry the student produced inside a time "
+            "range. Use when you need to recall everything said in a "
+            "particular lesson, day, or week.",
+            {
+                "start_ts": {
+                    "type": "string",
+                    "description": "ISO 8601 start (inclusive).",
+                },
+                "end_ts": {
+                    "type": "string",
+                    "description": "ISO 8601 end (exclusive).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "Cap on rows returned (default 200).",
+                },
+            },
+            ["start_ts", "end_ts"],
+        ),
+        _tool(
+            "inspect_notebook",
+            "Read the student's notebook — durable understanding the "
+            "application has already consolidated from earlier history. "
+            "Optional easy-access summary source. When the notebook is "
+            "empty, the metadata reports notebook_exists=false; do NOT "
+            "fabricate notebook context. Use when the student references "
+            "a stable fact (goals, course, preferences) that may have "
+            "been recorded previously.",
+            {},
+            [],
+        ),
         # --- write-side proposal tool (Blueprint §28-29) ---------------------
         # The model proposes a lifecycle change; the application validates
         # the proposal, checks that the cited evidence exists and belongs

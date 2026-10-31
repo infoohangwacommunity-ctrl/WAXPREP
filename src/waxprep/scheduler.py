@@ -3,7 +3,6 @@
 This module provides a CLI entry point that can safely invoke:
 - derivation processing (embeddings, token indexing, artifact understanding)
 - retries
-- consolidation
 - embedding backfill
 - artifact understanding
 
@@ -18,6 +17,12 @@ Usage:
 The worker is safe to run concurrently across multiple processes —
 PostgreSQL's FOR UPDATE SKIP LOCKED guarantees no two workers claim
 the same job.
+
+Note: ``ConsolidationService`` is RETIRED (founder's brief). The
+notebook is now the easy-access summary source. The scheduler no longer
+accepts a ``consolidation_model=`` parameter; legacy callers will get a
+``TypeError``. Existing tests of ConsolidationService construct the
+service directly.
 """
 
 from __future__ import annotations
@@ -36,7 +41,6 @@ import psycopg
 from waxprep.clock import SystemClock
 from waxprep.context.model import ContextModel
 from waxprep.derive.artifacts import ArtifactProcessor
-from waxprep.derive.consolidation import ConsolidationModel
 from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.orchestration.contracts_ci_first import Teacher
 from waxprep.security.cipher import FieldCipher, load_cipher_from_env
@@ -71,7 +75,6 @@ def build_worker_services(
     cipher: FieldCipher | None = None,
     embedder: EmbeddingProvider | None = None,
     artifact_processor: ArtifactProcessor | None = None,
-    consolidation_model: ConsolidationModel | None = None,
     context_model: ContextModel | None = None,
     teacher: Teacher | None = None,
 ) -> tuple[PostgresStorage, WaxPrepServices]:
@@ -81,6 +84,10 @@ def build_worker_services(
     not teach — it only processes background derivation jobs. A
     deterministic MockTeacher and MockContextModel are used as
     placeholders so the service graph is complete.
+
+    Note: ``ConsolidationService`` is RETIRED. The notebook is now the
+    easy-access summary source (founder's brief). The
+    ``consolidation_model=`` parameter has been removed.
     """
     url = database_url or os.environ.get("DATABASE_URL", "")
     if not url:
@@ -112,7 +119,6 @@ def build_worker_services(
         context_model=context_model or MockContextModel(),
         teacher=teacher if teacher is not None else MockTeacher(),  # type: ignore[arg-type]
         embedder=embedder,
-        consolidation_model=consolidation_model,
         artifact_processor=artifact_processor,
     )
     return storage, services

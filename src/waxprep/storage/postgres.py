@@ -56,7 +56,12 @@ from waxprep.domain.models import (
 )
 from waxprep.knowledge.models import KnowledgeEdge, KnowledgeNode, KnowledgeNodeStatus
 from waxprep.security.cipher import FieldCipher
-from waxprep.storage.protocol import TokenMatch, TokenStats
+from waxprep.storage.protocol import (
+    HistoryCursor,
+    ScoredMatch,
+    TokenMatch,
+    TokenStats,
+)
 from waxprep.storage.session import assume_app_role, set_current_wax_id
 
 logger = logging.getLogger(__name__)
@@ -115,6 +120,11 @@ class PostgresStorage:
         self._conn = conn
         self._cipher = cipher
         self._txn_depth = 0
+        # Cached pgvector availability check (see has_pgvector). Reset
+        # to None by any operation that drops/recreates the extension
+        # or the vector_plain column — not a concern in production but
+        # useful for tests that re-apply migrations on a live schema.
+        self._pgvector_available: bool | None = None
         assume_app_role(conn)
 
     # --- helpers -----------------------------------------------------------
@@ -555,6 +565,353 @@ class PostgresStorage:
         )
         return tuple(self._history(r) for r in rows)
 
+    # --- CI history retrieval: cursor pagination, keyword + time-range search,
+    #     pgvector-accelerated semantic retrieval. ---------------------------
+    def list_history_paginated(
+        self,
+        wax_id: WaxId,
+        *,
+        before: HistoryCursor = None,
+        page_size: int = 25,
+        newest_first: bool = True,
+    ) -> tuple[tuple[HistoryEntry, ...], HistoryCursor]:
+        """Cursor-paginated history read (migration 016 index).
+
+        Cursor semantics:
+          - ``before=None``: first page.
+          - ``before=(occurred_at, seq)``: the next page *strictly
+            older* than the cursor (when ``newest_first=True``) or
+            *strictly newer* than the cursor (when ``newest_first=False``).
+
+        Returns ``(rows, next_cursor)``. ``next_cursor is None`` means
+        the stream is exhausted. The cursor is the ``(occurred_at, seq)``
+        of the last row in ``rows`` — pass it back as ``before`` for
+        the next page.
+        """
+        if page_size <= 0:
+            return (), before
+        direction = "DESC" if newest_first else "ASC"
+        # The cursor tuple is (occurred_at, seq). When newest_first=True
+        # we walk strictly older; when False, strictly newer. The
+        # comparison operator matches the scan direction so the index
+        # can serve an index-only forward scan (idx_history_wax_occurred_desc
+        # or history_time_idx from migration 005/016).
+        if before is None:
+            sql = (
+                f"SELECT {HISTORY_COLUMNS}, seq FROM history_entries "
+                "WHERE wax_id = %s "
+                f"ORDER BY occurred_at {direction}, seq {direction} "
+                "LIMIT %s"
+            )
+            params: tuple[Any, ...] = (wax_id, page_size)
+        else:
+            cur_time, cur_seq = before
+            if newest_first:
+                cmp = "<"
+            else:
+                cmp = ">"
+            sql = (
+                f"SELECT {HISTORY_COLUMNS}, seq FROM history_entries "
+                "WHERE wax_id = %s "
+                f"AND (occurred_at, seq) {cmp} (%s, %s) "
+                f"ORDER BY occurred_at {direction}, seq {direction} "
+                "LIMIT %s"
+            )
+            params = (wax_id, cur_time, cur_seq, page_size)
+        rows = self._read(wax_id, sql, params)
+        if not rows:
+            return (), None
+        entries = tuple(self._history(r) for r in rows)
+        last = rows[-1]
+        next_cursor: HistoryCursor = (
+            last["occurred_at"],
+            int(last["seq"]),
+        )
+        if len(rows) < page_size:
+            return entries, None
+        return entries, next_cursor
+
+    def search_history_by_keyword(
+        self, wax_id: WaxId, query: str, *, limit: int = 50
+    ) -> tuple[HistoryEntry, ...]:
+        """Case-insensitive substring search over decrypted history text.
+
+        ``history_entries.text_encrypted`` is AES-GCM ciphertext, so
+        ILIKE cannot run server-side. The method walks the stream
+        newest-first via ``list_history_paginated`` (cursor pagination,
+        no OFFSET), decrypts each row, and applies a Python
+        case-insensitive substring test against ``query``. Pagination
+        stops as soon as ``limit`` matches are found or the stream is
+        exhausted.
+
+        For exact-word matches prefer ``find_by_tokens`` (blind HMAC
+        index, server-side). This method exists for substring/phrase
+        queries that the blind index cannot answer.
+        """
+        if not query:
+            return ()
+        needle = query.lower()
+        matches: list[HistoryEntry] = []
+        # Cap the number of pages scanned so a query that matches
+        # nothing cannot read an unbounded amount of ciphertext. 200
+        # pages × 25 rows = 5000 rows is comfortably above the
+        # expected per-student history volume; raising the cap is a
+        # one-line change if a real workload needs it.
+        max_pages = 200
+        cursor: HistoryCursor = None
+        for _ in range(max_pages):
+            page, cursor = self.list_history_paginated(
+                wax_id, before=cursor, page_size=25, newest_first=True
+            )
+            if not page:
+                break
+            for entry in page:
+                if entry.text is not None and needle in entry.text.lower():
+                    matches.append(entry)
+                    if len(matches) >= limit:
+                        return tuple(matches)
+            if cursor is None:
+                break
+        return tuple(matches)
+
+    def search_history_by_time_range(
+        self,
+        wax_id: WaxId,
+        *,
+        start_ts: datetime,
+        end_ts: datetime,
+        limit: int = 200,
+    ) -> tuple[HistoryEntry, ...]:
+        """All history in ``[start_ts, end_ts)`` for one student.
+
+        Served by ``idx_history_wax_time_range`` (migration 016) as an
+        index-only scan when the planner can satisfy the leading
+        ``wax_id`` equality + ``occurred_at`` range from the index.
+        ``limit`` caps the result set.
+        """
+        if limit <= 0:
+            return ()
+        rows = self._read(
+            wax_id,
+            f"SELECT {HISTORY_COLUMNS} FROM history_entries "
+            "WHERE wax_id = %s "
+            "AND occurred_at >= %s AND occurred_at < %s "
+            "ORDER BY occurred_at, seq LIMIT %s",
+            (wax_id, start_ts, end_ts, limit),
+        )
+        return tuple(self._history(r) for r in rows)
+
+    # --- pgvector-accelerated semantic retrieval -------------------------------
+    def has_pgvector(self) -> bool:
+        """Return True iff the ``vector`` extension is loaded AND the
+        ``search_embeddings.vector_plain`` column exists.
+
+        The result is cached on the storage instance; tests that
+        re-apply migrations on a live schema can clear the cache by
+        calling ``_reset_pgvector_cache``.
+        """
+        if self._pgvector_available is not None:
+            return self._pgvector_available
+        self._ensure_healthy()
+        # The extension check is global (no wax_id); the column check
+        # is metadata-only. Neither requires RLS context, but we still
+        # run under the app role so a misconfigured connection is
+        # caught early.
+        try:
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT EXISTS (SELECT 1 FROM pg_extension "
+                    "WHERE extname = 'vector') AS ext_ok"
+                )
+                ext_row = cur.fetchone()
+                if ext_row is None or not ext_row["ext_ok"]:
+                    self._pgvector_available = False
+                    return False
+                cur.execute(
+                    "SELECT EXISTS ("
+                    " SELECT 1 FROM information_schema.columns "
+                    " WHERE table_schema = 'public' "
+                    "   AND table_name = 'search_embeddings' "
+                    "   AND column_name = 'vector_plain'"
+                    ") AS col_ok"
+                )
+                col_row = cur.fetchone()
+                self._pgvector_available = bool(
+                    col_row is not None and col_row["col_ok"]
+                )
+        except psycopg.Error:
+            # Database not ready or column lookup failed: treat as
+            # unavailable so the Python fallback runs.
+            self._pgvector_available = False
+        finally:
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
+        return self._pgvector_available
+
+    def _reset_pgvector_cache(self) -> None:
+        """Clear the cached pgvector availability check.
+
+        Useful for tests that re-apply migrations on a live schema.
+        """
+        self._pgvector_available = None
+
+    def find_by_meaning(
+        self,
+        wax_id: WaxId,
+        query_vector: tuple[float, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        limit: int = 8,
+    ) -> tuple[ScoredMatch, ...]:
+        """Semantic similarity search over one student's embeddings.
+
+        Returns at most ``limit`` matches ranked by descending cosine
+        similarity to ``query_vector``. When ``has_pgvector()`` is True
+        the ranking is computed in SQL by
+        ``1 - (vector_plain <=> %s::vector)`` ordered by distance with
+        ``LIMIT``. When False, the method paginates
+        ``list_embeddings_page`` and computes ``cosine_similarity`` in
+        Python — identical ranking, slower per-row cost.
+        """
+        if limit <= 0 or not query_vector:
+            return ()
+        if self.has_pgvector():
+            return self._find_by_meaning_pgvector(
+                wax_id,
+                query_vector,
+                object_types=object_types,
+                since=since,
+                until=until,
+                limit=limit,
+            )
+        return self._find_by_meaning_python(
+            wax_id,
+            query_vector,
+            object_types=object_types,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+
+    def _find_by_meaning_pgvector(
+        self,
+        wax_id: WaxId,
+        query_vector: tuple[float, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        limit: int,
+    ) -> tuple[ScoredMatch, ...]:
+        """SQL-side ANN search using ``<=>`` cosine distance."""
+        # pgvector accepts the textual form '[v1,v2,...]'; psycopg
+        # does not have a native vector adapter, so we build the
+        # literal with %f formatting to avoid locale issues.
+        vector_literal = "[" + ",".join(f"{float(v):.8f}" for v in query_vector) + "]"
+        rows = self._read(
+            wax_id,
+            "SELECT object_type, object_id, object_time, "
+            "  1 - (vector_plain <=> %s::vector) AS similarity "
+            "FROM search_embeddings "
+            "WHERE wax_id = %s "
+            "  AND vector_plain IS NOT NULL "
+            "  AND object_type = ANY(%s::text[]) "
+            "  AND (%s::timestamptz IS NULL OR object_time >= %s) "
+            "  AND (%s::timestamptz IS NULL OR object_time < %s) "
+            "ORDER BY vector_plain <=> %s::vector "
+            "LIMIT %s",
+            (
+                vector_literal,
+                wax_id,
+                [t.value for t in object_types],
+                since,
+                since,
+                until,
+                until,
+                vector_literal,
+                limit,
+            ),
+        )
+        return tuple(
+            ScoredMatch(
+                object_type=ObjectType(r["object_type"]),
+                object_id=r["object_id"],
+                object_time=r["object_time"],
+                score=float(r["similarity"]),
+            )
+            for r in rows
+        )
+
+    def _find_by_meaning_python(
+        self,
+        wax_id: WaxId,
+        query_vector: tuple[float, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        limit: int,
+    ) -> tuple[ScoredMatch, ...]:
+        """Python-side cosine fallback when pgvector is unavailable.
+
+        Identical ranking to the SQL path: paginate every embedding
+        for the student in deterministic order, decrypt each
+        ``vector_encrypted`` blob with the per-student key, compute
+        ``cosine_similarity`` against ``query_vector``, keep the
+        top-``limit``. Pre-pgvector behaviour — correct but O(N) per
+        query in Python.
+        """
+        # Local import to avoid pulling the similarity helper into the
+        # module namespace when pgvector is always available (e.g.
+        # production with the extension installed).
+        from waxprep.embeddings.similarity import cosine_similarity
+
+        scored: list[ScoredMatch] = []
+        cursor: tuple[datetime, UUID] | None = None
+        # 500 rows per page mirrors the existing retriever default; see
+        # context.retrieval.DEFAULT_EMBEDDING_PAGE_SIZE.
+        page_size = 500
+        # Hard cap on pages to prevent unbounded iteration if the
+        # stream is unusually large. 200 pages × 500 = 100k rows is
+        # well above any plausible per-student embedding volume.
+        max_pages = 200
+        for _ in range(max_pages):
+            page = self.list_embeddings_page(
+                wax_id,
+                object_types,
+                since=since,
+                until=until,
+                page_size=page_size,
+                cursor=cursor,
+            )
+            if not page:
+                break
+            for record in page:
+                try:
+                    similarity = cosine_similarity(query_vector, record.vector)
+                except ValueError:
+                    continue  # vector from a different embedding model
+                if similarity <= 0:
+                    continue
+                scored.append(
+                    ScoredMatch(
+                        record.object_type,
+                        record.object_id,
+                        record.object_time,
+                        similarity,
+                    )
+                )
+            last = page[-1]
+            cursor = (last.object_time, last.object_id)
+            if len(page) < page_size:
+                break
+        scored.sort(key=lambda s: s.score, reverse=True)
+        return tuple(scored[:limit])
+
     # --- attachments ----------------------------------------------------------------
     def create_attachment(self, attachment: Attachment) -> Attachment:
         self._write(
@@ -783,6 +1140,38 @@ class PostgresStorage:
         blob = self._cipher.encrypt_bytes(
             record.wax_id, "embedding.vector", _pack_vector(record.vector)
         )
+        # When pgvector is available, also write the plaintext vector so
+        # `find_by_meaning` can run an ANN search in SQL. When pgvector
+        # is missing, only the encrypted blob is written and semantic
+        # search falls back to Python-side cosine over `vector_encrypted`.
+        # We co-write on every insert/update so the column stays in sync
+        # even if pgvector is enabled later in the deployment's life.
+        if self.has_pgvector():
+            vector_literal = (
+                "[" + ",".join(f"{float(v):.8f}" for v in record.vector) + "]"
+            )
+            self._write(
+                record.wax_id,
+                "INSERT INTO search_embeddings (id, wax_id, object_type, object_id, "
+                "object_time, model, vector_encrypted, vector_plain, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s) "
+                "ON CONFLICT (wax_id, object_type, object_id, model) DO UPDATE SET "
+                "vector_encrypted = EXCLUDED.vector_encrypted, "
+                "vector_plain = EXCLUDED.vector_plain, "
+                "object_time = EXCLUDED.object_time, created_at = EXCLUDED.created_at",
+                (
+                    record.id,
+                    record.wax_id,
+                    record.object_type.value,
+                    record.object_id,
+                    record.object_time,
+                    record.model,
+                    blob,
+                    vector_literal,
+                    record.created_at,
+                ),
+            )
+            return
         self._write(
             record.wax_id,
             "INSERT INTO search_embeddings (id, wax_id, object_type, object_id, "
@@ -2012,6 +2401,17 @@ class PostgresStorage:
         )
         return self._outbound(row) if row else None
 
+    def get_outbound_delivery(
+        self, wax_id: WaxId, delivery_id: UUID
+    ) -> OutboundDelivery | None:
+        row = self._one(
+            wax_id,
+            "SELECT * FROM outbound_deliveries "
+            "WHERE wax_id = %s AND id = %s",
+            (wax_id, delivery_id),
+        )
+        return self._outbound(row) if row else None
+
     def list_due_outbound_deliveries(
         self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]:
@@ -2126,25 +2526,40 @@ class PostgresStorage:
         delivery_id: UUID,
         now: datetime,
         provider_message_id: str | None = None,
-    ) -> None:
-        # Delivery attempts are counted in the channel adapter; this
-        # method records the final delivered state without incrementing
-        # attempts (the channel adapter updates attempts separately).
+    ) -> bool:
+        """Atomically mark a delivery delivered.
+
+        Returns ``True`` iff this call transitioned the row to delivered
+        (i.e. ``delivered_at`` was ``NULL``); returns ``False`` if the row
+        was already delivered. The CAS guard ``delivered_at IS NULL`` makes
+        the live progressive-delivery path and the durable outbox worker
+        idempotent w.r.t. each other: whichever path wins the CAS commits
+        the delivery, the other is a no-op. This is the fix for the
+        double-message race where the outbox worker re-sent the full tutor
+        text after progressive delivery had already pushed chunks to the
+        student (handler.py:602-633).
+
+        Delivery attempts are counted in the channel adapter; this method
+        records the final delivered state without incrementing attempts
+        (the channel adapter updates attempts separately).
+        """
         if provider_message_id is not None:
-            self._write(
+            count = self._write(
                 wax_id,
                 "UPDATE outbound_deliveries SET status = 'delivered', "
                 "provider_message_id = %s, delivered_at = %s, updated_at = %s "
-                "WHERE wax_id = %s AND id = %s",
+                "WHERE wax_id = %s AND id = %s AND delivered_at IS NULL",
                 (provider_message_id, now, now, wax_id, delivery_id),
             )
         else:
-            self._write(
+            count = self._write(
                 wax_id,
                 "UPDATE outbound_deliveries SET status = 'delivered', "
-                "delivered_at = %s, updated_at = %s WHERE wax_id = %s AND id = %s",
+                "delivered_at = %s, updated_at = %s "
+                "WHERE wax_id = %s AND id = %s AND delivered_at IS NULL",
                 (now, now, wax_id, delivery_id),
             )
+        return count > 0
 
     def mark_outbound_failed(
         self,
@@ -2154,20 +2569,32 @@ class PostgresStorage:
         error: str,
         retry_at: datetime | None,
     ) -> None:
-        self._write(
-            wax_id,
-            "UPDATE outbound_deliveries SET last_error = %s, "
-            "status = %s, run_after = COALESCE(%s, run_after), updated_at = %s "
-            "WHERE wax_id = %s AND id = %s",
-            (
-                error,
-                "pending" if retry_at is not None else "failed",
-                retry_at,
-                now,
+        # When reverting to ``pending`` for retry, clear ``delivered_at`` so
+        # the row is internally consistent (status=pending AND
+        # delivered_at IS NULL). This matters for the live progressive path:
+        # it optimistically marks delivered immediately after the teacher
+        # stream completes (to win the race against the outbox worker), then
+        # calls mark_outbound_failed if progressive.finish / flush_final
+        # raises. Without clearing delivered_at, the outbox worker's later
+        # mark_outbound_delivered (CAS on delivered_at IS NULL) would be a
+        # no-op and the row would stay in_progress forever.
+        if retry_at is not None:
+            self._write(
                 wax_id,
-                delivery_id,
-            ),
-        )
+                "UPDATE outbound_deliveries SET last_error = %s, "
+                "status = 'pending', delivered_at = NULL, "
+                "run_after = %s, updated_at = %s "
+                "WHERE wax_id = %s AND id = %s",
+                (error, retry_at, now, wax_id, delivery_id),
+            )
+        else:
+            self._write(
+                wax_id,
+                "UPDATE outbound_deliveries SET last_error = %s, "
+                "status = 'failed', updated_at = %s "
+                "WHERE wax_id = %s AND id = %s",
+                (error, now, wax_id, delivery_id),
+            )
 
     # --- interactive offers ---------------------------------------------------------
     def create_interactive_offer(self, offer: InteractiveOffer) -> InteractiveOffer:

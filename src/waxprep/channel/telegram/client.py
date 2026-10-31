@@ -48,11 +48,20 @@ class TelegramClient:
         payload: OutboundPayload,
         *,
         reply_markup: dict[str, Any] | None = None,
+        parse_mode: str | None = "HTML",
     ) -> OutboundResult:
-        """Send a plain-text message (multi-message handled by caller).
+        """Send a text message (multi-message handled by caller).
 
         ``reply_markup`` may carry an InlineKeyboardMarkup dict for
         interactive next-step buttons (Bot API ``InlineKeyboardButton``).
+
+        ``parse_mode`` defaults to ``"HTML"`` so the Bot API interprets
+        the rendered HTML tags produced by ``render_telegram``
+        (<b>, <i>, <code>, <pre>, <a>). Pass ``None`` to send plain text
+        with no parsing (e.g. for short prompts like "Pick one 👇" that
+        must reach the user verbatim, or for content already known to be
+        plain). MarkdownV2 is NOT used: HTML is the canonical parse mode
+        for this integration (blueprint §7.5, Route A).
         """
         text = (payload.text or "").strip()
         if not text:
@@ -67,9 +76,13 @@ class TelegramClient:
         body: dict[str, Any] = {
             "chat_id": payload.recipient_external_id,
             "text": text,
-            # Prefer plain text for tutoring clarity; HTML optional later.
+            # Default parse_mode="HTML" so rendered tags (<b>, <i>, …)
+            # are interpreted by Telegram. Caller may pass None for
+            # verbatim plain-text sends (blueprint §7.5).
             "disable_web_page_preview": True,
         }
+        if parse_mode is not None:
+            body["parse_mode"] = parse_mode
         if reply_markup is not None:
             body["reply_markup"] = reply_markup
         try:

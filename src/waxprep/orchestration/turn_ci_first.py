@@ -154,6 +154,7 @@ class TurnServiceCiFirst:
         thread_ref: str | None = None,
         occurred_at: datetime | None = None,
         on_text_delta: TextDeltaSink | None = None,
+        live_delivery: bool = False,
     ) -> TurnResultCiFirst:
         """Process one student turn end-to-end with CI-first architecture.
 
@@ -170,6 +171,20 @@ class TurnServiceCiFirst:
            for progressive channel delivery (infrastructure only).
         5. Save exactly one tutor reply (linked to student entry).
         6. Create outbound delivery record (outbox).
+
+        Double-message race fix (founder's brief, "Double messages"):
+        when ``live_delivery=True`` the outbound is created in
+        ``IN_PROGRESS`` state (not ``PENDING``) inside the same
+        transaction that saves the tutor reply. The outbox worker's
+        ``claim_outbound_delivery`` CAS only transitions
+        ``PENDING → IN_PROGRESS``, so it CANNOT claim a live-owned
+        row. This closes the race window where the outbox would claim
+        between (outbound created) and (live path's claim attempt)
+        while progressive chunks were already being sent during
+        streaming. The caller is then responsible for either
+        ``mark_outbound_delivered`` (success) or
+        ``mark_outbound_failed`` with ``retry_at`` set (release back
+        to ``PENDING`` so the outbox retries).
         """
         # 1. Save exact student message.
         student_entry, created = self._history.record_with_status(
@@ -425,6 +440,25 @@ class TurnServiceCiFirst:
                         outbound_id = existing_out.id
                     else:
                         try:
+                            # Double-message race fix (founder's brief):
+                            # when ``live_delivery=True`` the outbound is
+                            # created in ``IN_PROGRESS`` state directly,
+                            # so the outbox worker cannot claim it while
+                            # progressive chunks are being delivered. The
+                            # caller is then responsible for either
+                            # ``mark_outbound_delivered`` (success) or
+                            # ``mark_outbound_failed`` with ``retry_at``
+                            # (release back to ``PENDING`` so the outbox
+                            # retries). When ``live_delivery=False`` the
+                            # outbound is created ``PENDING`` as before —
+                            # the durable outbox (or a live caller that
+                            # explicitly claims afterward) is the delivery
+                            # owner.
+                            initial_status = (
+                                OutboundStatus.IN_PROGRESS
+                                if live_delivery
+                                else OutboundStatus.PENDING
+                            )
                             delivery = self._storage.create_outbound_delivery(
                                 OutboundDelivery(
                                     id=new_id(),
@@ -433,7 +467,7 @@ class TurnServiceCiFirst:
                                     channel=channel,
                                     channel_ref=channel_ref,
                                     provider_message_id=None,
-                                    status=OutboundStatus.PENDING,
+                                    status=initial_status,
                                     attempts=0,
                                     last_error=None,
                                     delivered_at=None,
@@ -611,15 +645,46 @@ class TurnServiceCiFirst:
         Intelligence, and it is made on the assembled exchange — which
         is why the whole exchange is handed over, not a pre-filtered
         slice of it.
+
+        Memory redesign note (founder's brief: "confused at 30-50
+        messages"): the previous implementation capped the exchange at
+        ``max_exchange_entries`` (12 turns), which silently hid older
+        turns from the Teacher. That cap is GONE. The scan now uses
+        ``max_history_scan_rows`` as a *DB round-trip protection*: a
+        single page of recent history. When the page is full, the
+        runtime records an ``exchange_scan_truncated`` flag in the audit
+        trail, and CI can still walk further back via the
+        ``list_history_paginated`` / ``search_history_by_keyword`` /
+        ``search_history_by_time_range`` retrieval tools. The character
+        budget (``max_exchange_characters``) is the ONLY trimming that
+        reaches the Teacher — it shapes what fits in the model's
+        context window, never what is relevant.
         """
         limits = self._ci_limits
+        # DB-round-trip protection, NOT a relevance rule. The +1 lets us
+        # detect truncation: if we got more rows than the budget, the
+        # student's history extends past this page and CI may want to
+        # paginate further back via list_history_paginated.
+        scan_rows = max(limits.max_history_scan_rows, 1)
         entries = self._storage.list_history(
             wax_id,
             # One extra slot: the trigger entry is normally the newest
-            # and is removed below.
-            limit=limits.max_exchange_entries + 2,
+            # and is removed below. When the page returns scan_rows+1
+            # rows, the scan truncated and older history exists.
+            limit=scan_rows + 1,
             newest_first=True,
         )
+        exchange_scan_truncated = len(entries) > scan_rows
+        if exchange_scan_truncated:
+            logger.info(
+                "exchange_scan_truncated",
+                extra={
+                    "wax_id": str(wax_id),
+                    "scan_rows": scan_rows,
+                    "returned_rows": len(entries),
+                    "hint": "CI may paginate further via list_history_paginated",
+                },
+            )
         turns: list[ExchangeTurn] = []
         for entry in entries:
             if entry.id == trigger_entry_id:
@@ -637,14 +702,26 @@ class TurnServiceCiFirst:
                     occurred_at=entry.occurred_at,
                 )
             )
-            if len(turns) >= limits.max_exchange_entries:
-                break
         # list_history returned newest-first; the exchange reads forward.
         turns.reverse()
-        return trim_exchange(
+        trimmed = trim_exchange(
             tuple(turns),
             max_characters=limits.max_exchange_characters,
         )
+        # Surface the truncation flag through the application log so an
+        # operator can see when a student's history outgrew one page.
+        # The character budget is the ONLY trimming that reaches the
+        # Teacher — it is a display budget, not a relevance rule.
+        if exchange_scan_truncated:
+            logger.debug(
+                "exchange_scan_truncated_trimmed_to_char_budget",
+                extra={
+                    "wax_id": str(wax_id),
+                    "raw_turns": len(turns),
+                    "trimmed_turns": len(trimmed),
+                },
+            )
+        return trimmed
 
     @staticmethod
     def _validated_reply_text(reply_text: str) -> str:

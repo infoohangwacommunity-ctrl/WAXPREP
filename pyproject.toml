@@ -85,7 +85,14 @@ source = ["src/waxprep"]
 [tool.coverage.report]
 # The quality gate fails below this floor. Raise it over time; never lower it
 # to make a red gate green — add or fix tests instead.
-fail_under = 50
+#
+# Raised 50 → 80 as part of the memory-architecture-redesign QA pass. The
+# founder's brief (impl-qa.md) requires 80%+ coverage on the new behaviour.
+# Tests targeting the new Storage / CI / channel surface are in
+# tests/test_ci_*.py, tests/test_long_conversation_*.py,
+# tests/test_double_message_race.py, tests/test_whatsapp_formatting.py,
+# and tests/test_latency_fast_path.py.
+fail_under = 80
 show_missing = true
 exclude_lines = [
     "pragma: no cover",

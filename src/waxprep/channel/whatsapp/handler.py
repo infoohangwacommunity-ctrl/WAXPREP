@@ -34,6 +34,7 @@ from waxprep.channel.contracts import (
 )
 from waxprep.channel.message_queue import MessageQueue, QueuedMessage
 from waxprep.channel.streaming.display import ChoicesMarkerFilter
+from waxprep.channel.streaming.renderers import render_whatsapp
 from waxprep.channel.whatsapp.progressive import ProgressiveWhatsAppDelivery
 from waxprep.clock import Clock
 from waxprep.domain.identifiers import WaxId
@@ -44,6 +45,7 @@ from waxprep.domain.models import (
     InteractiveOfferStatus,
     JobStatus,
     ObjectType,
+    OutboundStatus,
     Student,
     StudentStatus,
     new_id,
@@ -388,7 +390,7 @@ class WhatsAppInboundHandler:
                 extra={
                     "wax_id": str(wax_id),
                     "entry_id": str(student_entry.id),
-                    "created": created,
+                    "saved_at": created,
                 },
             )
 
@@ -557,12 +559,16 @@ class WhatsAppInboundHandler:
 
             async def _send_chunk(text: str) -> None:
                 nonlocal last_provider_message_id
+                # Render markdown → WhatsApp syntax (*bold*, _italic_) at the
+                # leaf send. The WhatsApp Cloud API interprets these markers
+                # natively in the message body (blueprint §7.4).
+                rendered_body = render_whatsapp(text).text
                 result = await client.send_text(
                     OutboundPayload(
                         channel=self._config.channel,
                         wax_id=wax_id,
                         recipient_external_id=recipient,
-                        text=text,
+                        text=rendered_body,
                     )
                 )
                 if result.success and result.provider_message_id:
@@ -609,12 +615,63 @@ class WhatsAppInboundHandler:
                     thread_ref=msg.reply_to_provider_id,
                     occurred_at=msg.occurred_at,
                     on_text_delta=on_text_delta,
+                    # Double-message race fix (founder's brief, 3b):
+                    # ``live_delivery=True`` makes the turn service create
+                    # the outbound delivery row in ``IN_PROGRESS`` state
+                    # (not ``PENDING``) inside the same transaction that
+                    # saves the tutor reply. The outbox worker's
+                    # ``claim_outbound_delivery`` CAS only transitions
+                    # ``PENDING → IN_PROGRESS``, so it CANNOT claim a
+                    # live-owned row. This closes the race window where
+                    # the outbox would claim between (outbound created)
+                    # and (live path's claim attempt) while progressive
+                    # chunks were already being streamed. The live path
+                    # then owns the delivery and is responsible for
+                    # either ``mark_outbound_delivered`` (success) or
+                    # ``mark_outbound_failed`` with ``retry_at`` (release
+                    # back to ``PENDING`` so the outbox retries).
+                    live_delivery=True,
                 )
             )
 
-            # Claim outbound before any channel send so the outbox worker
-            # cannot deliver the same tutor text a second time.
+            # Double-message race fix (3b): when ``live_delivery=True``
+            # was used, the turn service creates the outbound row in
+            # ``IN_PROGRESS`` state inside the same transaction that
+            # saves the tutor reply. The outbox worker's
+            # ``claim_outbound_delivery`` CAS only transitions
+            # ``PENDING → IN_PROGRESS``, so it CANNOT claim a
+            # live-owned row. This closes the race window where the
+            # outbox would claim between (outbound created) and (live
+            # path's claim attempt) while progressive chunks were
+            # already being streamed.
+            #
+            # The live path owns the outbound when the row is in
+            # ``IN_PROGRESS`` state (created by ``live_delivery=True``).
+            # When the row is ``PENDING`` (created by an early-return
+            # duplicate path, or by ``live_delivery=False``), the live
+            # path must claim it before sending. When the row is
+            # ``DELIVERED`` (true duplicate redelivery after a
+            # completed turn), the live path skips entirely.
+            #
+            # NOTE on ``duplicate``: the turn service sets
+            # ``duplicate=not created`` where ``created`` refers to the
+            # STUDENT MESSAGE. When the channel handler pre-saves the
+            # student message (common pattern), ``created=False`` and
+            # ``duplicate=True`` — but the OUTBOUND row is still fresh
+            # (created by THIS turn as ``IN_PROGRESS``). So we cannot
+            # use ``duplicate`` alone to decide ownership; we check the
+            # actual outbound status.
+            live_owns_delivery = False
             if turn_result.outbound_delivery_id is not None:
+                _existing = self._storage.get_outbound_delivery(
+                    wax_id, turn_result.outbound_delivery_id
+                )
+                if _existing is not None and _existing.status is OutboundStatus.IN_PROGRESS:
+                    live_owns_delivery = True
+            if (
+                turn_result.outbound_delivery_id is not None
+                and not live_owns_delivery
+            ):
                 claimed = self._storage.claim_outbound_delivery(
                     wax_id,
                     turn_result.outbound_delivery_id,
@@ -692,9 +749,16 @@ class WhatsAppInboundHandler:
                         delivery_ok = False
                 if turn_result.outbound_delivery_id is not None:
                     if delivery_ok:
-                        # Mark the outbound record delivered so the outbox
-                        # does not re-send the full text. The live delivery
-                        # IS the delivery.
+                        # The live path owns the outbound (live_delivery
+                        # created it as IN_PROGRESS, or we claimed it
+                        # above for a duplicate). Mark DELIVERED so the
+                        # outbox's claim_outbound_delivery returns None
+                        # and it skips — the live delivery IS the
+                        # delivery. ``mark_outbound_delivered`` has a
+                        # CAS guard (``delivered_at IS NULL``) so it is
+                        # idempotent with the outbox's own
+                        # mark_outbound_delivered: whichever path wins
+                        # the CAS commits the delivery.
                         try:
                             self._storage.mark_outbound_delivered(
                                 wax_id,
@@ -708,10 +772,16 @@ class WhatsAppInboundHandler:
                                 exc_info=True,
                             )
                     else:
-                        # A live send failed. Leave the outbound record
-                        # retryable: the durable outbox re-sends the stored
-                        # authoritative reply after a short delay (with
-                        # backoff), so the reply is never silently dropped.
+                        # A live send failed. Release the live claim
+                        # (status → PENDING with retry_at) so the
+                        # durable outbox re-sends the stored authoritative
+                        # reply after a short delay (with backoff).
+                        # ``mark_outbound_failed`` with retry_at set
+                        # transitions to PENDING so the outbox will
+                        # re-claim on its next poll. ``mark_outbound_failed``
+                        # also clears ``delivered_at`` on retry so the row
+                        # is internally consistent and the outbox's later
+                        # ``mark_outbound_delivered`` (CAS) can succeed.
                         try:
                             self._storage.mark_outbound_failed(
                                 wax_id,
@@ -836,15 +906,23 @@ class WhatsAppInboundHandler:
         Returns None when any piece is rejected or raises — the caller then
         leaves the outbound record retryable so the durable outbox re-sends
         the stored reply (at-least-once, never silently dropped).
+
+        The raw model markdown is rendered to WhatsApp syntax (*bold*,
+        _italic_, ```code```) BEFORE splitting, so formatting markers
+        never straddle a transport piece (blueprint §7.4).
         """
         client = self._whatsapp_client
         if client is None:
             return None
         from waxprep.channel.delivery import split_for_platform
 
+        # Render the full answer once, then split the rendered text. This
+        # guarantees a markdown span (e.g. **bold**) is never split across
+        # transport pieces, which would leave each half un-rendered.
+        rendered_text = render_whatsapp(text).text
         last_provider_message_id: str | None = None
         try:
-            for piece in split_for_platform(text, self._config.channel):
+            for piece in split_for_platform(rendered_text, self._config.channel):
                 result = await client.send_text(
                     OutboundPayload(
                         channel=self._config.channel,

@@ -42,7 +42,12 @@ from waxprep.domain.models import (
     new_id,
 )
 from waxprep.knowledge.models import KnowledgeEdge, KnowledgeNode, KnowledgeNodeStatus
-from waxprep.storage.protocol import TokenMatch, TokenStats
+from waxprep.storage.protocol import (
+    HistoryCursor,
+    ScoredMatch,
+    TokenMatch,
+    TokenStats,
+)
 
 Key = tuple[WaxId, UUID]
 
@@ -270,6 +275,148 @@ class InMemoryStorage:
             if e.occurred_at < before and e.id not in covered
         ]
         return tuple(rows[:limit])
+
+    # --- CI history retrieval: cursor pagination, keyword + time-range search,
+    #     pgvector-accelerated semantic retrieval. ---------------------------
+    def list_history_paginated(
+        self,
+        wax_id: WaxId,
+        *,
+        before: HistoryCursor = None,
+        page_size: int = 25,
+        newest_first: bool = True,
+    ) -> tuple[tuple[HistoryEntry, ...], HistoryCursor]:
+        """Cursor-paginated history read (in-memory equivalent of
+        PostgresStorage.list_history_paginated).
+
+        The cursor is ``(occurred_at, seq)`` of the last row returned
+        by the previous page. ``None`` marks the end of the stream.
+        """
+        if page_size <= 0:
+            return (), before
+        rows = self._sorted_history(wax_id)
+        if newest_first:
+            rows.reverse()
+        if before is not None:
+            cur_time, cur_seq = before
+            if newest_first:
+                rows = [
+                    e
+                    for e in rows
+                    if (e.occurred_at, self._history_seq[(wax_id, e.id)]) < (cur_time, cur_seq)
+                ]
+            else:
+                rows = [
+                    e
+                    for e in rows
+                    if (e.occurred_at, self._history_seq[(wax_id, e.id)]) > (cur_time, cur_seq)
+                ]
+        page = rows[:page_size]
+        if not page:
+            return (), None
+        last = page[-1]
+        next_cursor: HistoryCursor = (
+            last.occurred_at,
+            self._history_seq[(wax_id, last.id)],
+        )
+        if len(page) < page_size:
+            return tuple(page), None
+        return tuple(page), next_cursor
+
+    def search_history_by_keyword(
+        self, wax_id: WaxId, query: str, *, limit: int = 50
+    ) -> tuple[HistoryEntry, ...]:
+        """Case-insensitive substring search over decrypted history text.
+
+        The in-memory store already holds plaintext text, so this is a
+        simple filter. The signature mirrors PostgresStorage so unit
+        tests can swap implementations.
+        """
+        if not query:
+            return ()
+        needle = query.lower()
+        matches: list[HistoryEntry] = []
+        cursor: HistoryCursor = None
+        while True:
+            page, cursor = self.list_history_paginated(
+                wax_id, before=cursor, page_size=25, newest_first=True
+            )
+            if not page:
+                break
+            for entry in page:
+                if entry.text is not None and needle in entry.text.lower():
+                    matches.append(entry)
+                    if len(matches) >= limit:
+                        return tuple(matches)
+            if cursor is None:
+                break
+        return tuple(matches)
+
+    def search_history_by_time_range(
+        self,
+        wax_id: WaxId,
+        *,
+        start_ts: datetime,
+        end_ts: datetime,
+        limit: int = 200,
+    ) -> tuple[HistoryEntry, ...]:
+        """All history in ``[start_ts, end_ts)`` for one student."""
+        if limit <= 0:
+            return ()
+        rows = [
+            e
+            for e in self._sorted_history(wax_id)
+            if start_ts <= e.occurred_at < end_ts
+        ]
+        return tuple(rows[:limit])
+
+    def has_pgvector(self) -> bool:
+        """The in-memory store has no pgvector — semantic search always
+        uses the Python-side cosine fallback.
+        """
+        return False
+
+    def find_by_meaning(
+        self,
+        wax_id: WaxId,
+        query_vector: tuple[float, ...],
+        *,
+        object_types: tuple[ObjectType, ...],
+        since: datetime | None,
+        until: datetime | None,
+        limit: int = 8,
+    ) -> tuple[ScoredMatch, ...]:
+        """Python-side cosine over in-memory embeddings.
+
+        Identical ranking to the pgvector path. The in-memory store
+        never has pgvector, so this is always the fallback.
+        """
+        if limit <= 0 or not query_vector:
+            return ()
+        from waxprep.embeddings.similarity import cosine_similarity
+
+        scored: list[ScoredMatch] = []
+        for r in [
+            rec
+            for (w, _, _, _), rec in self._embeddings.items()
+            if w == wax_id
+            and rec.object_type in object_types
+            and (since is None or rec.object_time >= since)
+            and (until is None or rec.object_time < until)
+        ]:
+            try:
+                similarity = cosine_similarity(query_vector, r.vector)
+            except ValueError:
+                continue
+            if similarity <= 0:
+                continue
+            scored.append(
+                ScoredMatch(
+                    r.object_type, r.object_id, r.object_time, similarity
+                )
+            )
+        scored.sort(key=lambda s: s.score, reverse=True)
+        return tuple(scored[:limit])
 
     # --- attachments -------------------------------------------------------
     def create_attachment(self, attachment: Attachment) -> Attachment:
@@ -1082,6 +1229,11 @@ class InMemoryStorage:
                 return d
         return None
 
+    def get_outbound_delivery(
+        self, wax_id: WaxId, delivery_id: UUID
+    ) -> OutboundDelivery | None:
+        return self._outbound.get((wax_id, delivery_id))
+
     def list_due_outbound_deliveries(
         self, wax_id: WaxId | None, now: datetime, limit: int
     ) -> tuple[OutboundDelivery, ...]:
@@ -1122,9 +1274,17 @@ class InMemoryStorage:
         delivery_id: UUID,
         now: datetime,
         provider_message_id: str | None = None,
-    ) -> None:
+    ) -> bool:
+        # Atomic CAS mirror of PostgresStorage.mark_outbound_delivered.
+        # Returns True iff this call transitioned the row to delivered
+        # (delivered_at was None); False if the row was already delivered.
+        # The CAS guard makes the live progressive-delivery path and the
+        # durable outbox worker idempotent w.r.t. each other — fixes the
+        # double-message race in handler.py:602-633.
         key = (wax_id, delivery_id)
         old = self._outbound[key]
+        if old.delivered_at is not None:
+            return False
         self._outbound[key] = replace(
             old,
             status=OutboundStatus.DELIVERED,
@@ -1132,6 +1292,7 @@ class InMemoryStorage:
             delivered_at=now,
             updated_at=now,
         )
+        return True
 
     def mark_outbound_failed(
         self,
@@ -1141,15 +1302,26 @@ class InMemoryStorage:
         error: str,
         retry_at: datetime | None,
     ) -> None:
+        # Mirror PostgresStorage.mark_outbound_failed: when reverting to
+        # ``pending`` for retry, clear ``delivered_at`` so the row is
+        # internally consistent. The live progressive path optimistically
+        # marks delivered immediately after the teacher stream completes
+        # (to win the race against the outbox worker), then calls this
+        # method if progressive.finish / flush_final raises. Without
+        # clearing delivered_at, the outbox worker's later
+        # mark_outbound_delivered (CAS on delivered_at IS NULL) would be
+        # a no-op and the row would stay in_progress forever.
         key = (wax_id, delivery_id)
         old = self._outbound[key]
+        new_status = (
+            OutboundStatus.PENDING if retry_at is not None else OutboundStatus.FAILED
+        )
         self._outbound[key] = replace(
             old,
-            status=OutboundStatus.PENDING
-            if retry_at is not None
-            else OutboundStatus.FAILED,
+            status=new_status,
             attempts=old.attempts + 1,
             last_error=error,
+            delivered_at=None if retry_at is not None else old.delivered_at,
             run_after=retry_at or old.run_after,
             updated_at=now,
         )

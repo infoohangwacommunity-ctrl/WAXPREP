@@ -1,4 +1,11 @@
-"""Consolidation compresses for speed; it never deletes or invents."""
+"""Consolidation compresses for speed; it never deletes or invents.
+
+These tests exercise the (now RETIRED) ConsolidationService directly.
+The service is no longer wired into ``build_services`` — the notebook
+is the easy-access summary source per the founder's brief — but the
+pure behaviour of the service is preserved and tested here so a future
+re-wiring does not regress the provenance and supersession guarantees.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,7 @@ from support import add_student, make_world
 from waxprep.derive.consolidation import (
     ConsolidationError,
     ConsolidationOutput,
+    ConsolidationService,
     NotebookDraft,
     parse_consolidation,
 )
@@ -53,15 +61,30 @@ def _seed(world, wax: WaxId, count: int = 4) -> list[HistoryEntry]:  # type: ign
     return out
 
 
+def _build_service(world, model: FakeConsolidator) -> ConsolidationService:  # type: ignore[no-untyped-def]
+    """Construct a ConsolidationService against the world's storage.
+
+    The service is retired from production wiring; tests build it
+    directly so the pure behaviour stays regression-protected.
+    """
+    return ConsolidationService(
+        world.storage,
+        world.services.evolution,
+        world.services.indexer,
+        model,
+        world.clock,
+    )
+
+
 @pytest.mark.asyncio
 async def test_summary_links_to_every_covered_entry_and_history_stays() -> None:
     model = FakeConsolidator()
-    world = make_world(consolidation_model=model)
+    world = make_world()
     wax = add_student(world)
     entries = _seed(world, wax)
     world.clock.advance(200 * 86400)
-    assert world.services.consolidation is not None
-    summary = await world.services.consolidation.consolidate_student(
+    service = _build_service(world, model)
+    summary = await service.consolidate_student(
         wax, older_than=timedelta(days=30)
     )
     assert summary is not None
@@ -74,14 +97,12 @@ async def test_summary_links_to_every_covered_entry_and_history_stays() -> None:
 
 @pytest.mark.asyncio
 async def test_understanding_that_cites_nothing_real_is_dropped() -> None:
-    world = make_world(consolidation_model=FakeConsolidator(bogus=True))
+    world = make_world()
     wax = add_student(world)
     _seed(world, wax)
     world.clock.advance(200 * 86400)
-    assert world.services.consolidation is not None
-    await world.services.consolidation.consolidate_student(
-        wax, older_than=timedelta(days=30)
-    )
+    service = _build_service(world, FakeConsolidator(bogus=True))
+    await service.consolidate_student(wax, older_than=timedelta(days=30))
     notebook = world.storage.get_notebook(wax)
     assert notebook is not None
     notes = world.storage.list_notebook_entries(wax, notebook.id)
@@ -90,35 +111,29 @@ async def test_understanding_that_cites_nothing_real_is_dropped() -> None:
 
 @pytest.mark.asyncio
 async def test_covered_entries_are_not_summarised_twice_and_recent_ones_wait() -> None:
-    world = make_world(consolidation_model=FakeConsolidator())
+    world = make_world()
     wax = add_student(world)
     _seed(world, wax)
-    assert world.services.consolidation is not None
-    too_soon = await world.services.consolidation.consolidate_student(
+    service = _build_service(world, FakeConsolidator())
+    too_soon = await service.consolidate_student(
         wax, older_than=timedelta(days=30)
     )
     assert too_soon is None  # everything is recent
     world.clock.advance(200 * 86400)
-    first = await world.services.consolidation.consolidate_student(
-        wax, older_than=timedelta(days=30)
-    )
-    second = await world.services.consolidation.consolidate_student(
-        wax, older_than=timedelta(days=30)
-    )
+    first = await service.consolidate_student(wax, older_than=timedelta(days=30))
+    second = await service.consolidate_student(wax, older_than=timedelta(days=30))
     assert first is not None and second is None
 
 
 @pytest.mark.asyncio
 async def test_failed_consolidation_changes_nothing() -> None:
-    world = make_world(consolidation_model=FakeConsolidator(fail=True))
+    world = make_world()
     wax = add_student(world)
     _seed(world, wax)
     world.clock.advance(200 * 86400)
-    assert world.services.consolidation is not None
+    service = _build_service(world, FakeConsolidator(fail=True))
     with pytest.raises(ConsolidationError):
-        await world.services.consolidation.consolidate_student(
-            wax, older_than=timedelta(days=30)
-        )
+        await service.consolidate_student(wax, older_than=timedelta(days=30))
     assert world.storage.list_summaries(wax) == ()
     assert (
         len(
