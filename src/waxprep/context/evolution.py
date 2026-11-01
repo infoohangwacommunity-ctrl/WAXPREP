@@ -113,6 +113,7 @@ class EvolutionService:
             Operation.SUPERSEDE_NOTEBOOK_ENTRY.value: self._supersede_notebook_entry,
             Operation.SUPERSEDE_SUMMARY.value: self._supersede_summary,
             Operation.LINK_ARTIFACT.value: self._link_artifact,
+            Operation.SET_LEARNING_STATE.value: self._set_learning_state_handler,
             # Blueprint Part IV lifecycle operations:
             Operation.INVALIDATE_NOTEBOOK_ENTRY.value: self._invalidate_notebook,
             Operation.INVALIDATE_NODE.value: self._invalidate_node_handler,
@@ -412,6 +413,85 @@ class EvolutionService:
             created_notebook_entry_id=entry.id,
             superseded_id=old.id,
         )
+
+    def _set_learning_state_handler(
+        self, proposal: Proposal, now: datetime
+    ) -> EvolutionResult:
+        """Founder's vision §6 — write/supersede the current learning state.
+
+        The state is keyed by ``subject`` so a student can be learning
+        more than one subject at a time. When an existing active
+        ``learning_state`` entry exists for the same subject, this
+        operation supersedes it (the previous state stays for audit;
+        ordinary retrieval sees only the new one). When none exists,
+        it adds a new entry. The payload always carries
+        ``kind=learning_state`` so the renderer + retrieval tool can
+        find these entries without a free-text convention.
+
+        The ``needs_student_confirmation`` flag from ``_notebook_entry``
+        still applies: a learning state proposed solely from tutor
+        evidence is marked as needing student confirmation, so the
+        Teacher knows the state is the tutor's inference, not the
+        student's own claim.
+        """
+        payload_dict = proposal.payload.get("payload")
+        # The validator already enforced payload shape and pinned kind.
+        # We re-read it defensively because the handler runs after
+        # validation inside the storage transaction.
+        if not isinstance(payload_dict, dict):
+            return EvolutionResult(
+                False, "set_learning_state: payload missing", proposal
+            )
+        subject = str(payload_dict.get("subject") or "").strip()
+        if not subject:
+            # Validator already rejects this; defensive guard for safety.
+            return EvolutionResult(
+                False, "set_learning_state: subject required", proposal
+            )
+        previous_id = self._find_active_learning_state_id(
+            proposal.wax_id, subject=subject
+        )
+        entry = self._notebook_entry(proposal, now)
+        if previous_id is not None:
+            self.storage.supersede_notebook_entry(
+                proposal.wax_id, previous_id, entry.id, now
+            )
+            return EvolutionResult(
+                True,
+                "learning state superseded; earlier state and its evidence preserved",
+                proposal,
+                created_notebook_entry_id=entry.id,
+                superseded_id=previous_id,
+            )
+        return EvolutionResult(
+            True,
+            "learning state added",
+            proposal,
+            created_notebook_entry_id=entry.id,
+        )
+
+    def _find_active_learning_state_id(
+        self, wax_id: WaxId, *, subject: str
+    ) -> UUID | None:
+        """Return the id of the active ``learning_state`` entry for one
+        subject, or None when no such entry exists.
+
+        The lookup is O(active entries) — bounded because supersession
+        keeps only one active entry per (subject) at a time.
+        """
+        notebook = self.storage.get_notebook(wax_id)
+        if notebook is None:
+            return None
+        for entry in self.storage.list_notebook_entries(wax_id, notebook.id):
+            payload = entry.payload
+            if payload.get("kind") != "learning_state":
+                continue
+            if entry.status.value != "active":
+                continue
+            if str(payload.get("subject") or "").strip() != subject:
+                continue
+            return entry.id
+        return None
 
     def _supersede_summary(self, proposal: Proposal, now: datetime) -> EvolutionResult:
         p = proposal.payload

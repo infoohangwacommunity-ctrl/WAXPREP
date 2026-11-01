@@ -173,6 +173,7 @@ def test_build_gateway_passes_a_shared_client_to_the_provider() -> None:
                 "upstage_base_url": "https://api.upstage.ai/v1",
                 "upstage_model": "solar-pro4",
             })())
+            assert gateway is not None  # exercise return value
             # At least one client was constructed during wiring.
             assert construction_count >= 1, (
                 "build_gateway constructed zero httpx.AsyncClient instances — "

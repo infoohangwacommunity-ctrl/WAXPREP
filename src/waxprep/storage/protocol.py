@@ -20,6 +20,7 @@ from waxprep.domain.models import (
     ArtifactReference,
     ArtifactVersion,
     Attachment,
+    CalendarEvent,
     ChannelIdentity,
     DeletionRequest,
     DerivationJob,
@@ -28,6 +29,7 @@ from waxprep.domain.models import (
     HistoryEntry,
     InteractiveOffer,
     InvestigationRecord,
+    LearningState,
     Notebook,
     NotebookEntry,
     ObjectType,
@@ -100,6 +102,20 @@ class Storage(Protocol):
     def create_student(self, student: Student) -> Student: ...
 
     def get_student(self, wax_id: WaxId) -> Student | None: ...
+
+    def set_student_timezone(
+        self, wax_id: WaxId, timezone: str | None, now: datetime
+    ) -> Student | None:
+        """Update the student's IANA timezone (Founder's vision §7).
+
+        ``None`` clears the timezone. The Founder's brief is that the
+        runtime must understand the student's local wall clock, so
+        ``clock.student_local_now`` reads this column and converts the
+        UTC ``now()`` accordingly. Never ask for the timezone upfront;
+        it surfaces from context (e.g. "my exam is at 9am tomorrow")
+        and is recorded once CI is confident.
+        """
+        ...
 
     def create_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity: ...
 
@@ -735,6 +751,143 @@ class Storage(Protocol):
 
         Only safe for orphans from ``list_orphan_student_ids``: real
         students are protected by foreign keys from their data tables.
+        """
+        ...
+
+    # --- learning states (Founder's vision §6) -------------------------------------
+    # The third layer alongside history_entries (ground truth) and
+    # notebook_entries (durable understanding): the current state of
+    # the student's work on one subject — current topic, current stage,
+    # demonstrated vs. developing vs. not-assessed, the teaching
+    # observation, and the next sensible step. Superseded (never
+    # edited) every time the student advances.
+    def get_learning_state(
+        self, wax_id: WaxId, subject: str | None = None
+    ) -> LearningState | None:
+        """Return the active learning state for ``subject`` (or the
+        most recently active subject if ``subject is None``).
+
+        When ``subject`` is provided, the lookup uses the blind HMAC
+        index ``subject_hash`` (per-student derived key) — the database
+        never sees the plaintext subject. RLS scopes by wax_id via
+        ``assume_app_role`` + ``set_current_wax_id``.
+
+        Founder's vision §6: a student who says "wait, why did we use
+        4 there?" should retrieve the current learning state and
+        continue without restarting the lesson. This method is the
+        storage primitive CI uses to satisfy that.
+        """
+        ...
+
+    def set_learning_state(
+        self,
+        wax_id: WaxId,
+        subject: str,
+        payload: dict[str, Any],
+        *,
+        now: datetime,
+        paused: bool = False,
+    ) -> LearningState:
+        """Persist a new active learning state for ``subject``.
+
+        Atomically supersedes any pre-existing active state for the
+        same subject: the old row is set to status='superseded' with
+        ``superseded_by`` pointing at the new row, and the new row is
+        inserted with status='active'. The partial unique index
+        ``learning_states_active_per_subject_idx`` (migration 018)
+        guarantees at most one active state per (wax_id, subject) at
+        any time.
+
+        ``paused=True`` sets ``paused_at = now`` — the Founder's
+        vision acknowledges a student may step away mid-lesson; CI can
+        surface "we paused on quadratic equations yesterday" without
+        losing the active state.
+
+        All queries are parameterised; the GUC ``app.current_wax_id``
+        is set transaction-locally via ``set_current_wax_id``.
+        """
+        ...
+
+    def list_active_learning_states(
+        self, wax_id: WaxId
+    ) -> tuple[LearningState, ...]:
+        """Return every active learning state for ``wax_id``, most
+        recently active first.
+
+        Used by CI to assemble the "what is the student working on"
+        context across every subject. ``learning_states_recent_activity_idx``
+        (migration 018) serves the order.
+
+        Note: the plaintext subject is not recoverable from a row
+        alone (only its blind HMAC hash). Callers that need the
+        plaintext subject must know it from the call site.
+        """
+        ...
+
+    # --- student calendar (Founder's vision §7) -------------------------------------
+    # Exam dates, deadlines, school sessions, and other time-sensitive
+    # events. ``event_date`` is plaintext so range queries run
+    # server-side; ``notes`` is AES-GCM ciphertext at rest. The sweep
+    # method ``expire_past_deadlines`` marks past deadlines without
+    # deleting them — temporal truth is a first-class responsibility.
+    def add_calendar_event(self, event: CalendarEvent) -> CalendarEvent:
+        """Persist one calendar event.
+
+        The event_date is stored as TIMESTAMPTZ (UTC). The student's
+        local timezone (``students.timezone``, set via
+        ``set_student_timezone``) is applied at presentation time,
+        not at storage time — the database always works in UTC.
+
+        ``notes`` is AES-GCM ciphertext, per-student derived key,
+        purpose ``"student_calendar.notes"`` (migration 021 column
+        comment).
+        """
+        ...
+
+    def get_student_calendar(
+        self,
+        wax_id: WaxId,
+        *,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        include_expired: bool = False,
+    ) -> tuple[CalendarEvent, ...]:
+        """Return calendar events for ``wax_id`` optionally filtered
+        by date range.
+
+        ``from_date`` and ``to_date`` form a half-open interval
+        ``[from_date, to_date)`` on ``event_date``. When both are
+        ``None``, every event for the student is returned. Expired
+        deadlines (already swept by ``expire_past_deadlines``) are
+        excluded by default; pass ``include_expired=True`` to include
+        them (audit / "what deadlines already passed?" queries).
+
+        Uses ``student_calendar_date_range_idx`` (migration 021) for
+        an index-only range scan. RLS scopes by wax_id.
+        """
+        ...
+
+    def expire_past_deadlines(self, now: datetime) -> int:
+        """Sweep method: mark every past deadline as expired.
+
+        Sets ``expired_at = now`` on every row where
+        ``event_kind = 'deadline'`` AND ``event_date < now`` AND
+        ``expired_at IS NULL``. Returns the number of rows newly
+        marked expired. The scheduler calls this periodically so CI
+        sees a consistent view: a deadline either has not yet arrived
+        or it has been swept.
+
+        Founder's vision §7-8: temporal truth is a first-class
+        responsibility. A deadline that has passed must not appear
+        as "upcoming" simply because the notebook said so yesterday.
+
+        Cross-tenant: the UPDATE has no wax_id filter, so it must run
+        as a role that can see every student's deadlines. The
+        implementation resets to the bootstrap role for this one
+        sweep so RLS does not blind it — same pattern as
+        ``waxprep_students_with_due_jobs`` and
+        ``waxprep_wax_ids_with_pending_deletions`` (SECURITY DEFINER
+        helpers in migrations 005, 007, 014).
         """
         ...
 

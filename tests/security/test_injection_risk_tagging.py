@@ -21,7 +21,6 @@ from uuid import uuid4
 
 import pytest
 
-from waxprep.context.evidence import history_evidence
 from waxprep.context.models import (
     ContextDecision,
     ContextPackage,
@@ -34,8 +33,7 @@ from waxprep.context.tool_impls import (
     _tag_evidence,
     _tag_results,
 )
-from waxprep.domain.identifiers import WaxId, new_wax_id
-from waxprep.domain.models import AuthorKind, HistoryEntry
+from waxprep.domain.identifiers import new_wax_id
 from waxprep.orchestration.model_teacher_ci_first import ModelTeacherCiFirst
 
 

@@ -17,6 +17,8 @@ from waxprep.domain.models import (
     ArtifactVersion,
     Attachment,
     AuthorKind,
+    CalendarEvent,
+    CalendarEventKind,
     ChannelIdentity,
     DeletionRequest,
     DeletionRequestStatus,
@@ -28,6 +30,8 @@ from waxprep.domain.models import (
     InteractiveOfferStatus,
     InvestigationRecord,
     JobStatus,
+    LearningState,
+    LearningStateStatus,
     Notebook,
     NotebookEntry,
     NotebookEntryStatus,
@@ -106,6 +110,14 @@ class InMemoryStorage:
         # holds the request rows; the propagation log is a JSON dict on
         # each request.
         self._deletion_requests: dict[Key, DeletionRequest] = {}
+        # Founder's vision §6/§7: learning states + student calendar.
+        # The in-memory store keeps the plaintext subject next to the
+        # state — there is no blind hash needed because nothing leaves
+        # the process. Key is (wax_id, subject_lower) so two writes for
+        # the same subject supersede rather than duplicate.
+        self._learning_states: dict[tuple[WaxId, str], LearningState] = {}
+        self._learning_states_by_id: dict[Key, LearningState] = {}
+        self._calendar_events: dict[Key, CalendarEvent] = {}
 
     # --- identity -----------------------------------------------------
     def create_student(self, student: Student) -> Student:
@@ -116,6 +128,16 @@ class InMemoryStorage:
 
     def get_student(self, wax_id: WaxId) -> Student | None:
         return self._students.get(wax_id)
+
+    def set_student_timezone(
+        self, wax_id: WaxId, timezone: str | None, now: datetime
+    ) -> Student | None:
+        current = self._students.get(wax_id)
+        if current is None:
+            return None
+        updated = replace(current, timezone=timezone, updated_at=now)
+        self._students[wax_id] = updated
+        return updated
 
     def create_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity:
         key = (identity.channel, identity.external_id)
@@ -1540,6 +1562,136 @@ class InMemoryStorage:
     def delete_student(self, wax_id: WaxId) -> bool:
         """Hard-delete one student row; True when a row was removed."""
         return self._students.pop(wax_id, None) is not None
+
+    # --- learning states (Founder's vision §6) -------------------------------------
+    # The in-memory store keeps the plaintext subject on the model
+    # directly — there is no blind hash needed because nothing leaves
+    # the process. Two writes for the same (wax_id, subject) supersede
+    # rather than duplicate. The previous state stays in
+    # `_learning_states_by_id` so audit queries can still see it.
+    def get_learning_state(
+        self, wax_id: WaxId, subject: str | None = None
+    ) -> LearningState | None:
+        if subject is not None:
+            state = self._learning_states.get((wax_id, subject.lower()))
+            return state
+        # No subject: return the most recently active state.
+        active = [
+            s
+            for s in self._learning_states.values()
+            if s.wax_id == wax_id
+            and s.status is LearningStateStatus.ACTIVE
+        ]
+        if not active:
+            return None
+        active.sort(key=lambda s: s.last_active_at, reverse=True)
+        return active[0]
+
+    def set_learning_state(
+        self,
+        wax_id: WaxId,
+        subject: str,
+        payload: dict[str, Any],
+        *,
+        now: datetime,
+        paused: bool = False,
+    ) -> LearningState:
+        if wax_id not in self._students:
+            raise ValueError("unknown student")
+        new_id_val = new_id()
+        paused_at = now if paused else None
+        new_state = LearningState(
+            id=new_id_val,
+            wax_id=wax_id,
+            subject=subject,
+            payload=dict(payload),
+            status=LearningStateStatus.ACTIVE,
+            last_active_at=now,
+            created_at=now,
+            updated_at=now,
+            paused_at=paused_at,
+            superseded_by_id=None,
+        )
+        key = (wax_id, subject.lower())
+        old_state = self._learning_states.get(key)
+        if old_state is not None and old_state.status is LearningStateStatus.ACTIVE:
+            # Supersede the old state. The by-id map retains the old
+            # row for audit; the active map now points at the new row.
+            superseded = replace(
+                old_state,
+                status=LearningStateStatus.SUPERSEDED,
+                superseded_by_id=new_id_val,
+                updated_at=now,
+            )
+            self._learning_states_by_id[(wax_id, old_state.id)] = superseded
+        self._learning_states[key] = new_state
+        self._learning_states_by_id[(wax_id, new_id_val)] = new_state
+        return new_state
+
+    def list_active_learning_states(
+        self, wax_id: WaxId
+    ) -> tuple[LearningState, ...]:
+        active = [
+            s
+            for s in self._learning_states.values()
+            if s.wax_id == wax_id and s.status is LearningStateStatus.ACTIVE
+        ]
+        active.sort(key=lambda s: s.last_active_at, reverse=True)
+        return tuple(active)
+
+    # --- student calendar (Founder's vision §7) -------------------------------------
+    # The in-memory store keeps the plaintext notes (no cipher in unit
+    # tests). Expired deadlines are kept in the same map with
+    # `expired_at` set — same audit-trail semantics as Postgres.
+    def add_calendar_event(self, event: CalendarEvent) -> CalendarEvent:
+        if event.wax_id not in self._students:
+            raise ValueError("unknown student")
+        self._calendar_events[(event.wax_id, event.id)] = event
+        return event
+
+    def get_student_calendar(
+        self,
+        wax_id: WaxId,
+        *,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        include_expired: bool = False,
+    ) -> tuple[CalendarEvent, ...]:
+        rows: list[CalendarEvent] = []
+        for (w, _), event in self._calendar_events.items():
+            if w != wax_id:
+                continue
+            if from_date is not None and event.event_date < from_date:
+                continue
+            if to_date is not None and event.event_date >= to_date:
+                continue
+            if not include_expired and event.expired_at is not None:
+                continue
+            rows.append(event)
+        rows.sort(key=lambda e: e.event_date)
+        return tuple(rows)
+
+    def expire_past_deadlines(self, now: datetime) -> int:
+        """Mark every past deadline as expired; return the count newly
+        marked. Cross-tenant in Postgres (RESET ROLE for the sweep); in
+        the in-memory store every student's events are already in one
+        process so the sweep is a single pass.
+        """
+        count = 0
+        for key, event in list(self._calendar_events.items()):
+            if (
+                event.event_kind is CalendarEventKind.DEADLINE
+                and event.event_date < now
+                and event.expired_at is None
+            ):
+                updated = replace(
+                    event,
+                    expired_at=now,
+                    updated_at=now,
+                )
+                self._calendar_events[key] = updated
+                count += 1
+        return count
 
 
 __all__ = ["InMemoryStorage"]

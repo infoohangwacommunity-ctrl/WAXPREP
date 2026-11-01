@@ -29,6 +29,8 @@ from waxprep.domain.models import (
     ArtifactVersion,
     Attachment,
     AuthorKind,
+    CalendarEvent,
+    CalendarEventKind,
     ChannelIdentity,
     DeletionRequest,
     DeletionRequestStatus,
@@ -40,6 +42,8 @@ from waxprep.domain.models import (
     InteractiveOfferStatus,
     InvestigationRecord,
     JobStatus,
+    LearningState,
+    LearningStateStatus,
     Notebook,
     NotebookEntry,
     NotebookEntryStatus,
@@ -102,6 +106,14 @@ SUMMARY_COLUMNS = (
 LINK_COLUMNS = (
     "id, wax_id, derived_type, derived_id, source_type, source_id, "
     "source_author_kind, quote_encrypted, created_at"
+)
+LEARNING_STATE_COLUMNS = (
+    "id, wax_id, subject_hash, payload_encrypted, payload_key_id, status, "
+    "paused_at, last_active_at, superseded_by, created_at, updated_at"
+)
+CALENDAR_COLUMNS = (
+    "id, wax_id, event_kind, event_date, subject, notes_encrypted, "
+    "expired_at, created_at, updated_at"
 )
 
 
@@ -216,13 +228,14 @@ class PostgresStorage:
     def create_student(self, student: Student) -> Student:
         self._write(
             student.wax_id,
-            "INSERT INTO students (wax_id, status, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s)",
+            "INSERT INTO students (wax_id, status, created_at, updated_at, timezone) "
+            "VALUES (%s, %s, %s, %s, %s)",
             (
                 student.wax_id,
                 student.status.value,
                 student.created_at,
                 student.updated_at,
+                student.timezone,
             ),
         )
         return student
@@ -230,7 +243,8 @@ class PostgresStorage:
     def get_student(self, wax_id: WaxId) -> Student | None:
         row = self._one(
             wax_id,
-            "SELECT wax_id, status, created_at, updated_at FROM students WHERE wax_id = %s",
+            "SELECT wax_id, status, created_at, updated_at, timezone "
+            "FROM students WHERE wax_id = %s",
             (wax_id,),
         )
         if row is None:
@@ -240,7 +254,29 @@ class PostgresStorage:
             status=StudentStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            timezone=row["timezone"],
         )
+
+    def set_student_timezone(
+        self, wax_id: WaxId, timezone: str | None, now: datetime
+    ) -> Student | None:
+        """Update the student's IANA timezone. ``None`` clears it.
+
+        The Founder's vision §7 insists the runtime understand the
+        student's local wall clock. ``clock.student_local_now`` reads
+        this column and converts UTC ``now()`` accordingly. CI sets
+        it once it is confident (e.g. the student said "my exam is at
+        9am tomorrow" and the timezone can be inferred from context).
+        """
+        changed = self._write(
+            wax_id,
+            "UPDATE students SET timezone = %s, updated_at = %s "
+            "WHERE wax_id = %s",
+            (timezone, now, wax_id),
+        )
+        if not changed:
+            return None
+        return self.get_student(wax_id)
 
     def create_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity:
         self._write(
@@ -2943,6 +2979,337 @@ class PostgresStorage:
         """
         count = self._write(wax_id, "DELETE FROM students WHERE wax_id = %s", (wax_id,))
         return count > 0
+
+    # --- learning states (Founder's vision §6) -------------------------------------
+    # The current learning state is the *third* layer alongside
+    # history_entries (ground truth) and notebook_entries (durable
+    # understanding). It captures what is happening in the lesson right
+    # now and is superseded (never edited) every time the student
+    # advances. One ACTIVE state per (wax_id, subject) is enforced by
+    # the partial unique index `learning_states_active_per_subject_idx`
+    # (migration 018).
+    def _learning_state(self, row: Row) -> LearningState:
+        wax_id = WaxId(row["wax_id"])
+        # Reverse the subject_hash → subject lookup. We never store the
+        # plaintext subject, so we cannot recover it from the row alone.
+        # Callers that already know the subject pass it in via the
+        # query. For listing methods that return states without a
+        # subject hint, we leave subject="" — the caller already knows
+        # which subject it asked about.
+        return LearningState(
+            id=row["id"],
+            wax_id=wax_id,
+            subject=row.get("__subject", "") if isinstance(row, dict) else "",
+            payload=self._dec_json(
+                wax_id, "learning_state.payload", row["payload_encrypted"]
+            ),
+            status=LearningStateStatus(row["status"]),
+            last_active_at=row["last_active_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            paused_at=row["paused_at"],
+            superseded_by_id=row["superseded_by"],
+        )
+
+    def get_learning_state(
+        self, wax_id: WaxId, subject: str | None = None
+    ) -> LearningState | None:
+        """Return the active learning state for ``subject`` (or the most
+        recently active subject if ``subject is None``).
+
+        Uses the partial unique index
+        ``learning_states_active_per_subject_idx`` (migration 018) for
+        the per-subject lookup, and ``learning_states_recent_activity_idx``
+        for the most-recent lookup. The plaintext subject is never
+        transmitted — only its blind HMAC index
+        (``cipher.blind_index(wax_id, subject)``) is sent in the WHERE
+        clause. RLS scopes by wax_id via ``assume_app_role`` +
+        ``set_current_wax_id``.
+        """
+        if subject is not None:
+            subject_hash = self._cipher.blind_index(wax_id, subject)
+            row = self._one(
+                wax_id,
+                f"SELECT {LEARNING_STATE_COLUMNS} FROM learning_states "
+                "WHERE wax_id = %s AND subject_hash = %s AND status = 'active'",
+                (wax_id, subject_hash),
+            )
+        else:
+            row = self._one(
+                wax_id,
+                f"SELECT {LEARNING_STATE_COLUMNS} FROM learning_states "
+                "WHERE wax_id = %s AND status = 'active' "
+                "ORDER BY last_active_at DESC LIMIT 1",
+                (wax_id,),
+            )
+        if row is None:
+            return None
+        state = self._learning_state(row)
+        if subject is not None:
+            # Reattach the plaintext subject the caller already knows.
+            return LearningState(
+                id=state.id,
+                wax_id=state.wax_id,
+                subject=subject,
+                payload=state.payload,
+                status=state.status,
+                last_active_at=state.last_active_at,
+                created_at=state.created_at,
+                updated_at=state.updated_at,
+                paused_at=state.paused_at,
+                superseded_by_id=state.superseded_by_id,
+            )
+        return state
+
+    def set_learning_state(
+        self,
+        wax_id: WaxId,
+        subject: str,
+        payload: dict[str, Any],
+        *,
+        now: datetime,
+        paused: bool = False,
+    ) -> LearningState:
+        """Persist a new active learning state for ``subject``.
+
+        Atomically supersedes any pre-existing active state for the
+        same subject: the old row is set to status='superseded' with
+        ``superseded_by`` pointing at the new row, and the new row is
+        inserted with status='active'. The partial unique index
+        ``learning_states_active_per_subject_idx`` guarantees there is
+        at most one active state per (wax_id, subject) at any time.
+
+        Founder's vision §6: a learning state is replaced, never
+        edited. The previous state stays for audit and provenance.
+        """
+        subject_hash = self._cipher.blind_index(wax_id, subject)
+        new_id_val = new_id()
+        encrypted_payload = self._enc_json(
+            wax_id, "learning_state.payload", payload
+        )
+        # Key id is the active key id of the cipher's ring. The blob
+        # header carries it too (byte 1); the column is a redundant
+        # queryable copy used by rotation audits.
+        active_key_id = self._cipher._ring.active_key_id  # type: ignore[attr-defined]
+        paused_at = now if paused else None
+
+        with self.transaction():
+            # Find the existing active state for this subject, if any.
+            # SELECT ... FOR UPDATE locks the row so a concurrent
+            # set_learning_state call cannot also try to supersede it.
+            existing = self._one(
+                wax_id,
+                "SELECT id FROM learning_states "
+                "WHERE wax_id = %s AND subject_hash = %s AND status = 'active' "
+                "FOR UPDATE",
+                (wax_id, subject_hash),
+            )
+            old_id = existing["id"] if existing else None
+            # Step 1: supersede the old row FIRST. The partial unique
+            # index `learning_states_active_per_subject_idx` is checked
+            # immediately on INSERT (not deferrable), so we must drop
+            # the old row out of the partial index before inserting
+            # the new active row. Otherwise the INSERT fails with a
+            # unique-violation mid-transaction.
+            if old_id is not None:
+                self._write(
+                    wax_id,
+                    "UPDATE learning_states SET status = 'superseded', "
+                    "superseded_by = %s, updated_at = %s "
+                    "WHERE wax_id = %s AND id = %s",
+                    (new_id_val, now, wax_id, old_id),
+                )
+            # Step 2: insert the new active row. The partial unique
+            # index is now satisfied because the old row no longer has
+            # status='active'.
+            self._write(
+                wax_id,
+                f"INSERT INTO learning_states ({LEARNING_STATE_COLUMNS}) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    new_id_val,
+                    wax_id,
+                    subject_hash,
+                    encrypted_payload,
+                    active_key_id,
+                    LearningStateStatus.ACTIVE.value,
+                    paused_at,
+                    now,
+                    None,  # superseded_by — the new row is not superseded.
+                    now,
+                    now,
+                ),
+            )
+        return LearningState(
+            id=new_id_val,
+            wax_id=wax_id,
+            subject=subject,
+            payload=payload,
+            status=LearningStateStatus.ACTIVE,
+            last_active_at=now,
+            created_at=now,
+            updated_at=now,
+            paused_at=paused_at,
+            superseded_by_id=None,
+        )
+
+    def list_active_learning_states(
+        self, wax_id: WaxId
+    ) -> tuple[LearningState, ...]:
+        """Return every active learning state for ``wax_id``, most
+        recently active first.
+
+        Used by CI to assemble the "what is the student working on"
+        context (Founder's vision §6). ``learning_states_recent_activity_idx``
+        serves the order. The plaintext subject is not recoverable from
+        a row alone (only its blind hash), so the returned states have
+        ``subject=""``; callers that need the plaintext subject must
+        know it from the call site (e.g. the subject that triggered the
+        CI investigation).
+        """
+        rows = self._read(
+            wax_id,
+            f"SELECT {LEARNING_STATE_COLUMNS} FROM learning_states "
+            "WHERE wax_id = %s AND status = 'active' "
+            "ORDER BY last_active_at DESC",
+            (wax_id,),
+        )
+        return tuple(self._learning_state(r) for r in rows)
+
+    # --- student calendar (Founder's vision §7) -------------------------------------
+    # Calendar events are exam dates, deadlines, school sessions.
+    # `event_date` is plaintext so range queries run server-side as
+    # index scans; `notes` is AES-GCM ciphertext. The sweep method
+    # `expire_past_deadlines` marks past deadlines without deleting
+    # them — temporal truth is a first-class responsibility.
+    def _calendar_event(self, row: Row) -> CalendarEvent:
+        wax_id = WaxId(row["wax_id"])
+        notes_blob = row["notes_encrypted"]
+        return CalendarEvent(
+            id=row["id"],
+            wax_id=wax_id,
+            event_kind=CalendarEventKind(row["event_kind"]),
+            event_date=row["event_date"],
+            subject=row["subject"],
+            notes=self._dec(wax_id, "student_calendar.notes", notes_blob)
+            if notes_blob is not None
+            else None,
+            expired_at=row["expired_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def add_calendar_event(self, event: CalendarEvent) -> CalendarEvent:
+        """Persist one calendar event.
+
+        The event_date is stored as TIMESTAMPTZ (UTC). The student's
+        local timezone (``students.timezone``, set via
+        ``set_student_timezone``) is applied at presentation time, not
+        at storage time — the database always works in UTC. Founder's
+        vision §7: the runtime must understand time, not merely
+        timestamps attached to records.
+        """
+        notes_blob = (
+            self._enc(event.wax_id, "student_calendar.notes", event.notes)
+            if event.notes is not None
+            else None
+        )
+        self._write(
+            event.wax_id,
+            f"INSERT INTO student_calendar ({CALENDAR_COLUMNS}) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                event.id,
+                event.wax_id,
+                event.event_kind.value,
+                event.event_date,
+                event.subject,
+                notes_blob,
+                event.expired_at,
+                event.created_at,
+                event.updated_at,
+            ),
+        )
+        return event
+
+    def get_student_calendar(
+        self,
+        wax_id: WaxId,
+        *,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        include_expired: bool = False,
+    ) -> tuple[CalendarEvent, ...]:
+        """Return calendar events for ``wax_id`` optionally filtered by
+        date range.
+
+        ``from_date`` and ``to_date`` form a half-open interval
+        ``[from_date, to_date)`` on ``event_date``. When both are
+        ``None``, every event for the student is returned. Expired
+        deadlines (those already swept by ``expire_past_deadlines``)
+        are excluded by default; pass ``include_expired=True`` to
+        include them in the result (useful for audit / "what deadlines
+        have already passed?" queries).
+
+        Uses ``student_calendar_date_range_idx`` (migration 021).
+        """
+        clauses = ["wax_id = %s"]
+        params: list[Any] = [wax_id]
+        if from_date is not None:
+            clauses.append("event_date >= %s")
+            params.append(from_date)
+        if to_date is not None:
+            clauses.append("event_date < %s")
+            params.append(to_date)
+        if not include_expired:
+            clauses.append("expired_at IS NULL")
+        sql = (
+            f"SELECT {CALENDAR_COLUMNS} FROM student_calendar "
+            "WHERE " + " AND ".join(clauses) + " ORDER BY event_date"
+        )
+        rows = self._read(wax_id, sql, tuple(params))
+        return tuple(self._calendar_event(r) for r in rows)
+
+    def expire_past_deadlines(self, now: datetime) -> int:
+        """Sweep method: mark every past deadline as expired.
+
+        Sets ``expired_at = now`` on every row where
+        ``event_kind = 'deadline'`` AND ``event_date < now`` AND
+        ``expired_at IS NULL``. Returns the number of rows newly
+        marked expired.
+
+        The Founder's vision §7-8: temporal truth is a first-class
+        responsibility. A deadline that has passed must not appear as
+        "upcoming" simply because the notebook said so yesterday. The
+        scheduler calls this method periodically so CI sees a
+        consistent view: a deadline either has not yet arrived or it
+        has been swept.
+
+        Cross-tenant: the UPDATE has no wax_id filter, so it must run
+        as a role that can see every student's deadlines. The
+        ``waxprep_app`` role is bound by RLS — the storage layer
+        resets to the bootstrap role for this one sweep so RLS does
+        not blind it. This is the same pattern as
+        ``waxprep_students_with_due_jobs`` and
+        ``waxprep_wax_ids_with_pending_deletions`` (SECURITY DEFINER
+        helpers in migrations 005, 007, 014).
+        """
+        self._ensure_healthy()
+        with self._conn.cursor() as cur:
+            cur.execute("RESET ROLE")
+            cur.execute(
+                "UPDATE student_calendar SET expired_at = %s, "
+                "updated_at = %s "
+                "WHERE event_kind = 'deadline' "
+                "  AND event_date < %s "
+                "  AND expired_at IS NULL",
+                (now, now, now),
+            )
+            count = cur.rowcount
+        assume_app_role(self._conn)
+        if self._txn_depth == 0:
+            self._conn.commit()
+        return count
 
 
 __all__ = ["PostgresStorage"]

@@ -35,18 +35,17 @@ from waxprep.context.model import (
     ContextModelRequest,
 )
 from waxprep.context.models import (
+    ContextDecision,
     Evidence,
     EvidenceType,
     InvestigationLimits,
     InvestigationRequest,
     InvestigationStatus,
-    ContextDecision,
 )
-from waxprep.context.proposals import Proposal, ProposalValidator, EvidenceRef
-from waxprep.context.tools import ContextTool, ToolInvocation, ToolResult
+from waxprep.context.proposals import EvidenceRef, Proposal, ProposalValidator
+from waxprep.context.tools import ToolInvocation, ToolResult
 from waxprep.domain.identifiers import new_wax_id
-from waxprep.domain.models import AuthorKind, HistoryEntry, ObjectType
-
+from waxprep.domain.models import AuthorKind, ObjectType
 
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 

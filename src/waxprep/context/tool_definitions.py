@@ -29,6 +29,7 @@ _TIME_FILTERS: dict[str, Any] = {
 _LIFECYCLE_OPERATIONS: list[str] = [
     "add_notebook_entry",
     "supersede_notebook_entry",
+    "set_learning_state",
     "supersede_summary",
     "supersede_node",
     "create_node",
@@ -225,6 +226,38 @@ def context_tool_definitions() -> list[dict[str, Any]]:
             {},
             [],
         ),
+        # Founder's vision §6: a current learning state is a first-class
+        # notebook kind. CI retrieves the active state(s) so the Teacher
+        # can pick up the lesson where it left off — including the
+        # current stage, subtopic statuses, teaching observations, and
+        # the next sensible step. This tool returns Evidence items, so
+        # the same selection mechanism applies (CI decides whether the
+        # state is relevant for THIS message).
+        _tool(
+            "read_learning_state",
+            "Read the student's active learning state(s) — the "
+            "current stage, subtopic statuses, teaching observations, "
+            "and next sensible step for subjects CI has previously "
+            "recorded. Pass `subject` to limit to one subject; omit it "
+            "to receive every active state. Use this when the student "
+            "refers to 'where we were', 'last time', or a topic CI "
+            "has been tracking, so you can resume the lesson instead "
+            "of starting from zero. The state is the tutor's "
+            "inference — when it is marked needs_student_confirmation, "
+            "the only support is tutor-only evidence and the state "
+            "should be verified with the student before being treated "
+            "as fact.",
+            {
+                "subject": {
+                    "type": "string",
+                    "description": (
+                        "Optional: limit to one subject (case-sensitive). "
+                        "Omit to receive every active learning state."
+                    ),
+                },
+            },
+            [],
+        ),
         # --- write-side proposal tool (Blueprint §28-29) ---------------------
         # The model proposes a lifecycle change; the application validates
         # the proposal, checks that the cited evidence exists and belongs
@@ -253,10 +286,18 @@ def context_tool_definitions() -> list[dict[str, Any]]:
                         "Operation-specific arguments. For add_notebook_entry: "
                         "{'payload': {<open-ended note>}}. For supersede_*: "
                         "include 'old_*_id' plus the new fields. For "
-                        "invalidate_*: {'entry_id' | 'node_id' | 'summary_id'}. "
-                        "For rebuild_index: {'object_type', 'object_id'}. "
-                        "For request_deletion: {'object_type', 'object_id', "
-                        "'scope'}."
+                        "set_learning_state: {'payload': {'subject': <str>, "
+                        "'topic': <str>, 'current_stage': <str>, 'subtopics': "
+                        "[{'name': <str>, 'status': 'demonstrated'|'developing'|"
+                        "'not_assessed'|'needs_practice'}], 'teaching_observation': "
+                        "<str, optional>, 'next_sensible_step': <str>}}. The "
+                        "application finds the previous active learning_state "
+                        "entry for the same subject and supersedes it — the "
+                        "state is superseded-not-deleted when the lesson "
+                        "advances. For invalidate_*: {'entry_id' | 'node_id' | "
+                        "'summary_id'}. For rebuild_index: {'object_type', "
+                        "'object_id'}. For request_deletion: {'object_type', "
+                        "'object_id', 'scope'}."
                     ),
                 },
                 "evidence_refs": {

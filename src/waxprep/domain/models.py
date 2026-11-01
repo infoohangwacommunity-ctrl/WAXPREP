@@ -145,12 +145,21 @@ class ArtifactStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Student:
-    """Minimal account record — not a profile."""
+    """Minimal account record — not a profile.
+
+    ``timezone`` is the student's IANA timezone (e.g. ``Africa/Lagos``)
+    so the runtime's UTC ``now()`` can be converted to the student's
+    local wall clock via ``clock.student_local_now``. Nullable because
+    we never ask for it upfront; it surfaces from context (e.g. "my exam
+    is at 9am tomorrow") and is recorded once CI is confident. Founder's
+    vision §7: temporal understanding is a first-class responsibility.
+    """
 
     wax_id: WaxId
     created_at: datetime
     updated_at: datetime
     status: StudentStatus = StudentStatus.ACTIVE
+    timezone: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +468,93 @@ class Event:
     metadata: dict[str, Any] = field(default_factory=lambda: cast(dict[str, Any], {}))
 
 
+class LearningStateStatus(StrEnum):
+    """Lifecycle state of a learning state (Founder's vision §6).
+
+    A learning state is the live "where is the student in this subject"
+    snapshot. It is replaced (``SUPERSEDED``) every time the student
+    advances; the previous state stays for audit and provenance.
+
+    Mirrors ``NotebookEntryStatus`` minus ``INVALIDATED``: invalidation
+    is a property of derived durable understanding, not of the live
+    lesson state. The current state is simply replaced when the lesson
+    moves on.
+    """
+
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+
+
+@dataclass(frozen=True, slots=True)
+class LearningState:
+    """The current state of one student's work on one subject.
+
+    Per the Founder's vision §6, this is the *third* layer alongside
+    history_entries (ground truth) and notebook_entries (durable
+    understanding). A learning state captures "what is happening in
+    the lesson right now": the current topic, current stage,
+    demonstrated vs. developing vs. not-assessed, the teaching
+    observation, and the next sensible step.
+
+    ``subject`` is the decrypted subject string (e.g. "Mathematics").
+    The storage layer converts it to/from the ``subject_hash`` blind
+    HMAC index used in the unique constraint — the database never sees
+    the plaintext subject.
+
+    ``payload`` is the decrypted JSON dict (open-ended, same
+    convention as ``NotebookEntry.payload``).
+    """
+
+    id: UUID
+    wax_id: WaxId
+    subject: str
+    payload: dict[str, Any]
+    status: LearningStateStatus
+    last_active_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    paused_at: datetime | None = None
+    superseded_by_id: UUID | None = None
+
+
+class CalendarEventKind(StrEnum):
+    """Kind of student calendar event (Founder's vision §7).
+
+    The Founder's brief lists exam / deadline / session / other. The
+    sweep method ``expire_past_deadlines`` only acts on ``DEADLINE``
+    rows whose ``event_date`` has passed — exams and sessions are
+    kept as historical record without an expiry sweep (an exam that
+    has passed is still a fact about the student's calendar).
+    """
+
+    EXAM = "exam"
+    DEADLINE = "deadline"
+    SESSION = "session"
+    OTHER = "other"
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarEvent:
+    """One entry in a student's calendar (Founder's vision §7).
+
+    Exam dates, deadlines, school sessions, and other time-sensitive
+    events. The ``event_date`` is plaintext so range queries run
+    server-side as index scans; ``notes`` is AES-GCM ciphertext at rest
+    and is decrypted on read. ``expired_at`` is set by
+    ``expire_past_deadlines`` when a deadline's event_date has passed.
+    """
+
+    id: UUID
+    wax_id: WaxId
+    event_kind: CalendarEventKind
+    event_date: datetime
+    created_at: datetime
+    updated_at: datetime
+    subject: str | None = None
+    notes: str | None = None
+    expired_at: datetime | None = None
+
+
 def new_id() -> UUID:
     """Create a new opaque UUID."""
     return uuid4()
@@ -473,6 +569,8 @@ __all__ = [
     "ArtifactVersion",
     "Attachment",
     "AuthorKind",
+    "CalendarEvent",
+    "CalendarEventKind",
     "ChannelIdentity",
     "DeletionRequest",
     "DeletionRequestStatus",
@@ -484,6 +582,8 @@ __all__ = [
     "InteractiveOfferStatus",
     "InvestigationRecord",
     "JobStatus",
+    "LearningState",
+    "LearningStateStatus",
     "Notebook",
     "NotebookEntry",
     "NotebookEntryStatus",
