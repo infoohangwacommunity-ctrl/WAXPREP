@@ -2,7 +2,13 @@
 builder = "RAILPACK"
 
 [deploy]
-startCommand = "uv run uvicorn waxprep.app:app --host 0.0.0.0 --port $PORT"
+# --timeout-graceful-shutdown 30 (Fix 1): uvicorn waits up to 30s after
+# SIGTERM for the lifespan drain to finish — stops accepting new
+# connections, lets in-flight turns complete, cancels the derivation
+# worker task, and closes every psycopg connection we opened. The
+# 30s budget matches Railway/Render's default platform shutdown grace;
+# the app's internal drain defaults to 25s so 5s of headroom remain.
+startCommand = "uv run uvicorn waxprep.app:app --host 0.0.0.0 --port $PORT --timeout-graceful-shutdown 30"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

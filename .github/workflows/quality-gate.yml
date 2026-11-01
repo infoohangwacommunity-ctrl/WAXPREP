@@ -45,6 +45,9 @@ jobs:
       - name: Spelling check (codespell)
         run: uvx codespell .
 
+      - name: Dictionary scan (no hardcoded topic/media words in intelligence layers)
+        run: uv run python scripts/ci/scan_hardcoded_dictionary_words.py
+
       - name: Format check (ruff, with diff output)
         run: uv run ruff format --check --diff .
 

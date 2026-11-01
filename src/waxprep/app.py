@@ -27,7 +27,11 @@ from waxprep.clock import SystemClock
 from waxprep.domain.identifiers import WaxId
 from waxprep.embeddings.protocol import EmbeddingProvider
 from waxprep.media.processors.gemini_stt import build_speech_to_text
-from waxprep.orchestration.latency import TurnLatencyRecorder
+from waxprep.orchestration.latency import (
+    TurnLatencyRecorder,
+    latency_sample_count,
+    median_latency_seconds,
+)
 from waxprep.settings import Settings, load_settings
 from waxprep.storage.protocol import Storage
 from waxprep.wiring import build_services
@@ -66,28 +70,188 @@ _outboxes: list[Any] = []
 message_queue: MessageQueue | None = None
 _memory_storage: Storage | None = None
 
+# Graceful-shutdown state (Fix 1 + Fix 2).
+#
+# ``_draining`` flips to True at the START of the lifespan teardown.
+# Webhook ``accept_inbound`` callbacks check it via ``is_draining()`` and
+# reject new arrivals with None (the channel adapter returns 503 to the
+# provider, which retries against the next replica). This stops the
+# redeploy-aborts-mid-turn-transaction vector flagged in
+# migration 015's postmortem: the platform sends SIGTERM, uvicorn stops
+# accepting new connections, AND the app rejects any in-flight webhook
+# already accepted but not yet queued — so no NEW turn can start while
+# the drain waits for turns already in flight to finish.
+#
+# ``_worker_task`` is the derivation worker's asyncio task. The previous
+# finding: it was fire-and-forget (``asyncio.create_task`` with no
+# reference held), so the lifespan teardown could not cancel + await it.
+# A mid-model-call kill is recoverable (job leases expire) but not clean;
+# we now cancel and await it explicitly inside the drain timeout.
+#
+# ``_storage_handles`` tracks every Storage we open (webhook, worker,
+# outbox) so the drain can close their underlying psycopg connections.
+# Without this, uvicorn's process exit leaks the connections and the
+# next cold start races the old connection's COMMIT/ROLLBACK state.
+_draining: bool = False
+_worker_task: asyncio.Task[None] | None = None
+_storage_handles: list[Any] = []
+
+
+def is_draining() -> bool:
+    """True once the lifespan teardown has started (SIGTERM drain in progress).
+
+    Webhook ``accept_inbound`` callbacks read this to reject new arrivals
+    so a redeploy cannot start a turn it will not finish.
+    """
+    return _draining
+
+
+def _set_draining(value: bool) -> None:
+    global _draining
+    _draining = value
+
+
+async def _drain_shutdown(
+    *,
+    queue: MessageQueue | None = None,
+    worker_task: asyncio.Task[None] | None = None,
+    outboxes: list[Any] | None = None,
+    storage_handles: list[Any] | None = None,
+    drain_timeout: float = 25.0,
+    queue_stop_timeout: float = 5.0,
+    worker_cancel_timeout: float = 5.0,
+) -> None:
+    """SIGTERM graceful drain — Fix 1 + Fix 2.
+
+    Sequence (the Founder's brief: "stops accepting new webhooks, waits
+    for in-flight turns to complete with a timeout, cleanly closes DB
+    connections"):
+
+    1. Flip ``_draining`` so webhook callbacks reject new arrivals
+       (the channel adapter returns 503; the provider retries the next
+       replica). Uvicorn has already stopped accepting new connections
+       at the socket level; this is the application-level counterpart.
+    2. Wait for the MessageQueue's active turn count to reach zero,
+       bounded by ``drain_timeout``. The queue's ``get_active_count``
+       reflects turns mid-execution in ``_run_batch`` (the turn runner
+       the queue calls — exactly the "in-flight turn" the brief names).
+    3. Cancel + await the derivation worker task (Fix 2). The previous
+       fire-and-forget ``create_task`` left this untracked; we now hold
+       the reference and cancel it inside the drain window so a
+       mid-model-call kill is at least a clean CancelledError.
+    4. Stop the message queue (cancels any straggler worker tasks).
+    5. Stop each outbox (flips ``_running = False``).
+    6. Close every psycopg connection we opened. Without this the
+       process exit leaks them and the next cold start races the old
+       connection's transaction state.
+
+    Every step is best-effort: a drain failure must never mask the
+    original shutdown signal. The 25s default leaves 5s of headroom
+    under uvicorn's ``--timeout-graceful-shutdown 30``.
+    """
+    _set_draining(True)
+    logger.info("drain: stopped accepting new webhooks")
+
+    # 2. Wait for in-flight turns to complete (with timeout).
+    if queue is not None:
+        try:
+            deadline = asyncio.get_event_loop().time() + drain_timeout
+            while queue.get_active_count() > 0:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    logger.warning(
+                        "drain: %d in-flight turns still active after %.1fs; "
+                        "cancelling",
+                        queue.get_active_count(),
+                        drain_timeout,
+                    )
+                    break
+                await asyncio.sleep(min(0.5, remaining))
+        except Exception:
+            logger.exception("drain: error waiting for in-flight turns")
+
+        # 4. Stop the queue (cancels straggler workers).
+        try:
+            await asyncio.wait_for(queue.stop(), timeout=queue_stop_timeout)
+        except TimeoutError:
+            logger.warning(
+                "drain: message queue stop timed out after %.1fs", queue_stop_timeout
+            )
+        except Exception:
+            logger.exception("drain: error stopping message queue")
+
+    # 3. Cancel + await the derivation worker task (Fix 2).
+    if worker_task is not None and not worker_task.done():
+        worker_task.cancel()
+        try:
+            await asyncio.wait_for(worker_task, timeout=worker_cancel_timeout)
+        except TimeoutError:
+            logger.warning(
+                "drain: worker task did not cancel within %.1fs", worker_cancel_timeout
+            )
+        except asyncio.CancelledError:
+            # Expected: the task observed the cancellation.
+            pass
+        except Exception:
+            logger.exception("drain: error awaiting worker task")
+
+    # 5. Stop outboxes.
+    for box in list(outboxes or []):
+        try:
+            await box.stop()
+        except Exception:
+            logger.exception("drain: error stopping outbox")
+
+    # 6. Close DB connections.
+    for handle in list(storage_handles or []):
+        conn = getattr(handle, "_conn", None)
+        if conn is None:
+            continue
+        closer = getattr(conn, "close", None)
+        if not callable(closer):
+            continue
+        try:
+            closer()
+        except Exception:
+            logger.exception("drain: error closing storage connection")
+
 
 @app.get("/health", tags=["system"])
-def health() -> dict[str, str]:
-    """Report process liveness. Composition is optional until lifespan runs."""
-    status: dict[str, str] = {
+def health() -> dict[str, Any]:
+    """Report process liveness and median turn latency.
+
+    Composition is optional until lifespan runs. The
+    ``latency_median_ms`` field appears only once at least one turn has
+    completed (cold boot reports honestly instead of synthesising a
+    zero). This is a monitoring signal — NOT an admin dashboard — so it
+    surfaces only the median of the last 100 turns plus the sample
+    count, nothing per-student.
+    """
+    status: dict[str, Any] = {
         "status": "ok",
         "service": "waxprep",
         "version": __version__,
     }
     if _services is None:
         status["composition"] = "pending"
-        return status
-    try:
-        from waxprep.domain.identifiers import new_wax_id
+    else:
+        try:
+            from waxprep.domain.identifiers import new_wax_id
 
-        # PostgresStorage heals a poisoned connection itself; a plain
-        # read is enough to prove the database is reachable.
-        _services.get_student(new_wax_id())
-    except Exception as exc:  # noqa: BLE001 — health must never crash
-        logger.exception("health check failed: storage unreachable")
-        status["status"] = "degraded"
-        status["reason"] = f"storage unreachable: {type(exc).__name__}"
+            # PostgresStorage heals a poisoned connection itself; a plain
+            # read is enough to prove the database is reachable.
+            _services.get_student(new_wax_id())
+        except Exception as exc:  # noqa: BLE001 — health must never crash
+            logger.exception("health check failed: storage unreachable")
+            status["status"] = "degraded"
+            status["reason"] = f"storage unreachable: {type(exc).__name__}"
+    if is_draining():
+        status["status"] = "draining"
+        status["reason"] = "graceful shutdown in progress"
+    median = median_latency_seconds()
+    if median is not None:
+        status["latency_median_ms"] = round(median * 1000.0, 1)
+        status["latency_samples"] = latency_sample_count()
     return status
 
 
@@ -95,6 +259,12 @@ def health() -> dict[str, str]:
 async def lifespan(app: FastAPI):  # noqa: ARG001
     """Compose services, start workers, and shut down cleanly."""
     global _services, _turn_service, _history, _clock, _outboxes, message_queue
+    global _worker_task, _storage_handles
+
+    # Reset drain state in case the module is reloaded between tests.
+    _set_draining(False)
+    _worker_task = None
+    _storage_handles = []
 
     settings = load_settings()
 
@@ -111,9 +281,19 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             cipher = build_cipher()
             storage = services_storage(cipher)
             _services = storage
+            _storage_handles.append(storage)
         except Exception:
             logger.exception("storage composition without channels failed")
-        yield
+        try:
+            yield
+        finally:
+            await _drain_shutdown(
+                queue=message_queue,
+                worker_task=_worker_task,
+                outboxes=_outboxes,
+                storage_handles=_storage_handles,
+            )
+            _storage_handles.clear()
         return
 
     try:
@@ -126,6 +306,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         storage = services_storage(cipher)
         worker_storage = services_storage(cipher)
         outbox_storage = services_storage(cipher)
+        # Track every connection we opened so the drain can close them.
+        _storage_handles.extend([storage, worker_storage, outbox_storage])
         clock = SystemClock()
         # One gateway instance for the whole composition; the judge
         # runs over the same provider under its own logical role.
@@ -231,6 +413,16 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             queue_handlers["whatsapp"] = wa_handler
 
             async def accept_wa(msg: NormalizedInbound) -> InboundResult | None:
+                # Drain guard (Fix 1): once SIGTERM lands, no new turn
+                # may start. Returning None lets the channel adapter
+                # respond 503 so Meta/Telegram retries the next replica
+                # instead of starting a turn this process will not finish.
+                if is_draining():
+                    logger.info(
+                        "webhook rejected: drain in progress",
+                        extra={"channel": "whatsapp"},
+                    )
+                    return None
                 return await wa_handler.handle_message(msg)
 
             app.include_router(
@@ -286,6 +478,15 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             async def accept_tg(
                 msg: NormalizedInbound,
             ) -> TelegramInboundResult | None:
+                # Drain guard (Fix 1): mirror the WhatsApp path so a
+                # SIGTERM during a Telegram burst cannot start a new
+                # turn this process will not finish.
+                if is_draining():
+                    logger.info(
+                        "webhook rejected: drain in progress",
+                        extra={"channel": "telegram"},
+                    )
+                    return None
                 return await tg_handler.handle_message(msg)
 
             app.include_router(
@@ -320,30 +521,37 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             logger.info("telegram channel mounted")
 
         async def _worker_loop() -> None:
-            while True:
+            while not is_draining():
                 try:
                     await worker_services.worker.run_once()
                 except Exception:
                     logger.exception("derivation worker iteration failed")
                 await asyncio.sleep(2.0)
 
-        asyncio.create_task(_worker_loop())
+        # Fix 2: hold the task reference so the drain can cancel +
+        # await it inside the graceful-shutdown window. The previous
+        # fire-and-forget ``asyncio.create_task`` left this untracked;
+        # a mid-model-call kill was recoverable (job leases expire)
+        # but not clean, and the unawaited task also produced an
+        # "asyncio task was destroyed but it is pending" warning on
+        # every uvicorn shutdown.
+        _worker_task = asyncio.create_task(_worker_loop())
         logger.info("waxprep channels ready")
     except Exception:
         logger.exception("failed to compose channel services")
-    yield
-
-    if message_queue is not None:
-        try:
-            await message_queue.stop()
-        except Exception:
-            logger.exception("error stopping message queue")
-
-    for box in list(_outboxes):
-        try:
-            await box.stop()
-        except Exception:
-            logger.exception("error stopping outbox")
+    try:
+        yield
+    finally:
+        # SIGTERM drain (Fix 1 + Fix 2). Runs whether composition
+        # succeeded or not so partial state still tears down cleanly.
+        await _drain_shutdown(
+            queue=message_queue,
+            worker_task=_worker_task,
+            outboxes=_outboxes,
+            storage_handles=_storage_handles,
+        )
+        _worker_task = None
+        _storage_handles.clear()
 
 
 app.router.lifespan_context = lifespan
@@ -464,33 +672,95 @@ def _prune_orphan_students(storage: Storage, clock: Any) -> None:
 
 
 def build_cipher():
-    """Load AES-GCM field cipher from environment (or deterministic test key)."""
+    """Load AES-GCM field cipher from environment (fail-closed).
 
-    from waxprep.security.cipher import AesGcmFieldCipher, KeyRing, load_cipher_from_env
+    Founder's vision §8 — "capability truth": never silently fabricate
+    a key so the process can boot. ``WAXPREP_MASTER_KEYS`` MUST be set
+    in production. A test marker (``WAXPREP_TEST_ALLOW_INSECURE_KEYS=1``)
+    is the ONLY escape hatch — it lets the unit-test suite and local
+    dev boot without real keys, and it is intentionally loud so an
+    operator reading logs can never miss that an insecure cipher is
+    in use. Render has the keys set, so the fail-closed path is the
+    production path.
+    """
+
+    from waxprep.security.cipher import load_cipher_from_env
 
     try:
         return load_cipher_from_env()
-    except RuntimeError:
-        # Local/dev without keys: fixed test key so the process can still boot.
-        # Production must set WAXPREP_MASTER_KEYS.
+    except RuntimeError as exc:
+        # Fail-closed unless the explicit test marker is present. The
+        # previous behaviour silently fell back to ``b"0" * 32`` which
+        # meant production could boot without an operator ever noticing
+        # the missing secret — exactly the silent MockContextModel-style
+        # failure the founder's capability-truth rule forbids.
+        marker = os.environ.get("WAXPREP_TEST_ALLOW_INSECURE_KEYS", "").lower()
+        if marker not in {"1", "true", "yes"}:
+            raise RuntimeError(
+                "WAXPREP_MASTER_KEYS is not set. Production must configure "
+                "real encryption keys. To permit an insecure test key "
+                "(local dev or unit tests only), set "
+                "WAXPREP_TEST_ALLOW_INSECURE_KEYS=1 explicitly."
+            ) from exc
+        logger.warning(
+            "WAXPREP_TEST_ALLOW_INSECURE_KEYS=1 — using deterministic "
+            "test cipher. This MUST NEVER happen in production."
+        )
+        from waxprep.security.cipher import AesGcmFieldCipher, KeyRing
+
         raw = b"0" * 32
         return AesGcmFieldCipher(KeyRing(keys={1: raw}, active_key_id=1))
 
 
 def build_context_model(settings: Any = None):
-    """Prefer gateway-backed CI model when Upstage is configured; else mock."""
+    """Build the production Context Intelligence model (fail-closed).
+
+    Founder's vision §8 — "capability truth": never claim to have run
+    a Context Intelligence investigation when the model was never
+    wired. ``MockContextModel`` is the test double — it returns canned
+    decisions and would silently fabricate context in production. We
+    refuse to fall back to it unless the explicit test marker
+    ``WAXPREP_TEST_ALLOW_MOCK_CONTEXT_MODEL=1`` is set, so a missing
+    provider configuration fails loudly at startup instead of producing
+    fake context the Teacher cannot distinguish from real evidence.
+
+    When a real Upstage API key is configured, the gateway-backed
+    ``GatewayContextModel`` is wired up as before.
+    """
     from waxprep.context.mock_model import MockContextModel
 
-    try:
-        if settings is not None and getattr(settings, "upstage_api_key", None):
+    if settings is not None and getattr(settings, "upstage_api_key", None):
+        try:
             from waxprep.context.gateway_model import GatewayContextModel
 
             gateway = build_gateway(settings)
             effort = getattr(settings, "reasoning_effort", None) or "medium"
             return GatewayContextModel(gateway, reasoning_effort=effort)
-    except Exception:
-        logger.exception("falling back to MockContextModel for CI")
-    return MockContextModel()
+        except Exception:
+            # The gateway failed to build. Do NOT fall back to the
+            # mock silently — that is exactly the capability-truth
+            # violation the founder named. Surface the failure.
+            logger.exception(
+                "gateway-backed context model failed to build; refusing "
+                "to silently fall back to MockContextModel in production"
+            )
+            raise
+    # No real provider configured. Fail-closed unless the test marker
+    # is present. Local dev and the unit-test suite set the marker; the
+    # production boot path never does.
+    marker = os.environ.get("WAXPREP_TEST_ALLOW_MOCK_CONTEXT_MODEL", "").lower()
+    if marker in {"1", "true", "yes"}:
+        logger.warning(
+            "WAXPREP_TEST_ALLOW_MOCK_CONTEXT_MODEL=1 — using MockContextModel. "
+            "CI will return canned decisions; this MUST NEVER happen in production."
+        )
+        return MockContextModel()
+    raise RuntimeError(
+        "No Context Intelligence provider is configured (WAXPREP_UPSTAGE_API_KEY "
+        "is unset). Production MUST configure a real provider. To permit the "
+        "MockContextModel test double (local dev or unit tests only), set "
+        "WAXPREP_TEST_ALLOW_MOCK_CONTEXT_MODEL=1 explicitly."
+    )
 
 
 def build_gateway(settings: Any):

@@ -20,7 +20,10 @@ Design rules:
 from __future__ import annotations
 
 import logging
+import statistics
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -44,11 +47,65 @@ STAGE_BATCH_READY = "batch_ready"
 STAGE_TURN_START = "turn_start"
 STAGE_CI_START = "ci_start"
 STAGE_CI_END = "ci_end"
+# Alias honouring the Founder's "notes of time" terminology. The CI
+# finalisation mark is the same instant as ``STAGE_CI_END`` — both
+# names are exported so downstream consumers can use either.
+STAGE_CI_FINALIZE = STAGE_CI_END
 STAGE_TEACHER_FIRST_DELTA = "teacher_first_delta"
 STAGE_FIRST_VISIBLE = "first_visible"
 STAGE_REPLY_SAVED = "reply_saved"
 STAGE_OUTBOUND_CREATED = "outbound_created"
 STAGE_TURN_END = "turn_end"
+# Alias honouring the Founder's "end-to-end" terminology. Same instant
+# as ``STAGE_TURN_END``; exported so the latency event metadata can be
+# read with either name.
+STAGE_END_TO_END = STAGE_TURN_END
+
+# In-memory ring buffer of the most recent end-to-end turn latencies.
+# Single-process uvicorn (the production start command) shares one
+# buffer across webhook + worker recorders; a multi-worker deployment
+# would have one buffer per worker, which is acceptable for a /health
+# signal that exists for monitoring, not billing.
+_LATENCY_BUFFER_SIZE = 100
+_latency_buffer: deque[float] = deque(maxlen=_LATENCY_BUFFER_SIZE)
+_latency_lock = threading.Lock()
+
+
+def record_latency_sample(seconds: float) -> None:
+    """Append one turn's end-to-end latency to the in-memory ring buffer.
+
+    Thread-safe (the derivation worker may run in a thread pool) and
+    never raises: a timing failure must never break a turn.
+    """
+    if seconds < 0:
+        return
+    with _latency_lock:
+        _latency_buffer.append(seconds)
+
+
+def median_latency_seconds() -> float | None:
+    """Median of the last 100 end-to-end turn latencies, or ``None``.
+
+    Used by ``/health`` for monitoring (the Founder's "measurable
+    latency" ask). Returns ``None`` when no turns have completed yet so
+    a cold boot reports honestly instead of synthesising a zero.
+    """
+    with _latency_lock:
+        if not _latency_buffer:
+            return None
+        return statistics.median(_latency_buffer)
+
+
+def latency_sample_count() -> int:
+    """How many latency samples are currently held in the ring buffer."""
+    with _latency_lock:
+        return len(_latency_buffer)
+
+
+def _reset_latency_buffer_for_tests() -> None:
+    """Clear the ring buffer (tests only)."""
+    with _latency_lock:
+        _latency_buffer.clear()
 
 
 @dataclass(slots=True)
@@ -114,6 +171,16 @@ class TurnLatencyRecorder:
     def flush(self, record: TurnLatencyRecord) -> None:
         """Persist the record as one event; never raises."""
         record.mark(STAGE_TURN_END)
+        # In-memory ring buffer for /health median latency. Recorded
+        # BEFORE the storage write so a cold-boot turn (storage == None
+        # during tests) still feeds the health signal. The Founder's
+        # "measurable latency" ask: monitoring without a dashboard.
+        end_to_end = record.seconds_between(STAGE_TURN_START, STAGE_TURN_END)
+        if end_to_end is not None:
+            try:
+                record_latency_sample(end_to_end)
+            except Exception:
+                logger.debug("latency sample append failed", exc_info=True)
         try:
             self._emit(record)
         except Exception:
@@ -159,7 +226,9 @@ __all__ = [
     "EVENT_KIND_TURN_LATENCY",
     "STAGE_BATCH_READY",
     "STAGE_CI_END",
+    "STAGE_CI_FINALIZE",
     "STAGE_CI_START",
+    "STAGE_END_TO_END",
     "STAGE_FIRST_VISIBLE",
     "STAGE_OUTBOUND_CREATED",
     "STAGE_QUEUE_RECEIVED",
@@ -169,4 +238,7 @@ __all__ = [
     "STAGE_TURN_START",
     "TurnLatencyRecord",
     "TurnLatencyRecorder",
+    "latency_sample_count",
+    "median_latency_seconds",
+    "record_latency_sample",
 ]
