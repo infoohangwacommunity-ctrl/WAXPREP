@@ -354,9 +354,8 @@ class ContextInvestigator:
         # update is justified. The model may still stop; we do not force a write.
         # SKIPPED on the fast-path: a simple message that did not warrant
         # investigation also does not warrant a stewardship round.
-        if (
-            not fast_path_taken
-            and not any(x.startswith("proposal_accepted:") for x in investigated)
+        if not fast_path_taken and not any(
+            x.startswith("proposal_accepted:") for x in investigated
         ):
             if tool_calls < limits.max_tool_calls and not hit_step_budget:
                 visible = format_for_model(
@@ -505,9 +504,7 @@ class ContextInvestigator:
         # rather than silently fabricating capability.
         capability_truth_violation = False
         if selected:
-            untraceable = [
-                e for e in selected if e.id not in seen_ids
-            ]
+            untraceable = [e for e in selected if e.id not in seen_ids]
             if untraceable or tool_calls_returning_evidence == 0:
                 capability_truth_violation = True
                 investigated.append(
@@ -542,9 +539,7 @@ class ContextInvestigator:
             if item_rank > _risk_rank[package_injection_risk]:
                 package_injection_risk = tagged.injection_risk
         if package_injection_risk != "low":
-            investigated.append(
-                f"injection_risk:{package_injection_risk}"
-            )
+            investigated.append(f"injection_risk:{package_injection_risk}")
 
         # The investigated audit log carries enough to tell a future
         # reviewer (or a regression test) exactly what the runtime did.

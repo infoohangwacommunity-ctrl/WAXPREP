@@ -104,9 +104,7 @@ def test_calendar_supports_all_event_kinds() -> None:
         CalendarEventKind.SESSION,
         CalendarEventKind.OTHER,
     ):
-        store.add_calendar_event(
-            _event(wax, kind=kind, date=NOW + timedelta(days=1))
-        )
+        store.add_calendar_event(_event(wax, kind=kind, date=NOW + timedelta(days=1)))
     fetched = store.get_student_calendar(wax)
     assert len(fetched) == 4
     assert {e.event_kind for e in fetched} == {
@@ -194,9 +192,7 @@ def test_expire_past_deadlines_marks_only_past_deadlines() -> None:
     # ...but is still reachable via include_expired=True.
     with_expired = store.get_student_calendar(wax, include_expired=True)
     assert len(with_expired) == 4
-    past = next(
-        e for e in with_expired if e.expired_at is not None
-    )
+    past = next(e for e in with_expired if e.expired_at is not None)
     assert past.event_kind is CalendarEventKind.DEADLINE
     assert past.event_date == past_deadline
     assert past.expired_at == NOW
@@ -207,9 +203,7 @@ def test_expire_past_deadlines_is_idempotent() -> None:
     finds no rows whose expired_at IS NULL."""
     store = _store()
     wax = _seed(store)
-    store.add_calendar_event(
-        _event(wax, date=NOW - timedelta(days=1))
-    )
+    store.add_calendar_event(_event(wax, date=NOW - timedelta(days=1)))
     first = store.expire_past_deadlines(NOW)
     second = store.expire_past_deadlines(NOW)
     assert first == 1
@@ -225,12 +219,8 @@ def test_expire_past_deadlines_is_cross_tenant() -> None:
     a = _seed(store)
     b = new_wax_id()
     store.create_student(Student(wax_id=b, created_at=NOW, updated_at=NOW))
-    store.add_calendar_event(
-        _event(a, date=NOW - timedelta(days=1))
-    )
-    store.add_calendar_event(
-        _event(b, date=NOW - timedelta(days=1))
-    )
+    store.add_calendar_event(_event(a, date=NOW - timedelta(days=1)))
+    store.add_calendar_event(_event(b, date=NOW - timedelta(days=1)))
     # One sweep, two students affected.
     count = store.expire_past_deadlines(NOW)
     assert count == 2
@@ -313,15 +303,9 @@ def test_postgres_expire_past_deadlines_sweep(
     (Founder's vision §7-8)."""
     a = _pg_student(pg_store)
     b = _pg_student(pg_store)
-    pg_store.add_calendar_event(
-        _event(a, date=NOW - timedelta(days=1))
-    )
-    pg_store.add_calendar_event(
-        _event(b, date=NOW - timedelta(days=2))
-    )
-    pg_store.add_calendar_event(
-        _event(a, date=NOW + timedelta(days=1))
-    )
+    pg_store.add_calendar_event(_event(a, date=NOW - timedelta(days=1)))
+    pg_store.add_calendar_event(_event(b, date=NOW - timedelta(days=2)))
+    pg_store.add_calendar_event(_event(a, date=NOW + timedelta(days=1)))
     count = pg_store.expire_past_deadlines(NOW)
     assert count == 2  # both past deadlines, across two students
 

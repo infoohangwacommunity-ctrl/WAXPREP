@@ -68,9 +68,7 @@ def test_set_and_get_learning_state_round_trip() -> None:
         ),
         "next_step": "check if they can calculate simple squares independently",
     }
-    state = store.set_learning_state(
-        wax, "Mathematics", payload, now=NOW
-    )
+    state = store.set_learning_state(wax, "Mathematics", payload, now=NOW)
     assert state.status is LearningStateStatus.ACTIVE
     assert state.subject == "Mathematics"
     assert state.last_active_at == NOW
@@ -95,12 +93,8 @@ def test_get_learning_state_most_recent_when_no_subject() -> None:
     store = _store()
     wax = _seed(store)
     earlier = NOW - timedelta(hours=2)
-    store.set_learning_state(
-        wax, "Chemistry", {"topic": "acids"}, now=earlier
-    )
-    store.set_learning_state(
-        wax, "Mathematics", {"topic": "quadratics"}, now=NOW
-    )
+    store.set_learning_state(wax, "Chemistry", {"topic": "acids"}, now=earlier)
+    store.set_learning_state(wax, "Mathematics", {"topic": "quadratics"}, now=NOW)
     fetched = store.get_learning_state(wax)
     assert fetched is not None
     assert fetched.subject == "Mathematics"
@@ -121,9 +115,7 @@ def test_new_state_supersedes_old_state() -> None:
     """
     store = _store()
     wax = _seed(store)
-    first = store.set_learning_state(
-        wax, "Mathematics", {"stage": "intro"}, now=NOW
-    )
+    first = store.set_learning_state(wax, "Mathematics", {"stage": "intro"}, now=NOW)
     later = NOW + timedelta(hours=1)
     second = store.set_learning_state(
         wax, "Mathematics", {"stage": "factorisation"}, now=later
@@ -142,13 +134,9 @@ def test_multiple_subjects_coexist_as_separate_states() -> None:
     one active state per subject, not one global state."""
     store = _store()
     wax = _seed(store)
-    store.set_learning_state(
-        wax, "Mathematics", {"stage": "quadratics"}, now=NOW
-    )
+    store.set_learning_state(wax, "Mathematics", {"stage": "quadratics"}, now=NOW)
     later = NOW + timedelta(hours=1)
-    store.set_learning_state(
-        wax, "Chemistry", {"stage": "acids"}, now=later
-    )
+    store.set_learning_state(wax, "Chemistry", {"stage": "acids"}, now=later)
     active = store.list_active_learning_states(wax)
     assert len(active) == 2
     # Chemistry was set later, so it's first in the most-recent-first list.
@@ -162,9 +150,7 @@ def test_supersession_preserves_audit_trail_via_old_id() -> None:
     contract) but is preserved internally for audit (by-id map)."""
     store = _store()
     wax = _seed(store)
-    first = store.set_learning_state(
-        wax, "Mathematics", {"stage": "intro"}, now=NOW
-    )
+    first = store.set_learning_state(wax, "Mathematics", {"stage": "intro"}, now=NOW)
     later = NOW + timedelta(hours=1)
     second = store.set_learning_state(
         wax, "Mathematics", {"stage": "factorisation"}, now=later
@@ -211,9 +197,7 @@ def test_student_a_cannot_see_student_b_learning_state_in_memory() -> None:
     a = _seed(store)
     b = new_wax_id()
     store.create_student(Student(wax_id=b, created_at=NOW, updated_at=NOW))
-    store.set_learning_state(
-        a, "Mathematics", {"stage": "quadratics"}, now=NOW
-    )
+    store.set_learning_state(a, "Mathematics", {"stage": "quadratics"}, now=NOW)
     # Student B asks for their Mathematics state — must be None.
     assert store.get_learning_state(b, "Mathematics") is None
     # And B's active-learning-states list must be empty.
@@ -248,9 +232,7 @@ def test_postgres_set_and_get_learning_state_round_trip(
         "stage": "understanding x²",
         "demonstrated": ["meaning of unknowns"],
     }
-    state = pg_store.set_learning_state(
-        wax, "Mathematics", payload, now=NOW
-    )
+    state = pg_store.set_learning_state(wax, "Mathematics", payload, now=NOW)
     assert state.status is LearningStateStatus.ACTIVE
     fetched = pg_store.get_learning_state(wax, "Mathematics")
     assert fetched is not None
@@ -270,9 +252,7 @@ def test_postgres_supersession_marks_old_row(
     from waxprep.storage.session import assume_app_role, set_current_wax_id
 
     wax = _pg_student(pg_store)
-    pg_store.set_learning_state(
-        wax, "Mathematics", {"stage": "intro"}, now=NOW
-    )
+    pg_store.set_learning_state(wax, "Mathematics", {"stage": "intro"}, now=NOW)
     later = NOW + timedelta(hours=1)
     pg_store.set_learning_state(
         wax, "Mathematics", {"stage": "factorisation"}, now=later
@@ -309,9 +289,7 @@ def test_postgres_rls_blocks_cross_student_learning_state(
     """
     a = _pg_student(pg_store)
     b = _pg_student(pg_store)
-    pg_store.set_learning_state(
-        a, "Mathematics", {"stage": "quadratics"}, now=NOW
-    )
+    pg_store.set_learning_state(a, "Mathematics", {"stage": "quadratics"}, now=NOW)
     assert pg_store.get_learning_state(b, "Mathematics") is None
     assert pg_store.list_active_learning_states(b) == ()
     assert pg_store.get_learning_state(b) is None
@@ -330,9 +308,7 @@ def test_postgres_learning_state_uses_parameterised_queries(
     evil_subject = "Mathematics'; DROP TABLE learning_states; --"
     # The set + get must not raise, and must round-trip the subject
     # intact (the subject itself is the key the caller already knows).
-    state = pg_store.set_learning_state(
-        wax, evil_subject, {"stage": "intro"}, now=NOW
-    )
+    state = pg_store.set_learning_state(wax, evil_subject, {"stage": "intro"}, now=NOW)
     fetched = pg_store.get_learning_state(wax, evil_subject)
     assert fetched is not None
     assert fetched.id == state.id

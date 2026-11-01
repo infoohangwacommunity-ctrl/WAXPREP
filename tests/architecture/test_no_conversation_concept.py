@@ -168,7 +168,9 @@ def test_current_working_focus_does_not_reintroduce_a_conversation_table() -> No
     )
 
 
-def test_application_code_does_not_use_current_working_focus_as_top_level_concept() -> None:
+def test_application_code_does_not_use_current_working_focus_as_top_level_concept() -> (
+    None
+):
     """The exception is for a *payload key*, not for a top-level concept.
 
     ``current_working_focus`` must NOT appear as:

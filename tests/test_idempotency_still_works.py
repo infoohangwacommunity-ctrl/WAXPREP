@@ -44,7 +44,8 @@ async def test_same_channel_ref_twice_yields_one_tutor_reply() -> None:
     assert len(world.teacher.seen_inputs) == 1
     # Exactly one tutor row in storage.
     tutors = [
-        e for e in world.storage.list_history(wax, limit=50)
+        e
+        for e in world.storage.list_history(wax, limit=50)
         if e.author_kind is AuthorKind.TUTOR
     ]
     assert len(tutors) == 1
@@ -65,7 +66,8 @@ async def test_different_channel_ref_yields_separate_replies() -> None:
         wax, "second", channel="whatsapp", channel_ref="ref-B"
     )
     tutors = [
-        e for e in world.storage.list_history(wax, limit=50)
+        e
+        for e in world.storage.list_history(wax, limit=50)
         if e.author_kind is AuthorKind.TUTOR
     ]
     assert len(tutors) == 2
@@ -122,7 +124,8 @@ async def test_idempotency_holds_across_one_hundred_redeliveries() -> None:
             wax, "the only message", channel="whatsapp", channel_ref=payload_ref
         )
     tutors = [
-        e for e in world.storage.list_history(wax, limit=10000)
+        e
+        for e in world.storage.list_history(wax, limit=10000)
         if e.author_kind is AuthorKind.TUTOR
     ]
     assert len(tutors) == 1

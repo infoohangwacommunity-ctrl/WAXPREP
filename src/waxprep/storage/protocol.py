@@ -808,9 +808,7 @@ class Storage(Protocol):
         """
         ...
 
-    def list_active_learning_states(
-        self, wax_id: WaxId
-    ) -> tuple[LearningState, ...]:
+    def list_active_learning_states(self, wax_id: WaxId) -> tuple[LearningState, ...]:
         """Return every active learning state for ``wax_id``, most
         recently active first.
 
