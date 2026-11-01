@@ -128,7 +128,18 @@ class ContextInvestigator:
         investigated: list[str] = []
         tool_calls = 0
         failed_tool_calls = 0
+        # Capability-truth counters (vision-security Fix 3, Founder's Vision
+        # §8: "Never claim to have checked a file, searched history or
+        # saved a notebook entry when that action did not actually
+        # happen."). ``seen_ids`` is the set of evidence ids actually
+        # returned by tool calls. ``evidence_returned_by_tools`` is the
+        # count of tool calls that returned at least one evidence item.
+        # The structural assertion after selection uses these to verify
+        # every evidence item in the package is traceable to a real tool
+        # call — a fabrication guard against future refactors that might
+        # inject evidence without a tool call.
         seen_ids: set[UUID] = set()
+        tool_calls_returning_evidence = 0
         limits = request.limits
         stopped_by_model = False
         hit_step_budget = False
@@ -253,6 +264,8 @@ class ContextInvestigator:
                     if len(evidence) >= limits.max_evidence:
                         hit_evidence_budget = True
                         break
+                if result.results:
+                    tool_calls_returning_evidence += 1
                 # Continue to let the model decide what to do with this
                 # baseline evidence (stop, search more, etc.).
                 continue
@@ -313,6 +326,13 @@ class ContextInvestigator:
                 self._absorb_result(
                     outcome, selection, investigated, evidence, seen_ids, limits
                 )
+                # Capability-truth counter (vision-security Fix 3): track
+                # how many tool calls returned at least one evidence item.
+                # Used by the structural assertion after selection to
+                # verify every package evidence item is traceable to a
+                # real tool call.
+                if outcome.results:
+                    tool_calls_returning_evidence += 1
             if len(evidence) >= limits.max_evidence:
                 # Hitting the evidence cap mid-investigation is a
                 # legitimate stop: the runtime is telling the model
@@ -403,6 +423,8 @@ class ContextInvestigator:
                                     continue
                                 seen_ids.add(item.id)
                                 evidence.append(item)
+                            if result.results:
+                                tool_calls_returning_evidence += 1
 
         # Finalize with whatever evidence we have.
         visible = format_for_model(evidence, request.now, limits.max_context_characters)
@@ -461,10 +483,76 @@ class ContextInvestigator:
             fast_path_taken=fast_path_taken,
         )
 
+        # Capability-truth structural assertion (vision-security Fix 3,
+        # Founder's Vision §8: "Never claim to have checked a file,
+        # searched history or saved a notebook entry when that action
+        # did not actually happen.")
+        #
+        # Every evidence item in the package MUST be traceable to a tool
+        # call that returned it. ``seen_ids`` is the set of evidence ids
+        # actually returned by tool calls (built in the tool-execution
+        # loops above). ``tool_calls_returning_evidence`` is the count
+        # of tool calls that returned at least one item. If the package
+        # claims evidence that no tool produced, fail-closed: ship an
+        # empty evidence tuple and override the status to FAILED.
+        #
+        # In the current code path this assertion is structurally true
+        # by construction (``selected`` is derived from ``evidence``
+        # which is built from tool results). The guard exists as a
+        # regression check: a future refactor that injects evidence
+        # without a tool call (e.g., a "smart default" that pre-fills
+        # context) would trip this assertion and surface the failure
+        # rather than silently fabricating capability.
+        capability_truth_violation = False
+        if selected:
+            untraceable = [
+                e for e in selected if e.id not in seen_ids
+            ]
+            if untraceable or tool_calls_returning_evidence == 0:
+                capability_truth_violation = True
+                investigated.append(
+                    f"capability_truth_violation:"
+                    f"selected={len(selected)}_but_tool_returned="
+                    f"{tool_calls_returning_evidence}_calls"
+                )
+                final_uncertainty = final_uncertainty + (
+                    "capability_truth_violation:evidence_not_traceable_to_tool_call",
+                )
+                selected = []
+                status = InvestigationStatus.FAILED
+
+        # Aggregate injection risk across all selected evidence
+        # (vision-security Fix 2). The risk was computed at the tool
+        # boundary (``context/tool_impls.py::_tag_results``) for each
+        # Evidence item. Here we re-tag defensively — in case a tool
+        # was not wrapped by ``build_default_tools`` (e.g., a custom
+        # tool in a test or a future plugin) — and then reduce to the
+        # package-level max so the Teacher's brief can carry a single
+        # caution signal.
+        # Ordering: high > medium > low.
+        from waxprep.context.tool_impls import _tag_evidence
+
+        _risk_rank = {"low": 0, "medium": 1, "high": 2}
+        package_injection_risk = "low"
+        for idx, item in enumerate(selected):
+            tagged = _tag_evidence(item)
+            if tagged.injection_risk != item.injection_risk:
+                selected[idx] = tagged
+            item_rank = _risk_rank.get(tagged.injection_risk, 0)
+            if item_rank > _risk_rank[package_injection_risk]:
+                package_injection_risk = tagged.injection_risk
+        if package_injection_risk != "low":
+            investigated.append(
+                f"injection_risk:{package_injection_risk}"
+            )
+
         # The investigated audit log carries enough to tell a future
         # reviewer (or a regression test) exactly what the runtime did.
         investigated.append(f"investigation_status:{status.value}")
         investigated.append(f"tool_calls:{tool_calls}")
+        investigated.append(
+            f"tool_calls_returning_evidence:{tool_calls_returning_evidence}"
+        )
         if failed_tool_calls:
             investigated.append(f"failed_tool_calls:{failed_tool_calls}")
         if hit_step_budget:
@@ -485,9 +573,12 @@ class ContextInvestigator:
                 else None,
                 "status": status.value,
                 "tool_calls": tool_calls,
+                "tool_calls_returning_evidence": tool_calls_returning_evidence,
                 "failed_tool_calls": failed_tool_calls,
                 "evidence_count": len(selected),
                 "invalid_selection": invalid_selection,
+                "capability_truth_violation": capability_truth_violation,
+                "injection_risk": package_injection_risk,
                 "stopped_by_model": stopped_by_model,
                 "hit_step_budget": hit_step_budget,
                 "hit_tool_budget": hit_tool_budget,
@@ -506,6 +597,7 @@ class ContextInvestigator:
             as_of=request.now,
             investigation_status=status,
             invalid_selection=invalid_selection,
+            injection_risk=package_injection_risk,
         )
 
     def _absorb_result(

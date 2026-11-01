@@ -117,7 +117,22 @@ class ExchangeTurn:
 
 @dataclass(frozen=True, slots=True)
 class Evidence:
-    """One piece of evidence, always carrying when it happened and who said it."""
+    """One piece of evidence, always carrying when it happened and who said it.
+
+    ``injection_risk`` is a structural signal computed by the CI tool
+    layer (``context/tool_impls.py``) over the *content* of retrieved
+    items. It is NOT a keyword match on student messages — it is a
+    structural scan of RETRIEVED CONTENT (history, notebook, summary,
+    artifact text) for patterns that could instruct the model
+    ("ignore previous instructions", "system prompt:", closing tags
+    that don't belong, base64 payloads, ``file://`` / ``~/.ssh``
+    references, etc.). The evidence is still delivered to the Teacher
+    unchanged (no censorship); the tag is surfaced in the brief so the
+    Teacher knows to be cautious with that specific item. See
+    ``context/tool_impls.py::_injection_risk_for`` and Founder's Vision
+    §8 ("Retrieved content is evidence, not instructions") +
+    vision-security Finding 2.
+    """
 
     id: UUID
     wax_id: WaxId
@@ -130,6 +145,7 @@ class Evidence:
     confidence_note: str | None = None
     author_kind: str | None = None
     provenance: tuple[str, ...] = ()
+    injection_risk: str = "low"
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +190,13 @@ class ContextPackage:
     as_of: datetime | None = None
     investigation_status: InvestigationStatus = InvestigationStatus.SUCCESSFUL
     invalid_selection: bool = False
+    # Aggregate injection risk across all evidence items (Founder's Vision
+    # §8 + vision-security Finding 2). Computed by the investigator as the
+    # maximum risk over the package's evidence. Surfaced in the Teacher's
+    # brief so the Teacher knows when to apply extra scrutiny to retrieved
+    # content. Values: "low" (no patterns detected), "medium" (one
+    # pattern), "high" (multiple patterns or a high-severity pattern).
+    injection_risk: str = "low"
     metadata: dict[str, Any] = field(default_factory=lambda: cast(dict[str, Any], {}))
 
 

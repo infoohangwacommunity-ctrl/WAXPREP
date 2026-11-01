@@ -47,6 +47,16 @@ class Operation(StrEnum):
     SUPERSEDE_NOTEBOOK_ENTRY = "supersede_notebook_entry"
     SUPERSEDE_SUMMARY = "supersede_summary"
     LINK_ARTIFACT = "link_artifact"
+    # Founder's vision §6: a current learning state is a first-class
+    # notebook kind. CI sets one when a lesson establishes durable
+    # understanding about WHERE the student is in a subject — current
+    # stage, subtopic statuses (demonstrated / developing /
+    # not_assessed), teaching observations, and the next sensible step.
+    # The state is superseded-not-deleted when the lesson advances.
+    # This operation wraps ``supersede_notebook_entry`` so CI does not
+    # have to look up the previous active entry itself; the application
+    # finds it by (kind=learning_state, subject=…) and supersedes it.
+    SET_LEARNING_STATE = "set_learning_state"
     # --- Lifecycle operations (Blueprint Part IV §13-17) -------------------
     # Invalidation marks a derived object as no longer trustworthy. The
     # object remains stored and traceable for audit, but ordinary retrieval
@@ -113,7 +123,51 @@ class ProposalValidator:
     MAX_SUMMARY_LENGTH = 20000
     MAX_REASON_LENGTH = 2000
     MAX_SCOPE_LENGTH = 120
+    MAX_SUBJECT_LENGTH = 200
+    MAX_TOPIC_LENGTH = 400
+    MAX_STAGE_LENGTH = 1000
+    MAX_OBSERVATION_LENGTH = 4000
+    MAX_NEXT_STEP_LENGTH = 1000
+    MAX_SUBTOPICS = 50
+    MAX_SUBTOPIC_NAME_LENGTH = 400
+    ALLOWED_SUBTOPIC_STATUSES = frozenset(
+        {"demonstrated", "developing", "not_assessed", "needs_practice"}
+    )
     ALLOWED = frozenset(op.value for op in Operation)
+
+    # Notebook entry kinds (vision-security Fix 4, Founder's Vision §14).
+    # The notebook persists durable ACADEMIC context — learning state,
+    # demonstrated mastery, teaching observations, communication
+    # preferences, and academic circumstances. Personal-life
+    # disclosures (family, mental health, identity) are a SEPARATE
+    # category: they may be persisted ONLY when the student has
+    # explicitly asked for them to be remembered.
+    #
+    # ``kind`` is OPTIONAL — existing entries that pre-date this field
+    # continue to validate. When ``kind`` IS present, it must be in
+    # this set so the consent rule for ``personal_context`` is
+    # enforceable. ``set_learning_state`` pins ``kind="learning_state"``
+    # itself (see ``_set_learning_state``); ``add_notebook_entry`` and
+    # ``supersede_notebook_entry`` accept any of these kinds (or no
+    # kind at all).
+    #
+    # ``tutor_quality_assessment`` is the Judge's compact personalization
+    # shortcut (see ``judge/models.py``). The Judge is part of the
+    # application, not CI — it writes its assessment as a notebook entry
+    # so the next turn's Teacher sees the guidance. Without this entry
+    # in the allowed set, every Judge write is rejected and tutor
+    # guidance can never reach the Teacher.
+    ALLOWED_NOTEBOOK_KINDS: frozenset[str] = frozenset(
+        {
+            "learning_state",
+            "mastery",
+            "teaching_observation",
+            "communication_preference",
+            "circumstance",
+            "personal_context",
+            "tutor_quality_assessment",
+        }
+    )
 
     def validate(self, proposal: Proposal) -> ProposalDecision:
         if proposal.operation not in self.ALLOWED:
@@ -136,6 +190,7 @@ class ProposalValidator:
             Operation.SUPERSEDE_NOTEBOOK_ENTRY.value: self._supersede_notebook,
             Operation.SUPERSEDE_SUMMARY.value: self._supersede_summary,
             Operation.LINK_ARTIFACT.value: self._link_artifact,
+            Operation.SET_LEARNING_STATE.value: self._set_learning_state,
             Operation.INVALIDATE_NOTEBOOK_ENTRY.value: self._invalidate_notebook,
             Operation.INVALIDATE_NODE.value: self._invalidate_node,
             Operation.INVALIDATE_SUMMARY.value: self._invalidate_summary,
@@ -197,10 +252,123 @@ class ProposalValidator:
         return ProposalDecision(True, "accepted")
 
     def _notebook(self, p: dict[str, Any]) -> ProposalDecision:
-        if not isinstance(p.get("payload"), dict) or not p["payload"]:
+        payload = p.get("payload")
+        if not isinstance(payload, dict) or not payload:
             return ProposalDecision(
                 False, "add_notebook_entry requires a payload object"
             )
+        # Vision-security Fix 4 (Founder's Vision §14): personal-life
+        # disclosures require explicit student consent. CI may propose
+        # a ``personal_context`` entry only when the student has
+        # explicitly asked for it to be remembered. Automatic
+        # persistence of sensitive disclosures — to create artificial
+        # intimacy — is forbidden.
+        #
+        # The check is scoped to ``kind == "personal_context"`` ONLY.
+        # Other kinds (learning_state, mastery, teaching_observation,
+        # communication_preference, circumstance, tutor_quality_assessment,
+        # etc.) are academic/operational context and may be persisted
+        # freely, subject to CI's own judgement. The
+        # ``ALLOWED_NOTEBOOK_KINDS`` set above documents the academic
+        # kinds the Founder's vision calls out; it is not an
+        # enforcement list because existing entries (e.g.
+        # ``tutor_quality_assessment`` written by the Judge) pre-date
+        # the kind taxonomy and must continue to validate.
+        kind_value = payload.get("kind")
+        if kind_value is not None:
+            kind = str(kind_value).strip()
+            if kind == "personal_context":
+                consent = payload.get("student_explicit_consent")
+                if consent is not True:
+                    return ProposalDecision(
+                        False,
+                        "add_notebook_entry: payload.kind='personal_context' "
+                        "requires payload.student_explicit_consent=True. The "
+                        "student must explicitly ask for this disclosure to "
+                        "be remembered. Automatic persistence of personal-"
+                        "life disclosures is forbidden (Founder's Vision §14: "
+                        "never use sensitive disclosures just to create "
+                        "artificial intimacy).",
+                    )
+        return ProposalDecision(True, "accepted")
+
+    def _set_learning_state(self, p: dict[str, Any]) -> ProposalDecision:
+        """Founder's vision §6: ``set_learning_state`` requires a structured
+        payload describing where the student is in a subject right now.
+
+        The schema is closed on the required keys (``subject``, ``topic``,
+        ``current_stage``, ``subtopics``, ``teaching_observation``,
+        ``next_sensible_step``) so the application can render the state
+        to the Teacher and supersede it on the next advance. Subtopic
+        statuses come from a small closed set so the Teacher and the
+        Judge can reason about them without parsing free text.
+        """
+        payload = p.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            return ProposalDecision(
+                False, "set_learning_state requires a payload object"
+            )
+        # Required text fields, each with its own length cap.
+        for key, limit in (
+            ("subject", self.MAX_SUBJECT_LENGTH),
+            ("topic", self.MAX_TOPIC_LENGTH),
+            ("current_stage", self.MAX_STAGE_LENGTH),
+            ("next_sensible_step", self.MAX_NEXT_STEP_LENGTH),
+        ):
+            value = payload.get(key)
+            if not isinstance(value, str) or not value.strip():
+                return ProposalDecision(
+                    False, f"set_learning_state: {key} is required text"
+                )
+            if len(value) > limit:
+                return ProposalDecision(
+                    False, f"set_learning_state: {key} too long"
+                )
+        observation = payload.get("teaching_observation")
+        if observation is not None and (
+            not isinstance(observation, str)
+            or len(observation) > self.MAX_OBSERVATION_LENGTH
+        ):
+            return ProposalDecision(
+                False, "set_learning_state: teaching_observation invalid"
+            )
+        subtopics = payload.get("subtopics")
+        if not isinstance(subtopics, list) or not subtopics:
+            return ProposalDecision(
+                False, "set_learning_state: subtopics must be a non-empty list"
+            )
+        if len(subtopics) > self.MAX_SUBTOPICS:
+            return ProposalDecision(
+                False, "set_learning_state: too many subtopics"
+            )
+        for st in subtopics:
+            if not isinstance(st, dict):
+                return ProposalDecision(
+                    False, "set_learning_state: subtopic must be an object"
+                )
+            name = st.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return ProposalDecision(
+                    False, "set_learning_state: subtopic.name is required text"
+                )
+            if len(name) > self.MAX_SUBTOPIC_NAME_LENGTH:
+                return ProposalDecision(
+                    False, "set_learning_state: subtopic.name too long"
+                )
+            status = st.get("status")
+            if not isinstance(status, str):
+                return ProposalDecision(
+                    False, "set_learning_state: subtopic.status is required text"
+                )
+            if status not in self.ALLOWED_SUBTOPIC_STATUSES:
+                return ProposalDecision(
+                    False,
+                    f"set_learning_state: subtopic.status must be one of "
+                    f"{sorted(self.ALLOWED_SUBTOPIC_STATUSES)}",
+                )
+        # Pin the kind so the renderer + retrieval tool can find these
+        # entries without a free-text convention.
+        payload["kind"] = "learning_state"
         return ProposalDecision(True, "accepted")
 
     def _supersede_notebook(self, p: dict[str, Any]) -> ProposalDecision:
