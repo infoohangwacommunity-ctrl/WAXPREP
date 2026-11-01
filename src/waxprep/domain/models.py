@@ -260,7 +260,6 @@ class OutboundDelivery:
     tutor_entry_id: UUID
     channel: str | None
     channel_ref: str | None
-    provider_message_id: str | None = None
     status: OutboundStatus
     attempts: int
     last_error: str | None
@@ -268,6 +267,7 @@ class OutboundDelivery:
     run_after: datetime
     created_at: datetime
     updated_at: datetime
+    provider_message_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

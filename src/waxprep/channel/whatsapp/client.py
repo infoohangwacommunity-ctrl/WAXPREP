@@ -71,17 +71,6 @@ class WhatsAppClient:
             )
             if resp.status_code == 429:
                 # WhatsApp rate limit: temporary failure with Retry-After.
-                retry_after = resp.headers.get("Retry-After")
-                retry_at = None
-                if retry_after:
-                    try:
-                        from datetime import datetime, timedelta, UTC
-
-                        retry_at = datetime.now(tz=UTC) + timedelta(
-                            seconds=int(retry_after)
-                        )
-                    except (TypeError, ValueError):
-                        retry_at = None
                 return OutboundResult(
                     success=False,
                     provider_message_id=None,
