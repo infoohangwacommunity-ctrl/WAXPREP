@@ -349,7 +349,6 @@ class TelegramInboundHandler:
             # tutor's streamed turn, not as a callback toast.
             await self._answer_callback(callback_query_id, None)
 
-
         # Step 3c: live voice-note transcription (parity with WhatsApp).
         # Telegram normalize stores CONTENT_KIND_AUDIO with telegram_file_id.
         # Transcribe BEFORE durable history so CI and the Teacher see the
@@ -366,7 +365,9 @@ class TelegramInboundHandler:
             placeholder = not existing or existing in ("[audio]", "[voice]")
             if file_id and placeholder:
                 try:
-                    audio, mime_type = await self._telegram_client.download_file(file_id)
+                    audio, mime_type = await self._telegram_client.download_file(
+                        file_id
+                    )
                     mime = mime_type or str(
                         (msg.structured or {}).get("mime_type") or "audio/ogg"
                     )
@@ -643,13 +644,13 @@ class TelegramInboundHandler:
                 _existing = self._storage.get_outbound_delivery(
                     wax_id, turn_result.outbound_delivery_id
                 )
-                if _existing is not None and _existing.status is OutboundStatus.IN_PROGRESS:
+                if (
+                    _existing is not None
+                    and _existing.status is OutboundStatus.IN_PROGRESS
+                ):
                     live_owns_delivery = True
             skip_live_send = False
-            if (
-                turn_result.outbound_delivery_id is not None
-                and not live_owns_delivery
-            ):
+            if turn_result.outbound_delivery_id is not None and not live_owns_delivery:
                 claimed = self._storage.claim_outbound_delivery(
                     wax_id,
                     turn_result.outbound_delivery_id,

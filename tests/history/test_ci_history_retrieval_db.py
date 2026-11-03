@@ -147,7 +147,9 @@ class TestKeywordSearchInMemory:
         store.create_student(Student(wax, NOW, NOW))
         _say(store, wax, "Tell me about photosynthesis", NOW)
         _say(store, wax, "my favourite football club", NOW + timedelta(minutes=1))
-        _say(store, wax, "Photosynthesis experiment results", NOW + timedelta(minutes=2))
+        _say(
+            store, wax, "Photosynthesis experiment results", NOW + timedelta(minutes=2)
+        )
         _say(store, wax, "unrelated weather chat", NOW + timedelta(minutes=3))
 
         hits = store.search_history_by_keyword(wax, "photo", limit=10)
@@ -225,7 +227,9 @@ class TestPgvectorFallbackInMemory:
         # Two history entries; the first semantically matches the
         # query (identical text).
         e_match = _say(store, wax, "completing the square", NOW)
-        e_other = _say(store, wax, "my favourite football club", NOW + timedelta(minutes=1))
+        e_other = _say(
+            store, wax, "my favourite football club", NOW + timedelta(minutes=1)
+        )
 
         query_vec = _embed(embedder, "completing the square")
         store.put_embedding(
@@ -309,7 +313,12 @@ class TestKeywordSearchPostgres:
         pg_store.create_student(Student(wax, NOW, NOW))
         _say(pg_store, wax, "Tell me about photosynthesis", NOW)
         _say(pg_store, wax, "unrelated weather chat", NOW + timedelta(minutes=1))
-        _say(pg_store, wax, "Photosynthesis experiment results", NOW + timedelta(minutes=2))
+        _say(
+            pg_store,
+            wax,
+            "Photosynthesis experiment results",
+            NOW + timedelta(minutes=2),
+        )
         hits = pg_store.search_history_by_keyword(wax, "photo", limit=10)
         assert len(hits) == 2
         assert "experiment results" in hits[0].text
@@ -406,7 +415,9 @@ class TestPgvectorOptionalPostgres:
         pg_store.create_student(Student(wax, NOW, NOW))
         embedder = DeterministicEmbeddingProvider(dimensions=16)
         e_match = _say(pg_store, wax, "completing the square", NOW)
-        e_other = _say(pg_store, wax, "my favourite football club", NOW + timedelta(minutes=1))
+        e_other = _say(
+            pg_store, wax, "my favourite football club", NOW + timedelta(minutes=1)
+        )
         for entry in (e_match, e_other):
             pg_store.put_embedding(
                 EmbeddingRecord(
@@ -437,9 +448,7 @@ class TestPgvectorOptionalPostgres:
         assert hits[0].object_id == e_match.id
         assert hits[0].score > 0.99
 
-    def test_find_by_meaning_python_fallback_can_be_forced(
-        self, pg_store: Any
-    ) -> None:
+    def test_find_by_meaning_python_fallback_can_be_forced(self, pg_store: Any) -> None:
         """Force the Python fallback by clearing the pgvector cache and
         pretending the extension is missing. Verifies the fallback path
         is correct regardless of the test DB's pgvector state.
@@ -448,7 +457,9 @@ class TestPgvectorOptionalPostgres:
         pg_store.create_student(Student(wax, NOW, NOW))
         embedder = DeterministicEmbeddingProvider(dimensions=16)
         e_match = _say(pg_store, wax, "completing the square", NOW)
-        e_other = _say(pg_store, wax, "my favourite football club", NOW + timedelta(minutes=1))
+        e_other = _say(
+            pg_store, wax, "my favourite football club", NOW + timedelta(minutes=1)
+        )
         for entry in (e_match, e_other):
             pg_store.put_embedding(
                 EmbeddingRecord(
@@ -478,4 +489,3 @@ class TestPgvectorOptionalPostgres:
         assert hits[0].score > 0.99
         # Reset cache so other tests get the real value.
         pg_store._reset_pgvector_cache()  # type: ignore[attr-defined]
-

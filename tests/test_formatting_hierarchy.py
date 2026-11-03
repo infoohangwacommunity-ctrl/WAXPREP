@@ -61,8 +61,7 @@ from waxprep.channel.streaming.renderers import (
 def _extract_item_numbers(chunk: str) -> list[int]:
     """Return the numbered-item markers present in ``chunk``, in order."""
     return [
-        int(m.group(1))
-        for m in re.finditer(r"^\s*(\d+)\.\s+", chunk, re.MULTILINE)
+        int(m.group(1)) for m in re.finditer(r"^\s*(\d+)\.\s+", chunk, re.MULTILINE)
     ]
 
 
@@ -207,9 +206,7 @@ def test_whatsapp_code_block_has_separator_lines() -> None:
     result = render_whatsapp("```python\nprint('hello')\n```")
     assert "print('hello')" in result.text
     # The block must carry a `---` separator (the visual block boundary).
-    assert "---" in result.text, (
-        f"code block missing --- separator: {result.text!r}"
-    )
+    assert "---" in result.text, f"code block missing --- separator: {result.text!r}"
     # And it must keep triple backticks (WhatsApp renders as monospace).
     assert "```" in result.text
 
@@ -232,9 +229,7 @@ def test_whatsapp_code_block_and_inline_code_are_visually_distinct() -> None:
     forms must NOT be identical."""
     block = render_whatsapp("```python\nx = 1\n```").text
     inline = render_whatsapp("Use `x = 1` here.").text
-    assert block != inline, (
-        "code block and inline code render identically on WhatsApp"
-    )
+    assert block != inline, "code block and inline code render identically on WhatsApp"
     # The block must have something the inline does not (the separator).
     assert "---" in block
     assert "---" not in inline
@@ -448,9 +443,7 @@ def test_formatting_survives_render_and_split_whatsapp() -> None:
     # The first chunk must contain the formatted markers (they were at
     # the start of the body, well under the limit).
     first = chunks[0]
-    assert "*Bold key term*" in first, (
-        f"bold marker lost in render+split: {first!r}"
-    )
+    assert "*Bold key term*" in first, f"bold marker lost in render+split: {first!r}"
     assert "_italic note_" in first
     assert "```inline code```" in first
     # Raw markdown must never reach the platform.

@@ -50,7 +50,9 @@ from waxprep.domain.models import AuthorKind, ObjectType
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 
 
-def _history_evidence(text: str, *, author: AuthorKind = AuthorKind.STUDENT) -> Evidence:
+def _history_evidence(
+    text: str, *, author: AuthorKind = AuthorKind.STUDENT
+) -> Evidence:
     wax = new_wax_id()
     entry_id = uuid4()
     return Evidence(
@@ -162,9 +164,7 @@ class TestEmptyToolReturnsNoEvidence:
             wax_id=wax,
             query="what did we cover?",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
 
@@ -192,9 +192,7 @@ class TestEmptyToolReturnsNoEvidence:
             wax_id=wax,
             query="what did we cover?",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
 
@@ -228,9 +226,7 @@ class TestAuditTrailRecordsReturningEvidence:
             wax_id=wax,
             query="what did we cover?",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
 
@@ -254,9 +250,7 @@ class TestAuditTrailRecordsReturningEvidence:
             wax_id=wax,
             query="hi",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
         audit = " ".join(package.investigated)
@@ -288,9 +282,7 @@ class TestCapabilityTruthViolationFailsClosed:
             wax_id=wax,
             query="what did we cover?",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
 
@@ -328,9 +320,7 @@ class TestCapabilityTruthViolationFailsClosed:
             wax_id=wax,
             query="what did we cover?",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
 
@@ -365,9 +355,7 @@ class TestInjectionRiskCarriedThrough:
             wax_id=wax,
             query="what did we cover?",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
 
@@ -388,9 +376,7 @@ class TestInjectionRiskCarriedThrough:
             wax_id=wax,
             query="what did we cover?",
             now=NOW,
-            limits=InvestigationLimits(
-                max_steps=5, max_tool_calls=5, max_evidence=10
-            ),
+            limits=InvestigationLimits(max_steps=5, max_tool_calls=5, max_evidence=10),
         )
         package = await investigator.investigate(request)
 
@@ -431,10 +417,12 @@ class TestPersonalContextConsent:
         """Founder's Vision §14: never use sensitive disclosures just to
         create artificial intimacy."""
         validator = ProposalValidator()
-        proposal = self._proposal({
-            "kind": "personal_context",
-            "note": "student mentioned family stress",
-        })
+        proposal = self._proposal(
+            {
+                "kind": "personal_context",
+                "note": "student mentioned family stress",
+            }
+        )
         decision = validator.validate(proposal)
         assert not decision.accepted
         assert "personal_context" in decision.reason
@@ -444,22 +432,26 @@ class TestPersonalContextConsent:
         """When the student explicitly asks for the disclosure to be
         remembered, the entry is accepted."""
         validator = ProposalValidator()
-        proposal = self._proposal({
-            "kind": "personal_context",
-            "note": "student asked me to remember their exam date",
-            "student_explicit_consent": True,
-        })
+        proposal = self._proposal(
+            {
+                "kind": "personal_context",
+                "note": "student asked me to remember their exam date",
+                "student_explicit_consent": True,
+            }
+        )
         decision = validator.validate(proposal)
         assert decision.accepted
 
     def test_personal_context_with_false_consent_is_rejected(self) -> None:
         """``student_explicit_consent=False`` is the same as no consent."""
         validator = ProposalValidator()
-        proposal = self._proposal({
-            "kind": "personal_context",
-            "note": "family stress",
-            "student_explicit_consent": False,
-        })
+        proposal = self._proposal(
+            {
+                "kind": "personal_context",
+                "note": "family stress",
+                "student_explicit_consent": False,
+            }
+        )
         decision = validator.validate(proposal)
         assert not decision.accepted
 
@@ -492,11 +484,15 @@ class TestPersonalContextConsent:
         """The rejection reason must cite the Founder's Vision §14 so the
         CI model understands WHY the proposal was rejected."""
         validator = ProposalValidator()
-        proposal = self._proposal({
-            "kind": "personal_context",
-            "note": "student disclosed mental health",
-        })
+        proposal = self._proposal(
+            {
+                "kind": "personal_context",
+                "note": "student disclosed mental health",
+            }
+        )
         decision = validator.validate(proposal)
         assert not decision.accepted
-        assert "artificial intimacy" in decision.reason.lower() or \
-               "founder" in decision.reason.lower()
+        assert (
+            "artificial intimacy" in decision.reason.lower()
+            or "founder" in decision.reason.lower()
+        )

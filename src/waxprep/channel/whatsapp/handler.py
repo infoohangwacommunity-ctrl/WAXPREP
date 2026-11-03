@@ -666,12 +666,12 @@ class WhatsAppInboundHandler:
                 _existing = self._storage.get_outbound_delivery(
                     wax_id, turn_result.outbound_delivery_id
                 )
-                if _existing is not None and _existing.status is OutboundStatus.IN_PROGRESS:
+                if (
+                    _existing is not None
+                    and _existing.status is OutboundStatus.IN_PROGRESS
+                ):
                     live_owns_delivery = True
-            if (
-                turn_result.outbound_delivery_id is not None
-                and not live_owns_delivery
-            ):
+            if turn_result.outbound_delivery_id is not None and not live_owns_delivery:
                 claimed = self._storage.claim_outbound_delivery(
                     wax_id,
                     turn_result.outbound_delivery_id,

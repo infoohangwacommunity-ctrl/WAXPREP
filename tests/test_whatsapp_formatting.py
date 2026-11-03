@@ -175,7 +175,10 @@ async def test_whatsapp_outbox_renders_before_send() -> None:
     )
     storage.create_channel_identity(
         ChannelIdentity(
-            id=new_id(), wax_id=wax, channel="whatsapp", external_id="1555PHONE",
+            id=new_id(),
+            wax_id=wax,
+            channel="whatsapp",
+            external_id="1555PHONE",
             created_at=now,
         )
     )
@@ -183,20 +186,35 @@ async def test_whatsapp_outbox_renders_before_send() -> None:
     tutor_text = "Welcome! **Important:** review fractions first."
     tutor_entry, _ = storage.append_history_entry_with_jobs(
         HistoryEntry(
-            id=new_id(), wax_id=wax, author_kind=AuthorKind.TUTOR,
-            content_kind="text/plain", text=tutor_text,
-            occurred_at=now, recorded_at=now,
-            channel="whatsapp", channel_ref=None, reply_to_id=new_id(),
+            id=new_id(),
+            wax_id=wax,
+            author_kind=AuthorKind.TUTOR,
+            content_kind="text/plain",
+            text=tutor_text,
+            occurred_at=now,
+            recorded_at=now,
+            channel="whatsapp",
+            channel_ref=None,
+            reply_to_id=new_id(),
         ),
         token_hashes=(),
         jobs=(),
     )
     delivery = storage.create_outbound_delivery(
         OutboundDelivery(
-            id=new_id(), wax_id=wax, tutor_entry_id=tutor_entry.id,
-            channel="whatsapp", channel_ref=None, provider_message_id=None,
-            status=OutboundStatus.PENDING, attempts=0, last_error=None,
-            delivered_at=None, run_after=now, created_at=now, updated_at=now,
+            id=new_id(),
+            wax_id=wax,
+            tutor_entry_id=tutor_entry.id,
+            channel="whatsapp",
+            channel_ref=None,
+            provider_message_id=None,
+            status=OutboundStatus.PENDING,
+            attempts=0,
+            last_error=None,
+            delivered_at=None,
+            run_after=now,
+            created_at=now,
+            updated_at=now,
         )
     )
 
@@ -247,7 +265,11 @@ async def test_whatsapp_handler_final_send_renders_before_send() -> None:
         )
     )
     turns = TurnServiceCiFirst(
-        storage, history, investigator, cast(TeacherProtocol, teacher), clock,
+        storage,
+        history,
+        investigator,
+        cast(TeacherProtocol, teacher),
+        clock,
         ci_limits=InvestigationLimits(max_steps=2, max_tool_calls=2),
     )
 
@@ -257,7 +279,10 @@ async def test_whatsapp_handler_final_send_renders_before_send() -> None:
     )
     storage.create_channel_identity(
         ChannelIdentity(
-            id=new_id(), wax_id=wax, channel="whatsapp", external_id="1555PHONE2",
+            id=new_id(),
+            wax_id=wax,
+            channel="whatsapp",
+            external_id="1555PHONE2",
             created_at=now,
         )
     )
@@ -281,20 +306,23 @@ async def test_whatsapp_handler_final_send_renders_before_send() -> None:
         config=WhatsAppInboundConfig(),  # type: ignore[arg-type]
     )
     msg = NormalizedInbound(
-        channel="whatsapp", wax_id=None,
+        channel="whatsapp",
+        wax_id=None,
         provider_message_id="wamid.FMT_TEST",
         provider_sender_id="1555PHONE2",
-        text="hi", occurred_at=now, content_kind="text",
-        attachments=(), structured={}, reply_to_provider_id=None,
+        text="hi",
+        occurred_at=now,
+        content_kind="text",
+        attachments=(),
+        structured={},
+        reply_to_provider_id=None,
     )
     result = await handler.handle_message(msg)
     assert result.accepted
     assert captured, "handler did not send any text to the client"
     # Every captured text must use WhatsApp syntax, never raw ** markdown.
     for text in captured:
-        assert "**" not in text, (
-            f"raw markdown reached WhatsApp: {text!r}"
-        )
+        assert "**" not in text, f"raw markdown reached WhatsApp: {text!r}"
         # The bold greeting should appear in WhatsApp single-asterisk form.
         if "Bold greeting" in text:
             assert "*Bold greeting*" in text

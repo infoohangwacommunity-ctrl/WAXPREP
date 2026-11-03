@@ -69,10 +69,16 @@ async def test_old_messages_still_retrievable_after_many_new_ones() -> None:
         )
     all_entries = world.storage.list_history(wax, limit=10000)
     first = next(
-        (e for e in all_entries if e.text == first_text and e.author_kind is AuthorKind.STUDENT),
+        (
+            e
+            for e in all_entries
+            if e.text == first_text and e.author_kind is AuthorKind.STUDENT
+        ),
         None,
     )
-    assert first is not None, "first student message was discarded by the time 100 arrived"
+    assert first is not None, (
+        "first student message was discarded by the time 100 arrived"
+    )
 
 
 @pytest.mark.asyncio

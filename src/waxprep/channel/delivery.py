@@ -122,9 +122,7 @@ def _adjust_cut_past_list(
                 # find the last `\n` before a `\d+\.\s+` line that lies
                 # at or before `cut`, so the cut lands between two items.
                 sub = remaining[:cut]
-                boundaries = [
-                    m.start() for m in _LIST_ITEM_BOUNDARY_RE.finditer(sub)
-                ]
+                boundaries = [m.start() for m in _LIST_ITEM_BOUNDARY_RE.finditer(sub)]
                 if boundaries:
                     return boundaries[-1]
                 # No item boundary before cut (e.g. a single very long

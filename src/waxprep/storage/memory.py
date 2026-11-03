@@ -325,13 +325,15 @@ class InMemoryStorage:
                 rows = [
                     e
                     for e in rows
-                    if (e.occurred_at, self._history_seq[(wax_id, e.id)]) < (cur_time, cur_seq)
+                    if (e.occurred_at, self._history_seq[(wax_id, e.id)])
+                    < (cur_time, cur_seq)
                 ]
             else:
                 rows = [
                     e
                     for e in rows
-                    if (e.occurred_at, self._history_seq[(wax_id, e.id)]) > (cur_time, cur_seq)
+                    if (e.occurred_at, self._history_seq[(wax_id, e.id)])
+                    > (cur_time, cur_seq)
                 ]
         page = rows[:page_size]
         if not page:
@@ -433,9 +435,7 @@ class InMemoryStorage:
             if similarity <= 0:
                 continue
             scored.append(
-                ScoredMatch(
-                    r.object_type, r.object_id, r.object_time, similarity
-                )
+                ScoredMatch(r.object_type, r.object_id, r.object_time, similarity)
             )
         scored.sort(key=lambda s: s.score, reverse=True)
         return tuple(scored[:limit])
@@ -1579,8 +1579,7 @@ class InMemoryStorage:
         active = [
             s
             for s in self._learning_states.values()
-            if s.wax_id == wax_id
-            and s.status is LearningStateStatus.ACTIVE
+            if s.wax_id == wax_id and s.status is LearningStateStatus.ACTIVE
         ]
         if not active:
             return None
@@ -1628,9 +1627,7 @@ class InMemoryStorage:
         self._learning_states_by_id[(wax_id, new_id_val)] = new_state
         return new_state
 
-    def list_active_learning_states(
-        self, wax_id: WaxId
-    ) -> tuple[LearningState, ...]:
+    def list_active_learning_states(self, wax_id: WaxId) -> tuple[LearningState, ...]:
         active = [
             s
             for s in self._learning_states.values()
