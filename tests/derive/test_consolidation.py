@@ -84,9 +84,7 @@ async def test_summary_links_to_every_covered_entry_and_history_stays() -> None:
     entries = _seed(world, wax)
     world.clock.advance(200 * 86400)
     service = _build_service(world, model)
-    summary = await service.consolidate_student(
-        wax, older_than=timedelta(days=30)
-    )
+    summary = await service.consolidate_student(wax, older_than=timedelta(days=30))
     assert summary is not None
     links = world.storage.list_provenance(wax, ObjectType.SUMMARY, summary.id)
     assert {l.source_id for l in links} == {e.id for e in entries}
@@ -115,9 +113,7 @@ async def test_covered_entries_are_not_summarised_twice_and_recent_ones_wait() -
     wax = add_student(world)
     _seed(world, wax)
     service = _build_service(world, FakeConsolidator())
-    too_soon = await service.consolidate_student(
-        wax, older_than=timedelta(days=30)
-    )
+    too_soon = await service.consolidate_student(wax, older_than=timedelta(days=30))
     assert too_soon is None  # everything is recent
     world.clock.advance(200 * 86400)
     first = await service.consolidate_student(wax, older_than=timedelta(days=30))

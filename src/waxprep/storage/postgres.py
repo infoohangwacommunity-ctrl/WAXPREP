@@ -270,8 +270,7 @@ class PostgresStorage:
         """
         changed = self._write(
             wax_id,
-            "UPDATE students SET timezone = %s, updated_at = %s "
-            "WHERE wax_id = %s",
+            "UPDATE students SET timezone = %s, updated_at = %s WHERE wax_id = %s",
             (timezone, now, wax_id),
         )
         if not changed:
@@ -2442,8 +2441,7 @@ class PostgresStorage:
     ) -> OutboundDelivery | None:
         row = self._one(
             wax_id,
-            "SELECT * FROM outbound_deliveries "
-            "WHERE wax_id = %s AND id = %s",
+            "SELECT * FROM outbound_deliveries WHERE wax_id = %s AND id = %s",
             (wax_id, delivery_id),
         )
         return self._outbound(row) if row else None
@@ -3084,9 +3082,7 @@ class PostgresStorage:
         """
         subject_hash = self._cipher.blind_index(wax_id, subject)
         new_id_val = new_id()
-        encrypted_payload = self._enc_json(
-            wax_id, "learning_state.payload", payload
-        )
+        encrypted_payload = self._enc_json(wax_id, "learning_state.payload", payload)
         # Key id is the active key id of the cipher's ring. The blob
         # header carries it too (byte 1); the column is a redundant
         # queryable copy used by rotation audits.
@@ -3153,9 +3149,7 @@ class PostgresStorage:
             superseded_by_id=None,
         )
 
-    def list_active_learning_states(
-        self, wax_id: WaxId
-    ) -> tuple[LearningState, ...]:
+    def list_active_learning_states(self, wax_id: WaxId) -> tuple[LearningState, ...]:
         """Return every active learning state for ``wax_id``, most
         recently active first.
 

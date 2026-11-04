@@ -114,7 +114,7 @@ _SUPERSCRIPT_MAP = str.maketrans(
     # No Unicode superscript for 'q' — omit it; the caller's fallback
     # emits ``^(qb)`` notation for any unmappable char. The source
     # string is the alphabet with 'q' removed (a-p then r-z).
-    "0123456789+-=()abcdefghijklmnop" "rstuvwxyz",
+    "0123456789+-=()abcdefghijklmnoprstuvwxyz",
     "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ",
 )
 _SUBSCRIPT_MAP = str.maketrans(
@@ -239,16 +239,12 @@ def _latex_to_plain(math: str) -> str:
     result = _LATEX_SUPERSCRIPT_CURLY_RE.sub(
         lambda m: _to_superscript(m.group(1)), result
     )
-    result = _LATEX_SUBSCRIPT_CURLY_RE.sub(
-        lambda m: _to_subscript(m.group(1)), result
-    )
+    result = _LATEX_SUBSCRIPT_CURLY_RE.sub(lambda m: _to_subscript(m.group(1)), result)
     # ^x and _x (single-char exponents)
     result = _LATEX_SUPERSCRIPT_SINGLE_RE.sub(
         lambda m: _to_superscript(m.group(1)), result
     )
-    result = _LATEX_SUBSCRIPT_SINGLE_RE.sub(
-        lambda m: _to_subscript(m.group(1)), result
-    )
+    result = _LATEX_SUBSCRIPT_SINGLE_RE.sub(lambda m: _to_subscript(m.group(1)), result)
     return result
 
 

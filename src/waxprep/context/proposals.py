@@ -321,9 +321,7 @@ class ProposalValidator:
                     False, f"set_learning_state: {key} is required text"
                 )
             if len(value) > limit:
-                return ProposalDecision(
-                    False, f"set_learning_state: {key} too long"
-                )
+                return ProposalDecision(False, f"set_learning_state: {key} too long")
         observation = payload.get("teaching_observation")
         if observation is not None and (
             not isinstance(observation, str)
@@ -338,9 +336,7 @@ class ProposalValidator:
                 False, "set_learning_state: subtopics must be a non-empty list"
             )
         if len(subtopics) > self.MAX_SUBTOPICS:
-            return ProposalDecision(
-                False, "set_learning_state: too many subtopics"
-            )
+            return ProposalDecision(False, "set_learning_state: too many subtopics")
         for st in subtopics:
             if not isinstance(st, dict):
                 return ProposalDecision(

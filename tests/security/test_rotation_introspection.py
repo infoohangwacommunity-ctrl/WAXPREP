@@ -86,9 +86,7 @@ def _make_fake_conn(rows: list[dict[str, Any]]) -> Any:
         def __exit__(self, *args: object) -> None:
             return None
 
-        def execute(
-            self, sql: str, params: tuple[Any, ...] | None = None
-        ) -> None:
+        def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
             self.executed.append((sql, params or ()))
 
         def fetchall(self) -> list[dict[str, Any]]:
@@ -119,11 +117,14 @@ def test_discover_picks_up_new_learning_states_column() -> None:
     ]
     conn = _make_fake_conn(rows)
     targets = discover_encrypted_columns(conn)
-    assert RotationTarget(
-        table="learning_states",
-        column="payload_encrypted",
-        purpose="learning_state.payload",
-    ) in targets
+    assert (
+        RotationTarget(
+            table="learning_states",
+            column="payload_encrypted",
+            purpose="learning_state.payload",
+        )
+        in targets
+    )
 
 
 def test_discover_picks_up_new_student_calendar_column() -> None:
@@ -137,11 +138,14 @@ def test_discover_picks_up_new_student_calendar_column() -> None:
     ]
     conn = _make_fake_conn(rows)
     targets = discover_encrypted_columns(conn)
-    assert RotationTarget(
-        table="student_calendar",
-        column="notes_encrypted",
-        purpose="student_calendar.notes",
-    ) in targets
+    assert (
+        RotationTarget(
+            table="student_calendar",
+            column="notes_encrypted",
+            purpose="student_calendar.notes",
+        )
+        in targets
+    )
 
 
 def test_discover_picks_up_every_expected_column() -> None:
@@ -350,9 +354,7 @@ def test_discover_query_does_not_reference_student_columns() -> None:
         def __exit__(self, *args: object) -> None:
             return None
 
-        def execute(
-            self, sql: str, params: tuple[Any, ...] | None = None
-        ) -> None:
+        def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
             captured_sql.append(sql)
 
         def fetchall(self) -> list[dict[str, Any]]:

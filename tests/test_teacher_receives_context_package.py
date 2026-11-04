@@ -69,9 +69,7 @@ async def test_teacher_does_not_receive_arbitrary_history_slice() -> None:
     """
     world = make_world()
     wax = add_student(world)
-    await world.services.turns.handle_student_message(
-        wax, "a question", channel="test"
-    )
+    await world.services.turns.handle_student_message(wax, "a question", channel="test")
     inp = world.teacher.seen_inputs[0]
     # The Teacher input is a frozen dataclass; its declared fields
     # must not include slice-style shortcuts.
@@ -98,6 +96,7 @@ async def test_evidence_items_carry_provenance_date_author_source() -> None:
     Without provenance the Teacher cannot tell when a fact was
     established or whether to trust it.
     """
+
     # Script a CI that performs one browse_time_window call returning
     # one Evidence item, then stops.
     class _SingleEvidenceTool:
@@ -128,7 +127,8 @@ async def test_evidence_items_carry_provenance_date_author_source() -> None:
     model = MockContextModel(
         decision_script=[
             ContextModelDecision(
-                "browse_time_window", {"limit": 5, "newest_first": True},
+                "browse_time_window",
+                {"limit": 5, "newest_first": True},
                 "find the exam mention",
             ),
             ContextModelDecision("stop", {}, "enough"),
@@ -147,7 +147,9 @@ async def test_evidence_items_carry_provenance_date_author_source() -> None:
         tools={"browse_time_window": _SingleEvidenceTool(evidence_with_provenance)},
     )
     request = InvestigationRequest(
-        wax_id=wax, query="when is my exam?", now=when,
+        wax_id=wax,
+        query="when is my exam?",
+        now=when,
         trigger_entry_id=uuid4(),
     )
     package = await investigator.investigate(request)
@@ -172,9 +174,7 @@ async def test_context_package_has_investigation_status_for_teacher_branching() 
     """
     world = make_world()
     wax = add_student(world)
-    await world.services.turns.handle_student_message(
-        wax, "anything", channel="test"
-    )
+    await world.services.turns.handle_student_message(wax, "anything", channel="test")
     inp = world.teacher.seen_inputs[0]
     pkg = inp.context_package
     assert pkg is not None
